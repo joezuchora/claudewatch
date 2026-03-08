@@ -1,0 +1,16 @@
+{
+  "name": "@claudewatch/statusline",
+  "version": "0.1.0",
+  "description": "ClaudeWatch terminal statusline binary for Claude Code",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@claudewatch/core": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun build --compile src/main.ts --outfile dist/claudewatch",
+    "build:windows": "bun build --compile --target=bun-windows-x64 src/main.ts --outfile dist/claudewatch.exe",
+    "build:linux": "bun build --compile --target=bun-linux-x64 src/main.ts --outfile dist/claudewatch",
+    "install-statusline": "bun run install/install.ts"
+  }
+}

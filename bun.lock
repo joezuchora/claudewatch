@@ -1,0 +1,34 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "claudewatch",
+    },
+    "packages/core": {
+      "name": "@claudewatch/core",
+      "version": "0.1.0",
+    },
+    "packages/statusline": {
+      "name": "@claudewatch/statusline",
+      "version": "0.1.0",
+      "dependencies": {
+        "@claudewatch/core": "workspace:*",
+      },
+    },
+    "packages/vscode": {
+      "name": "claudewatch-vscode",
+      "version": "0.1.0",
+      "dependencies": {
+        "@claudewatch/core": "workspace:*",
+      },
+    },
+  },
+  "packages": {
+    "@claudewatch/core": ["@claudewatch/core@workspace:packages/core"],
+
+    "@claudewatch/statusline": ["@claudewatch/statusline@workspace:packages/statusline"],
+
+    "claudewatch-vscode": ["claudewatch-vscode@workspace:packages/vscode"],
+  }
+}

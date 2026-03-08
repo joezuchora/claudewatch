@@ -1,0 +1,16 @@
+{
+  "name": "@claudewatch/core",
+  "version": "0.1.0",
+  "description": "Core usage tracking and formatting for ClaudeWatch",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-helpers": "./src/test-helpers.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "test": "bun test"
+  }
+}

@@ -1,0 +1,66 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+build/
+out/
+
+# Bun
+.bun/
+bun.lockb
+
+# TypeScript
+*.tsbuildinfo
+
+# VS Code extension packaging
+*.vsix
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+
+# local cache / temp
+.cache/
+tmp/
+temp/
+
+# ClaudeWatch local runtime/cache data
+.claudewatch/
+.claudewatch-cache/
+claudewatch-debug.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# editor files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# coverage / test artifacts
+coverage/
+.nyc_output/
+
+# binaries / packaged artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# local / personal files
+ClaudeWatch-Getting-Started.md
+.claude/settings.local.json
+icon.png
+prove-pipe.ts

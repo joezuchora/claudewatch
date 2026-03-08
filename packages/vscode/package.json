@@ -1,0 +1,56 @@
+{
+  "name": "claudewatch-vscode",
+  "displayName": "ClaudeWatch",
+  "description": "Shows Claude Code usage window data in the VS Code status bar",
+  "publisher": "claudewatch",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joezuchora/claudewatch"
+  },
+  "license": "MIT",
+  "icon": "claudewatch_256x256.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "dependencies": {
+    "@claudewatch/core": "workspace:*"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudewatch.refresh",
+        "title": "ClaudeWatch: Refresh Now"
+      },
+      {
+        "command": "claudewatch.openDashboard",
+        "title": "ClaudeWatch: Open Usage Dashboard"
+      }
+    ],
+    "configuration": {
+      "title": "ClaudeWatch",
+      "properties": {
+        "claudewatch.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 30
+        },
+        "claudewatch.warningThresholdPct": {
+          "type": "number",
+          "default": 70
+        },
+        "claudewatch.criticalThresholdPct": {
+          "type": "number",
+          "default": 90
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun build src/extension.ts --outdir dist --target node --format cjs --external vscode",
+    "package": "vsce package --no-dependencies"
+  }
+}
