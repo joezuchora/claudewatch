@@ -59,7 +59,9 @@ function createMockStatusBarItem() {
 let mockItem = createMockStatusBarItem();
 let configValues: Record<string, unknown> = {};
 
-mock.module('vscode', () => ({
+// Store mock as module-level object so we can reference it directly
+// (avoids issues with mock.module leaking across test files in CI)
+const vscodeMock = {
   StatusBarAlignment: { Right: 2 },
   ThemeColor: MockThemeColor,
   MarkdownString: MockMarkdownString,
@@ -74,10 +76,11 @@ mock.module('vscode', () => ({
       },
     })),
   },
-}));
+};
+
+mock.module('vscode', () => vscodeMock);
 
 const { StatusBarManager } = await import('./statusbar.js');
-const vscode = await import('vscode');
 
 // --- Helpers ---
 
@@ -94,7 +97,7 @@ describe('StatusBarManager', () => {
   beforeEach(() => {
     mockItem = createMockStatusBarItem();
     configValues = {};
-    (vscode.window.createStatusBarItem as ReturnType<typeof mock>).mockImplementation(
+    (vscodeMock.window.createStatusBarItem as ReturnType<typeof mock>).mockImplementation(
       () => mockItem,
     );
   });
@@ -102,7 +105,7 @@ describe('StatusBarManager', () => {
   describe('constructor', () => {
     test('creates item with Right alignment and priority 100', () => {
       new StatusBarManager();
-      expect(vscode.window.createStatusBarItem).toHaveBeenCalledWith(2, 100);
+      expect(vscodeMock.window.createStatusBarItem).toHaveBeenCalledWith(2, 100);
     });
 
     test('sets command to claudewatch.openDashboard', () => {
