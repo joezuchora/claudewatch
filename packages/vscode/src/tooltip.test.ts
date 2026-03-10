@@ -88,7 +88,7 @@ describe('buildTooltip', () => {
       freshness: { isStale: true, staleReason: 'malformedResponse' },
     });
     const md = buildTooltip('Degraded', snapshot);
-    expect(md.value).toContain('endpoint may have changed');
+    expect(md.value).toContain('endpoint may have been updated');
     expect(md.value).not.toContain('42%');
   });
 

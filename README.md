@@ -30,7 +30,28 @@ Claude Code doesn't show how much of your usage window you've consumed. ClaudeWa
 
 ### Terminal status line
 
-The installer builds the binary, copies it to `~/.claude/bin/`, and configures Claude Code to use it:
+#### Quick install (recommended)
+
+Download and install the latest release automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/joezuchora/claudewatch/main/packages/statusline/install/install.sh | bash
+```
+
+Or download manually from the [releases page](https://github.com/joezuchora/claudewatch/releases/latest):
+
+1. Download `claudewatch-linux-x64` (or `claudewatch-windows-x64.exe` on Windows)
+2. Copy it to `~/.claude/bin/claudewatch` and make it executable (`chmod +x`)
+3. Add to `~/.claude/settings.json`:
+   ```json
+   { "statusLine": { "type": "command", "command": "~/.claude/bin/claudewatch" } }
+   ```
+
+Restart Claude Code. You should see your usage in the status line.
+
+#### Build from source
+
+If you prefer to build from source:
 
 ```bash
 git clone https://github.com/joezuchora/claudewatch.git
@@ -39,13 +60,14 @@ bun install
 bun run install-statusline
 ```
 
-Restart Claude Code. You should see your usage in the status line.
-
 ### VS Code extension
 
-Build and install the `.vsix` manually (not yet on the Marketplace):
+Download the `.vsix` from the [releases page](https://github.com/joezuchora/claudewatch/releases/latest), then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the downloaded file.
+
+#### Build from source
 
 ```bash
+git clone https://github.com/joezuchora/claudewatch.git
 cd claudewatch
 bun install
 bun run --filter claudewatch-vscode build
@@ -54,6 +76,41 @@ npx @vscode/vsce package --no-dependencies
 ```
 
 Then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the generated `.vsix` file.
+
+## Building and testing locally
+
+Clone the repo and install dependencies:
+
+```bash
+git clone https://github.com/joezuchora/claudewatch.git
+cd claudewatch
+bun install
+```
+
+Run the full test suite:
+
+```bash
+bun test
+```
+
+Build individual packages:
+
+```bash
+bun run --filter @claudewatch/core build           # build core library
+bun run --filter @claudewatch/statusline build     # compile statusline binary
+bun run --filter claudewatch-vscode build          # build VS Code extension
+```
+
+Package the VS Code extension as a `.vsix`:
+
+```bash
+cd packages/vscode
+npx @vscode/vsce package --no-dependencies
+```
+
+After rebuilding the VS Code extension, reload the window to pick up changes: `Ctrl+Shift+P` > `Developer: Reload Window`. VS Code caches loaded extensions and won't detect updated builds automatically.
+
+Test files live next to their source files as `*.test.ts`. All tests use mocked HTTP responses and never hit real APIs.
 
 ## How it works
 
@@ -136,16 +193,6 @@ packages/
 ```
 
 All domain logic lives in `packages/core`. The statusline and VS Code packages are thin rendering layers.
-
-## Development
-
-```bash
-bun install                                        # install dependencies
-bun test                                           # run all tests (299 tests)
-bun run --filter @claudewatch/core build           # build core
-bun run --filter @claudewatch/statusline build     # compile statusline binary
-bun run --filter claudewatch-vscode build          # build VS Code extension
-```
 
 ## Known limitations
 
