@@ -77,6 +77,8 @@ npx @vscode/vsce package --no-dependencies
 
 Then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the generated `.vsix` file.
 
+> **Note:** You must run `vsce package` from the `packages/vscode` directory, not the repo root. Running it from the root will fail with `Manifest missing field: engines` because the root `package.json` is not a VS Code extension manifest.
+
 ## How it works
 
 ```
