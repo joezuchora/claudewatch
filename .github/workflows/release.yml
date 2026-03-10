@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VERSION: ""
+
 jobs:
   build:
     strategy:
@@ -32,6 +35,24 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Sync package versions
+        shell: bash
+        run: |
+          for pkg in packages/core packages/statusline packages/vscode; do
+            cd "$GITHUB_WORKSPACE/$pkg"
+            bun -e "
+              const pkg = await Bun.file('package.json').json();
+              pkg.version = '${{ env.VERSION }}';
+              await Bun.write('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
+
       - run: bun install
 
       - name: Build statusline binary
@@ -51,6 +72,22 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Sync package versions
+        run: |
+          for pkg in packages/core packages/statusline packages/vscode; do
+            cd "$GITHUB_WORKSPACE/$pkg"
+            bun -e "
+              const pkg = await Bun.file('package.json').json();
+              pkg.version = '${{ env.VERSION }}';
+              await Bun.write('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+          done
 
       - run: bun install
 
