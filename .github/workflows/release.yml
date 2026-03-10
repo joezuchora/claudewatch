@@ -58,7 +58,7 @@ jobs:
       - name: Build statusline binary
         run: bun run --filter @claudewatch/statusline ${{ matrix.script }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.binary }}
@@ -101,7 +101,7 @@ jobs:
         working-directory: packages/vscode
         run: npx @vscode/vsce package --no-dependencies
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vscode-extension
           path: packages/vscode/*.vsix
