@@ -2,7 +2,8 @@ import { describe, expect, test, mock, beforeEach } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
 import type { RuntimeState, UsageSnapshot } from '@claudewatch/core';
 
-// Mock vscode.MarkdownString
+// Mock vscode module — include all properties needed by any file that imports vscode,
+// since bun's mock.module leaks globally across test files.
 class MockMarkdownString {
   value = '';
   appendText(text: string): this {
@@ -11,9 +12,31 @@ class MockMarkdownString {
   }
 }
 
-// Must mock before importing tooltip
+class MockThemeColor {
+  constructor(public id: string) {}
+}
+
 mock.module('vscode', () => ({
   MarkdownString: MockMarkdownString,
+  ThemeColor: MockThemeColor,
+  StatusBarAlignment: { Right: 2 },
+  window: {
+    createStatusBarItem: mock(() => ({
+      text: '',
+      tooltip: undefined,
+      command: undefined,
+      name: undefined,
+      color: undefined,
+      backgroundColor: undefined,
+      show: mock(() => {}),
+      dispose: mock(() => {}),
+    })),
+  },
+  workspace: {
+    getConfiguration: mock(() => ({
+      get: <T>(_key: string, defaultValue: T): T => defaultValue,
+    })),
+  },
 }));
 
 const { buildTooltip } = await import('./tooltip.js');

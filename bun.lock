@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "claudewatch",
+      "devDependencies": {
+        "bun-types": "^1.3.10",
+      },
     },
     "packages/core": {
       "name": "@claudewatch/core",
@@ -22,6 +25,9 @@
       "dependencies": {
         "@claudewatch/core": "workspace:*",
       },
+      "devDependencies": {
+        "@types/vscode": "^1.110.0",
+      },
     },
   },
   "packages": {
@@ -29,6 +35,14 @@
 
     "@claudewatch/statusline": ["@claudewatch/statusline@workspace:packages/statusline"],
 
+    "@types/node": ["@types/node@25.4.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-9wLpoeWuBlcbBpOY3XmzSTG3oscB6xjBEEtn+pYXTfhyXhIxC5FsBer2KTopBlvKEiW9l13po9fq+SJY/5lkhw=="],
+
+    "@types/vscode": ["@types/vscode@1.110.0", "", {}, "sha512-AGuxUEpU4F4mfuQjxPPaQVyuOMhs+VT/xRok1jiHVBubHK7lBRvCuOMZG0LKUwxncrPorJ5qq/uil3IdZBd5lA=="],
+
+    "bun-types": ["bun-types@1.3.10", "", { "dependencies": { "@types/node": "*" } }, "sha512-tcpfCCl6XWo6nCVnpcVrxQ+9AYN1iqMIzgrSKYMB/fjLtV2eyAVEg7AxQJuCq/26R6HpKWykQXuSOq/21RYcbg=="],
+
     "claudewatch-vscode": ["claudewatch-vscode@workspace:packages/vscode"],
+
+    "undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
   }
 }

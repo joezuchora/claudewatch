@@ -194,7 +194,7 @@ describe('getTerminalWidth', () => {
 describe('parseSessionInfo', () => {
   test('valid JSON object returns parsed object', () => {
     const result = parseSessionInfo('{"foo":"bar"}');
-    expect(result).toEqual({ foo: 'bar' });
+    expect(result).toEqual({ foo: 'bar' } as never);
   });
 
   test('empty string returns null', () => {
@@ -228,13 +228,13 @@ describe('parseSessionInfo', () => {
   test('valid session with model/workspace fields returns correctly', () => {
     const input = JSON.stringify({ model: 'claude-3', workspace: '/home/user/project' });
     const result = parseSessionInfo(input);
-    expect(result).toEqual({ model: 'claude-3', workspace: '/home/user/project' });
+    expect(result).toEqual({ model: 'claude-3', workspace: '/home/user/project' } as never);
   });
 
   test('nested valid object returns as SessionInfo', () => {
     const input = JSON.stringify({ outer: { inner: { deep: true } }, list: [1, 2] });
     const result = parseSessionInfo(input);
-    expect(result).toEqual({ outer: { inner: { deep: true } }, list: [1, 2] });
+    expect(result).toEqual({ outer: { inner: { deep: true } }, list: [1, 2] } as never);
   });
 });
 

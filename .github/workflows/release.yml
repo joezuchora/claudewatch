@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            script: build:linux
+            artifact: claudewatch-linux-x64
+            binary: packages/statusline/dist/claudewatch
+          - os: windows-latest
+            target: windows
+            script: build:windows
+            artifact: claudewatch-windows-x64.exe
+            binary: packages/statusline/dist/claudewatch.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Build statusline binary
+        run: bun run --filter @claudewatch/statusline ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+
+  package-vscode:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+
+      - name: Build core
+        run: bun run --filter @claudewatch/core build
+
+      - name: Build VS Code extension
+        run: bun run --filter claudewatch-vscode build
+
+      - name: Package VSIX
+        working-directory: packages/vscode
+        run: npx @vscode/vsce package --no-dependencies
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: packages/vscode/*.vsix
+
+  release:
+    needs: [build, package-vscode]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir release
+          cp artifacts/claudewatch-linux-x64/claudewatch release/claudewatch-linux-x64
+          cp artifacts/claudewatch-windows-x64.exe/claudewatch.exe release/claudewatch-windows-x64.exe
+          cp artifacts/vscode-extension/*.vsix release/
+          cd release
+          sha256sum * > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*

@@ -4,5 +4,8 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "install-statusline": "bun run --filter @claudewatch/statusline install-statusline"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.10"
   }
 }

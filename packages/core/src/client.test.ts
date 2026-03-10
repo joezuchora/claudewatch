@@ -4,6 +4,11 @@ import { fetchUsage } from './client.js';
 // Save original fetch
 const originalFetch = globalThis.fetch;
 
+/** Helper to mock globalThis.fetch with correct typing */
+function mockFetch(impl: (...args: unknown[]) => Promise<Response>): void {
+  globalThis.fetch = mock(impl) as unknown as typeof fetch;
+}
+
 describe('client', () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -15,7 +20,7 @@ describe('client', () => {
       seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
     };
 
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(mockData), { status: 200 }));
+    mockFetch(async () => new Response(JSON.stringify(mockData), { status: 200 }));
 
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(true);
@@ -26,7 +31,7 @@ describe('client', () => {
   });
 
   test('returns authInvalid on 401', async () => {
-    globalThis.fetch = mock(async () => new Response('Unauthorized', { status: 401 }));
+    mockFetch(async () => new Response('Unauthorized', { status: 401 }));
 
     const result = await fetchUsage('bad-token');
     expect(result.ok).toBe(false);
@@ -37,7 +42,7 @@ describe('client', () => {
   });
 
   test('returns serviceUnavailable on 429', async () => {
-    globalThis.fetch = mock(async () => new Response('Too Many Requests', { status: 429 }));
+    mockFetch(async () => new Response('Too Many Requests', { status: 429 }));
 
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
@@ -47,7 +52,7 @@ describe('client', () => {
   });
 
   test('returns serviceUnavailable on 500', async () => {
-    globalThis.fetch = mock(async () => new Response('Server Error', { status: 500 }));
+    mockFetch(async () => new Response('Server Error', { status: 500 }));
 
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
@@ -57,7 +62,7 @@ describe('client', () => {
   });
 
   test('returns serviceUnavailable on network error', async () => {
-    globalThis.fetch = mock(async () => { throw new Error('DNS resolution failed'); });
+    mockFetch(async () => { throw new Error('DNS resolution failed'); });
 
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
@@ -69,7 +74,7 @@ describe('client', () => {
 
   test('does not retry 401 errors', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       return new Response('Unauthorized', { status: 401 });
     });
@@ -80,8 +85,8 @@ describe('client', () => {
 
   test('sends correct headers', async () => {
     let capturedHeaders: Headers | null = null;
-    globalThis.fetch = mock(async (url: string, init?: RequestInit) => {
-      capturedHeaders = new Headers(init?.headers);
+    mockFetch(async (_url: unknown, init?: unknown) => {
+      capturedHeaders = new Headers((init as RequestInit)?.headers);
       return new Response(JSON.stringify({}), { status: 200 });
     });
 

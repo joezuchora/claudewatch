@@ -52,5 +52,8 @@
   "scripts": {
     "build": "bun build src/extension.ts --outdir dist --target node --format cjs --external vscode",
     "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.110.0"
   }
 }
