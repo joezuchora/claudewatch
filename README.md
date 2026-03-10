@@ -1,5 +1,7 @@
 # ClaudeWatch
 
+[![GitHub Release](https://img.shields.io/github/v/release/joezuchora/claudewatch)](https://github.com/joezuchora/claudewatch/releases/latest)
+
 A companion tool for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that shows your account usage window data directly in your terminal and VS Code status bar.
 
 ![ClaudeWatch Hero](assets/claudewatch_hero_banner.png)
