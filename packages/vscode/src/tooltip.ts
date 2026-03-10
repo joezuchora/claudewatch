@@ -17,8 +17,12 @@ const ERROR_DETAILS: Record<string, { message: string; remediation: string }> = 
     remediation: 'The undocumented API endpoint may have been updated. Check for a newer version of ClaudeWatch.',
   },
   HardFailure: {
-    message: 'An unexpected error occurred.',
+    message: 'Usage data could not be retrieved.',
     remediation: 'The undocumented API endpoint may have changed. Check for a newer version of ClaudeWatch.',
+  },
+  Stale: {
+    message: 'Showing last known usage data.',
+    remediation: 'Latest refresh failed. Data will update on the next successful poll.',
   },
   Initializing: {
     message: 'Loading usage data...',
