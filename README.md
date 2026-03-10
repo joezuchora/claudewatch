@@ -108,6 +108,8 @@ cd packages/vscode
 npx @vscode/vsce package --no-dependencies
 ```
 
+After rebuilding the VS Code extension, reload the window to pick up changes: `Ctrl+Shift+P` > `Developer: Reload Window`. VS Code caches loaded extensions and won't detect updated builds automatically.
+
 Test files live next to their source files as `*.test.ts`. All tests use mocked HTTP responses and never hit real APIs.
 
 ## How it works
