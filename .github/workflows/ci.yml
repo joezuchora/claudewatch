@@ -22,8 +22,14 @@ jobs:
       - name: Type check
         run: bun run tsc --noEmit
 
-      - name: Run tests
-        run: bun test
+      - name: Test core
+        run: bun test packages/core/
+
+      - name: Test statusline
+        run: bun test packages/statusline/
+
+      - name: Test vscode
+        run: bun test packages/vscode/
 
       - name: Build core
         run: bun run --filter @claudewatch/core build
