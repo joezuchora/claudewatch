@@ -77,7 +77,38 @@ npx @vscode/vsce package --no-dependencies
 
 Then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the generated `.vsix` file.
 
-> **Note:** You must run `vsce package` from the `packages/vscode` directory, not the repo root. Running it from the root will fail with `Manifest missing field: engines` because the root `package.json` is not a VS Code extension manifest.
+## Building and testing locally
+
+Clone the repo and install dependencies:
+
+```bash
+git clone https://github.com/joezuchora/claudewatch.git
+cd claudewatch
+bun install
+```
+
+Run the full test suite:
+
+```bash
+bun test
+```
+
+Build individual packages:
+
+```bash
+bun run --filter @claudewatch/core build           # build core library
+bun run --filter @claudewatch/statusline build     # compile statusline binary
+bun run --filter claudewatch-vscode build          # build VS Code extension
+```
+
+Package the VS Code extension as a `.vsix`:
+
+```bash
+cd packages/vscode
+npx @vscode/vsce package --no-dependencies
+```
+
+Test files live next to their source files as `*.test.ts`. All tests use mocked HTTP responses and never hit real APIs.
 
 ## How it works
 
@@ -160,16 +191,6 @@ packages/
 ```
 
 All domain logic lives in `packages/core`. The statusline and VS Code packages are thin rendering layers.
-
-## Development
-
-```bash
-bun install                                        # install dependencies
-bun test                                           # run all tests (299 tests)
-bun run --filter @claudewatch/core build           # build core
-bun run --filter @claudewatch/statusline build     # compile statusline binary
-bun run --filter claudewatch-vscode build          # build VS Code extension
-```
 
 ## Known limitations
 
