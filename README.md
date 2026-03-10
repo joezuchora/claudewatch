@@ -30,7 +30,28 @@ Claude Code doesn't show how much of your usage window you've consumed. ClaudeWa
 
 ### Terminal status line
 
-The installer builds the binary, copies it to `~/.claude/bin/`, and configures Claude Code to use it:
+#### Quick install (recommended)
+
+Download and install the latest release automatically:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/joezuchora/claudewatch/main/packages/statusline/install/install.sh | bash
+```
+
+Or download manually from the [releases page](https://github.com/joezuchora/claudewatch/releases/latest):
+
+1. Download `claudewatch-linux-x64` (or `claudewatch-windows-x64.exe` on Windows)
+2. Copy it to `~/.claude/bin/claudewatch` and make it executable (`chmod +x`)
+3. Add to `~/.claude/settings.json`:
+   ```json
+   { "statusLine": { "type": "command", "command": "~/.claude/bin/claudewatch" } }
+   ```
+
+Restart Claude Code. You should see your usage in the status line.
+
+#### Build from source
+
+If you prefer to build from source:
 
 ```bash
 git clone https://github.com/joezuchora/claudewatch.git
@@ -39,13 +60,14 @@ bun install
 bun run install-statusline
 ```
 
-Restart Claude Code. You should see your usage in the status line.
-
 ### VS Code extension
 
-Build and install the `.vsix` manually (not yet on the Marketplace):
+Download the `.vsix` from the [releases page](https://github.com/joezuchora/claudewatch/releases/latest), then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the downloaded file.
+
+#### Build from source
 
 ```bash
+git clone https://github.com/joezuchora/claudewatch.git
 cd claudewatch
 bun install
 bun run --filter claudewatch-vscode build
