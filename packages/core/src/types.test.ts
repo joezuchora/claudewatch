@@ -46,6 +46,8 @@ describe('types', () => {
       },
       cooldownUntil: null,
       lastErrorClass: null,
+      lastHttpStatus: null,
+      lastErrorMessage: null,
     };
     expect(envelope.version).toBe(1);
   });

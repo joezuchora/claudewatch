@@ -18,6 +18,11 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+/** Helper to mock globalThis.fetch with correct typing */
+function mockFetch(impl: (...args: unknown[]) => Promise<Response>): void {
+  globalThis.fetch = mock(impl) as unknown as typeof fetch;
+}
+
 describe('contract: successful response with both windows', () => {
   const raw = {
     five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00+00:00' },
@@ -109,7 +114,7 @@ describe('contract: response with unknown extra fields (forward compatibility)',
 
 describe('contract: 401 response', () => {
   test('fetchUsage returns authInvalid', async () => {
-    globalThis.fetch = mock(async () => new Response('Unauthorized', { status: 401 }));
+    mockFetch(async () => new Response('Unauthorized', { status: 401 }));
     const result = await fetchUsage('bad-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -120,7 +125,7 @@ describe('contract: 401 response', () => {
 
   test('does not retry 401', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       return new Response('Unauthorized', { status: 401 });
     });
@@ -131,7 +136,7 @@ describe('contract: 401 response', () => {
 
 describe('contract: 429 response', () => {
   test('fetchUsage returns serviceUnavailable after retries', async () => {
-    globalThis.fetch = mock(async () => new Response('Too Many Requests', { status: 429 }));
+    mockFetch(async () => new Response('Too Many Requests', { status: 429 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -142,7 +147,7 @@ describe('contract: 429 response', () => {
 
   test('does not retry 429 (preserves rate limit budget)', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       return new Response('Too Many Requests', { status: 429 });
     });
@@ -154,7 +159,7 @@ describe('contract: 429 response', () => {
 
 describe('contract: 5xx response', () => {
   test('500 returns serviceUnavailable', async () => {
-    globalThis.fetch = mock(async () => new Response('Internal Server Error', { status: 500 }));
+    mockFetch(async () => new Response('Internal Server Error', { status: 500 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -163,7 +168,7 @@ describe('contract: 5xx response', () => {
   });
 
   test('502 returns serviceUnavailable', async () => {
-    globalThis.fetch = mock(async () => new Response('Bad Gateway', { status: 502 }));
+    mockFetch(async () => new Response('Bad Gateway', { status: 502 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -172,7 +177,7 @@ describe('contract: 5xx response', () => {
   });
 
   test('503 returns serviceUnavailable', async () => {
-    globalThis.fetch = mock(async () => new Response('Service Unavailable', { status: 503 }));
+    mockFetch(async () => new Response('Service Unavailable', { status: 503 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -182,7 +187,7 @@ describe('contract: 5xx response', () => {
 
   test('retries 5xx up to MAX_RETRIES', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       return new Response('Server Error', { status: 500 });
     });
@@ -194,7 +199,7 @@ describe('contract: 5xx response', () => {
 
 describe('contract: malformed JSON response', () => {
   test('non-JSON response body causes network error on json()', async () => {
-    globalThis.fetch = mock(async () => new Response('not json at all', {
+    mockFetch(async () => new Response('not json at all', {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
@@ -264,7 +269,7 @@ describe('contract: valid JSON with missing required fields', () => {
 
 describe('contract: network timeout', () => {
   test('aborted fetch returns serviceUnavailable', async () => {
-    globalThis.fetch = mock(async (_url: string, init?: RequestInit) => {
+    mockFetch(async () => {
       // Simulate abort
       throw new DOMException('The operation was aborted', 'AbortError');
     });
@@ -279,7 +284,7 @@ describe('contract: network timeout', () => {
 
 describe('contract: DNS resolution failure', () => {
   test('DNS failure returns serviceUnavailable', async () => {
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       throw new TypeError('fetch failed: DNS resolution failed');
     });
     const result = await fetchUsage('test-token');
@@ -293,7 +298,7 @@ describe('contract: DNS resolution failure', () => {
 
 describe('contract: unexpected HTTP status codes', () => {
   test('403 returns unexpectedFailure', async () => {
-    globalThis.fetch = mock(async () => new Response('Forbidden', { status: 403 }));
+    mockFetch(async () => new Response('Forbidden', { status: 403 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -303,7 +308,7 @@ describe('contract: unexpected HTTP status codes', () => {
   });
 
   test('404 returns unexpectedFailure', async () => {
-    globalThis.fetch = mock(async () => new Response('Not Found', { status: 404 }));
+    mockFetch(async () => new Response('Not Found', { status: 404 }));
     const result = await fetchUsage('test-token');
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -399,7 +404,7 @@ describe('contract: high utilization threshold scenarios', () => {
 describe('contract: retry behavior', () => {
   test('succeeds on second attempt after 5xx', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       if (callCount === 1) {
         return new Response('Server Error', { status: 500 });
@@ -416,7 +421,7 @@ describe('contract: retry behavior', () => {
 
   test('succeeds on second attempt after one 500', async () => {
     let callCount = 0;
-    globalThis.fetch = mock(async () => {
+    mockFetch(async () => {
       callCount++;
       if (callCount <= 1) {
         return new Response('Server Error', { status: 500 });
