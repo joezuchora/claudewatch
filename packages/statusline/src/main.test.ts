@@ -569,5 +569,45 @@ describe('main', () => {
       expect(mockEnterCooldown).toHaveBeenCalled();
       expect(mockWriteCache).toHaveBeenCalled();
     });
+
+    test('cache with null utilization enters cooldown when shouldCooldown is true', async () => {
+      // Cache exists but has null primaryUtilizationPct (no stale data to display)
+      const envelope = makeTestEnvelope({
+        snapshot: makeTestSnapshot({
+          display: { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null },
+          fiveHour: { utilizationPct: null, resetsAt: null },
+          sevenDay: { utilizationPct: null, resetsAt: null },
+        }),
+      });
+      mockReadCache.mockReturnValue(envelope);
+      mockFetchUsage.mockResolvedValue({ ok: false, status: 503, failureClass: 'serviceUnavailable', message: 'down' });
+      mockShouldCooldown.mockReturnValue(true);
+
+      const { exitCode } = await runMain([]);
+      expect(exitCode).toBe(1);
+      expect(mockEnterCooldown).toHaveBeenCalledWith(
+        envelope,
+        'serviceUnavailable',
+        503,
+        'down',
+      );
+      expect(mockWriteCache).toHaveBeenCalled();
+    });
+
+    test('cooldown already-stale cache does not re-write when already marked fetchFailed', async () => {
+      // Cache snapshot already stale with fetchFailed reason - should skip re-write
+      const staleSnapshot = makeTestSnapshot({
+        freshness: { isStale: true, staleReason: 'fetchFailed' },
+      });
+      const envelope = makeTestEnvelope({ snapshot: staleSnapshot });
+      mockReadCache.mockReturnValue(envelope);
+      mockIsCacheFresh.mockReturnValue(false);
+      mockIsInCooldown.mockReturnValue(true);
+
+      const { exitCode } = await runMain([]);
+      expect(exitCode).toBe(0);
+      // Should NOT re-write cache since it's already stale with fetchFailed
+      expect(mockWriteCache).not.toHaveBeenCalled();
+    });
   });
 });
