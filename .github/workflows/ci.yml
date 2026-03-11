@@ -34,5 +34,8 @@ jobs:
       - name: Build core
         run: bun run --filter @claudewatch/core build
 
+      - name: Build statusline
+        run: bun run --filter @claudewatch/statusline build
+
       - name: Build VS Code extension
         run: bun run --filter claudewatch-vscode build

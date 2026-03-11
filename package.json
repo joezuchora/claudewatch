@@ -6,6 +6,7 @@
     "install-statusline": "bun run --filter @claudewatch/statusline install-statusline"
   },
   "devDependencies": {
-    "bun-types": "^1.3.10"
+    "bun-types": "^1.3.10",
+    "typescript": "^5.7.0"
   }
 }

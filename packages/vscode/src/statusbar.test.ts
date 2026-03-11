@@ -288,6 +288,27 @@ describe('StatusBarManager', () => {
     });
   });
 
+  describe('updateThresholds', () => {
+    test('reads updated thresholds from configuration', () => {
+      const mgr = new StatusBarManager();
+      // Initially default thresholds (70/90)
+      mgr.update(makeSnapshot({ display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 60, primaryResetsAt: '2026-03-07T17:00:00.000Z' } }));
+      // 60% is normal with defaults
+      expect(mockItem.color).toBeUndefined();
+
+      // Now change config to lower thresholds
+      configValues = {
+        warningThresholdPct: 50,
+        criticalThresholdPct: 80,
+      };
+      mgr.updateThresholds();
+
+      // Now 60% should be warning with new thresholds
+      mgr.update(makeSnapshot({ display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 60, primaryResetsAt: '2026-03-07T17:00:00.000Z' } }));
+      expect((mockItem.color as MockThemeColor).id).toBe('statusBarItem.warningForeground');
+    });
+  });
+
   describe('dispose', () => {
     test('calls item.dispose()', () => {
       const mgr = new StatusBarManager();

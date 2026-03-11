@@ -36,8 +36,33 @@ The complete specification is in SPEC.md. Read it before making architectural de
 - packages/statusline and packages/vscode must not contain domain logic.
 - When in doubt about a design decision, check SPEC.md.
 
+## Build & Bundling
+
+- This project uses TypeScript with CommonJS module format for VS Code extensions. Always bundle as CJS (not ESM) when targeting VS Code extension host.
+
 ## Testing
 
 - `bun test` for unit tests
 - Test files live next to source files as `*.test.ts`
 - Mock HTTP responses for contract tests — never hit the real API in tests
+- Always run tests after making changes. Use `bun test` to verify. Ensure test isolation — avoid mock contamination across test files.
+
+## VS Code Extension
+
+- This is a monorepo with a CLI component and a VS Code extension. When packaging the VS Code extension, verify the .vsix includes all required assets (README, etc.) before considering the task done.
+
+## Pre-Commit Verification Pipeline
+
+Before committing any changes, run the full pipeline and fix any issues:
+
+1. `bun run typecheck` — fix all type errors
+2. `bun run lint` — fix all lint issues
+3. `bun test` — ensure all tests pass
+4. `bun run build` — verify the build succeeds
+5. If this is a VS Code extension change, verify the output is CommonJS-compatible by checking the bundle for `require`/`module.exports` patterns
+6. Only after all steps pass, create the commit. If any step fails, fix the issue and re-run the full pipeline.
+7. Show a summary of what was fixed.
+
+## Git Workflow
+
+- When working with git, always confirm the current branch before committing. Do not assume work should go on a feature branch — ask if unsure.
