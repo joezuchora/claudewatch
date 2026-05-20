@@ -18,10 +18,11 @@ function formatEnterprisePct(pct: number): string {
  */
 function minorUnitDigits(currency: string): number {
   try {
-    return new Intl.NumberFormat('en-US', {
+    const resolved = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency,
     }).resolvedOptions().maximumFractionDigits;
+    return resolved ?? 2;
   } catch {
     return 2;
   }

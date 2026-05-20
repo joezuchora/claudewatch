@@ -20,7 +20,8 @@ export async function showDiagnostics(): Promise<void> {
       formatted = 'No cache or snapshot found.';
     }
   } catch (err) {
-    formatted = 'Error reading cache: ' + (err?.message || err);
+    const message = err instanceof Error ? err.message : String(err);
+    formatted = 'Error reading cache: ' + message;
   }
   const msg = [
     '**ClaudeWatch Diagnostics**',
