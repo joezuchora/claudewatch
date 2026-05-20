@@ -1,5 +1,101 @@
-import type { UsageSnapshot, SessionInfo } from './types.js';
+import type { UsageSnapshot, SessionInfo, EnterpriseUsage } from './types.js';
 import { formatLocalTime, formatLocalDateTime } from './time.js';
+
+/**
+ * Format an enterprise utilization percentage. The monthly pool typically
+ * spans many orders of magnitude (e.g., 0.0001% to 100%), so we keep two
+ * decimal places below 1% to avoid rounding micro-usage to "0%".
+ */
+function formatEnterprisePct(pct: number): string {
+  if (pct >= 10) return `${Math.round(pct)}%`;
+  if (pct >= 1) return `${pct.toFixed(1)}%`;
+  return `${pct.toFixed(2)}%`;
+}
+
+/**
+ * The usage API reports monetary values in currency minor units (e.g., cents for USD).
+ * Convert to major units before display so portal and local output match.
+ */
+function minorUnitDigits(currency: string): number {
+  try {
+    const resolved = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+    }).resolvedOptions().maximumFractionDigits;
+    return resolved ?? 2;
+  } catch {
+    return 2;
+  }
+}
+
+function toMajorUnits(amountMinor: number, currency: string): number {
+  const digits = minorUnitDigits(currency);
+  return amountMinor / (10 ** digits);
+}
+
+function currencySymbol(currency: string): string {
+  try {
+    const parts = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      currencyDisplay: 'narrowSymbol',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).formatToParts(0);
+    return parts.find((p) => p.type === 'currency')?.value ?? `${currency} `;
+  } catch {
+    return `${currency} `;
+  }
+}
+
+function formatMoneyCompact(amountMinor: number, currency: string): string {
+  const amount = toMajorUnits(amountMinor, currency);
+  const symbol = currencySymbol(currency);
+  const abs = Math.abs(amount);
+
+  if (abs >= 1_000_000) return `${symbol}${(amount / 1_000_000).toFixed(1)}m`;
+  if (abs >= 1_000) return `${symbol}${Math.round(amount / 1_000)}k`;
+  if (abs >= 100) return `${symbol}${Math.round(amount)}`;
+  return `${symbol}${amount.toFixed(2)}`;
+}
+
+function formatMoneyFull(amountMinor: number, currency: string): string {
+  const amount = toMajorUnits(amountMinor, currency);
+  const digits = minorUnitDigits(currency);
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: digits,
+    }).format(amount);
+  } catch {
+    return `${currency} ${amount.toFixed(digits)}`;
+  }
+}
+
+function formatEnterpriseStatusLine(
+  snapshot: UsageSnapshot,
+  enterprise: EnterpriseUsage,
+  width: number,
+): string {
+  const staleLabel = snapshot.freshness.isStale ? ' stale' : '';
+  const pct = formatEnterprisePct(enterprise.utilizationPct);
+  const primary = `⊙ E ${pct}${staleLabel}`;
+
+  if (width < 60) {
+    return primary;
+  }
+
+  const used = formatMoneyCompact(enterprise.usedCredits, enterprise.currency);
+  const limit = formatMoneyCompact(enterprise.monthlyLimitCredits, enterprise.currency);
+  const full = `${primary} · ${used} / ${limit}`;
+
+  if (full.length <= width) {
+    return full;
+  }
+  return primary;
+}
 
 // ANSI color helpers
 const c = {
@@ -28,6 +124,10 @@ const c = {
  * Error:                 ⊙ error
  */
 export function formatStatusLine(snapshot: UsageSnapshot, width: number = 80): string {
+  if (snapshot.tier === 'enterprise' && snapshot.enterprise) {
+    return formatEnterpriseStatusLine(snapshot, snapshot.enterprise, width);
+  }
+
   const { display, fiveHour, sevenDay } = snapshot;
 
   if (display.primaryUtilizationPct === null) {
@@ -156,23 +256,35 @@ export function formatRichStatusLine(
   }
 
   // --- Line 2: Usage bars ---
-  const { fiveHour, sevenDay } = snapshot;
-  const usageParts: string[] = [];
+  const { fiveHour, sevenDay, enterprise, tier } = snapshot;
 
-  if (fiveHour.utilizationPct !== null) {
-    const pct = Math.round(fiveHour.utilizationPct);
-    usageParts.push(`current: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
-  }
-
-  if (sevenDay.utilizationPct !== null) {
-    const pct = Math.round(sevenDay.utilizationPct);
-    usageParts.push(`weekly: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
-  }
-
-  if (usageParts.length > 0) {
-    lines.push(usageParts.join(` ${c.dim}|${c.reset} `));
+  if (tier === 'enterprise' && enterprise) {
+    const pct = enterprise.utilizationPct;
+    const pctText = formatEnterprisePct(pct);
+    const bar = progressBar(Math.min(100, Math.round(pct)));
+    const used = formatMoneyCompact(enterprise.usedCredits, enterprise.currency);
+    const limit = formatMoneyCompact(enterprise.monthlyLimitCredits, enterprise.currency);
+    const label = `${c.magenta}Enterprise${c.reset}`;
+    const value = `${pctColor(pct)}${pctText}${c.reset} ${c.dim}(${used} / ${limit})${c.reset}`;
+    lines.push(`${label}: ${bar} ${value}`);
   } else {
-    lines.push(`${c.red}⊙ no usage data${c.reset}`);
+    const usageParts: string[] = [];
+
+    if (fiveHour.utilizationPct !== null) {
+      const pct = Math.round(fiveHour.utilizationPct);
+      usageParts.push(`current: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
+    }
+
+    if (sevenDay.utilizationPct !== null) {
+      const pct = Math.round(sevenDay.utilizationPct);
+      usageParts.push(`weekly: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
+    }
+
+    if (usageParts.length > 0) {
+      lines.push(usageParts.join(` ${c.dim}|${c.reset} `));
+    } else {
+      lines.push(`${c.red}⊙ no usage data${c.reset}`);
+    }
   }
 
   // --- Line 3: Model + reset times ---
@@ -207,22 +319,37 @@ export interface LastErrorInfo {
 }
 
 export function formatTooltip(snapshot: UsageSnapshot, lastError?: LastErrorInfo | null): string {
-  const lines: string[] = ['ClaudeWatch', '', 'Usage Windows'];
+  const lines: string[] = ['ClaudeWatch', ''];
 
-  if (snapshot.fiveHour.utilizationPct !== null) {
-    let line = `Current (5hr): ${Math.round(snapshot.fiveHour.utilizationPct)}%`;
-    if (snapshot.fiveHour.resetsAt) {
-      line += ` — resets ${formatLocalDateTime(snapshot.fiveHour.resetsAt)}`;
+  if (snapshot.tier === 'enterprise' && snapshot.enterprise) {
+    const e = snapshot.enterprise;
+    lines.push('Plan: Enterprise');
+    const pctText = formatEnterprisePct(e.utilizationPct);
+    const used = formatMoneyFull(e.usedCredits, e.currency);
+    const limit = formatMoneyFull(e.monthlyLimitCredits, e.currency);
+    lines.push(`Monthly usage: ${pctText} (${used} of ${limit})`);
+    if (!e.isEnabled) {
+      const reason = e.disabledReason ? ` — ${e.disabledReason}` : '';
+      lines.push(`Extra usage disabled${reason}`);
     }
-    lines.push(line);
-  }
+  } else {
+    lines.push('Usage Windows');
 
-  if (snapshot.sevenDay.utilizationPct !== null) {
-    let line = `Weekly (7d): ${Math.round(snapshot.sevenDay.utilizationPct)}%`;
-    if (snapshot.sevenDay.resetsAt) {
-      line += ` — resets ${formatLocalDateTime(snapshot.sevenDay.resetsAt)}`;
+    if (snapshot.fiveHour.utilizationPct !== null) {
+      let line = `Current (5hr): ${Math.round(snapshot.fiveHour.utilizationPct)}%`;
+      if (snapshot.fiveHour.resetsAt) {
+        line += ` — resets ${formatLocalDateTime(snapshot.fiveHour.resetsAt)}`;
+      }
+      lines.push(line);
     }
-    lines.push(line);
+
+    if (snapshot.sevenDay.utilizationPct !== null) {
+      let line = `Weekly (7d): ${Math.round(snapshot.sevenDay.utilizationPct)}%`;
+      if (snapshot.sevenDay.resetsAt) {
+        line += ` — resets ${formatLocalDateTime(snapshot.sevenDay.resetsAt)}`;
+      }
+      lines.push(line);
+    }
   }
 
   lines.push('', 'Status');

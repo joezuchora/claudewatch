@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { classify } from './state.js';
-import { makeTestSnapshot as makeSnapshot } from './test-helpers.js';
+import { makeTestSnapshot as makeSnapshot, makeTestEnterpriseSnapshot } from './test-helpers.js';
 
 describe('classify', () => {
   test('Healthy: fresh data with both valid windows', () => {
@@ -100,5 +100,34 @@ describe('classify', () => {
       freshness: { isStale: true, staleReason: 'sourceUnavailable' },
     });
     expect(classify(snapshot)).toBe('HardFailure');
+  });
+
+  test('Enterprise: fresh enterprise snapshot classifies as Enterprise', () => {
+    const snapshot = makeTestEnterpriseSnapshot();
+    expect(classify(snapshot)).toBe('Enterprise');
+  });
+
+  test('Enterprise: stale enterprise (fetchFailed) classifies as Stale, not Enterprise', () => {
+    const snapshot = makeTestEnterpriseSnapshot({
+      freshness: { isStale: true, staleReason: 'fetchFailed' },
+    });
+    expect(classify(snapshot)).toBe('Stale');
+  });
+
+  test('Enterprise: malformed-after-enterprise classifies as Degraded', () => {
+    const snapshot = makeTestEnterpriseSnapshot({
+      freshness: { isStale: true, staleReason: 'malformedResponse' },
+    });
+    expect(classify(snapshot)).toBe('Degraded');
+  });
+
+  test('Enterprise: AuthInvalid still takes priority over enterprise tier', () => {
+    const snapshot = makeTestEnterpriseSnapshot({ authState: 'invalid' });
+    expect(classify(snapshot)).toBe('AuthInvalid');
+  });
+
+  test('Enterprise: NotConfigured still takes priority over enterprise tier', () => {
+    const snapshot = makeTestEnterpriseSnapshot({ authState: 'missing' });
+    expect(classify(snapshot)).toBe('NotConfigured');
   });
 });

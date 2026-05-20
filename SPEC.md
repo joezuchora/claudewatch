@@ -97,6 +97,8 @@ Session-scoped metadata (model name, token counts, cost, context usage) is defer
 
 > **WARNING:** This endpoint is undocumented and may change without notice. All contract details below represent the last observed behavior as of March 2026. ClaudeWatch must handle schema drift gracefully.
 
+> **Public docs status (as of 2026-05):** Anthropic's public API documentation does not list `/api/oauth/usage` or publish a formal schema/versioning contract for it. Treat this endpoint as internal/best-effort telemetry rather than a stable public API.
+
 ### 3.1 Usage Endpoint
 
 | Property | Value |
@@ -108,6 +110,8 @@ Session-scoped metadata (model name, token counts, cost, context usage) is defer
 | Content-Type | `application/json` |
 | HTTP timeout | 5 seconds (hard kill) |
 | TLS | TLS verification must never be disabled |
+
+`anthropic-beta: oauth-2025-04-20` is an observed compatibility requirement for this endpoint, not a published versioning guarantee.
 
 ### 3.2 Response Schema (Last Observed)
 
@@ -146,10 +150,54 @@ Session-scoped metadata (model name, token counts, cost, context usage) is defer
 
 - Required fields must be explicitly validated before use
 - Optional and unknown fields must not break parsing
-- If both windows are null, classify as Degraded
+- If both windows are null **and** no `extra_usage` object is present, classify as Degraded
 - If the response is valid JSON but missing all required fields, classify as malformed
 - If the response is not valid JSON, classify as malformed
 - Record normalization warnings internally but do not surface them to users
+
+### 3.5 Enterprise Variant
+
+Enterprise-billed accounts return a different shape from the same `/api/oauth/usage` endpoint:
+
+- All rolling window fields (`five_hour`, `seven_day`, `seven_day_opus`, etc.) are `null`
+- A top-level `extra_usage` object is present and carries the monthly credit pool
+
+Example enterprise body (synthetic, representative of the endpoint shape):
+
+```json
+{
+  "five_hour": null,
+  "seven_day": null,
+  "extra_usage": {
+    "is_enabled": true,
+    "monthly_limit": 200000,
+    "used_credits": 291,
+    "utilization": 0.1455,
+    "currency": "USD",
+    "disabled_reason": null
+  }
+}
+```
+
+**Detection signal:** an `extra_usage` value that is a non-null object with the required numeric fields (`monthly_limit`, `used_credits`, `utilization`) and a boolean `is_enabled`. Standard accounts omit `extra_usage` entirely; treating its presence as authoritative avoids false positives from genuinely malformed responses (where `extra_usage` is also absent).
+
+**Monetary units:** `monthly_limit` and `used_credits` are interpreted as currency minor units (for example, cents for USD). UI rendering must convert to major units before display (`1076` → `$10.76`, `200000` → `$2,000.00`).
+
+**Internal model additions:** `UsageSnapshot` gains a `tier: 'standard' | 'enterprise' | 'unknown'` discriminator and an `enterprise: EnterpriseUsage | null` slot. `RuntimeState` gains an `Enterprise` variant. `display.primaryWindow` gains an `'enterprise'` value; for enterprise snapshots the primary utilization is `extra_usage.utilization` and the primary reset time is `null` (the API does not expose a monthly reset timestamp).
+
+**Enterprise UX rules:**
+- Statusline: `⊙ E <pct>` (compact) or `⊙ E <pct> · <used> / <limit>` (full). Same width-aware truncation as the standard line.
+- Rich statusline: replace the 5hr/7d bars line with a single `Enterprise: <bar> <pct> (<used> / <limit>)` line; session line and model line are unchanged.
+- Tooltip: `Plan: Enterprise` followed by `Monthly usage: <pct> (<used> of <limit>)`; if `is_enabled` is false, append a disabled-reason line.
+- VS Code status bar: `$(organization) E <pct>` with the standard warning/critical threshold colors applied to the monthly utilization.
+
+**Threshold semantics:** warning and critical thresholds apply to `extra_usage.utilization` exactly as they would to a standard window. Below 1% the percentage is rendered with two decimals to avoid collapsing micro-usage to `0%`.
+
+**Versioning strategy:** because there is no published schema/version contract, parser behavior must be defensive and compatibility-first:
+- ignore unknown fields
+- validate required fields/types before use
+- treat unknown/empty shapes as malformed
+- degrade gracefully with stale-while-error UX and remediation guidance
 
 ---
 

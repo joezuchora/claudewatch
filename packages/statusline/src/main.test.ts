@@ -329,6 +329,21 @@ describe('main', () => {
       expect(parsed.stateClassification).toBe('Initializing');
     });
 
+    test('--refresh fetches live data instead of only printing cache debug', async () => {
+      const envelope = makeTestEnvelope();
+      mockReadCache.mockReturnValue(envelope);
+      mockNormalize.mockReturnValue(makeTestSnapshot());
+
+      const { exitCode, output } = await runMain(['--debug', '--refresh']);
+      expect(exitCode).toBe(0);
+      expect(mockFetchUsage).toHaveBeenCalled();
+
+      const parsed = JSON.parse(output[0]);
+      expect(parsed.stateClassification).toBe('Healthy');
+      expect(parsed.lastFetchedAt).toBeDefined();
+      expect(parsed.normalizationWarnings).toEqual([]);
+    });
+
     test('output contains no accessToken', async () => {
       const envelope = makeTestEnvelope();
       mockReadCache.mockReturnValue(envelope);

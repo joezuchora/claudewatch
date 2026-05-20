@@ -17,8 +17,10 @@ describe('types', () => {
       fetchedAt: '2026-03-07T12:00:00.000Z',
       source: { usageEndpoint: 'success' },
       authState: 'valid',
+      tier: 'standard',
       fiveHour: { utilizationPct: 42, resetsAt: '2026-03-07T17:00:00.000Z' },
       sevenDay: { utilizationPct: 18, resetsAt: '2026-03-14T07:00:00.000Z' },
+      enterprise: null,
       display: {
         primaryWindow: 'fiveHour',
         primaryUtilizationPct: 42,
@@ -38,8 +40,10 @@ describe('types', () => {
         fetchedAt: '2026-03-07T12:00:00.000Z',
         source: { usageEndpoint: 'success' },
         authState: 'valid',
+        tier: 'standard',
         fiveHour: { utilizationPct: 10, resetsAt: null },
         sevenDay: { utilizationPct: 20, resetsAt: null },
+        enterprise: null,
         display: { primaryWindow: 'sevenDay', primaryUtilizationPct: 20, primaryResetsAt: null },
         freshness: { isStale: false, staleReason: 'none' },
         rawMetadata: { normalizationWarnings: [] },
@@ -55,9 +59,9 @@ describe('types', () => {
   test('RuntimeState union covers all states', () => {
     const states: RuntimeState[] = [
       'Initializing', 'Healthy', 'Stale', 'Degraded',
-      'AuthInvalid', 'NotConfigured', 'HardFailure',
+      'AuthInvalid', 'NotConfigured', 'HardFailure', 'Enterprise',
     ];
-    expect(states).toHaveLength(7);
+    expect(states).toHaveLength(8);
   });
 
   test('FailureClass union covers all classes', () => {

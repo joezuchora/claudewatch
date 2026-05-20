@@ -23,9 +23,10 @@ let statusBar: StatusBarManager | undefined;
 let pollingTimer: ReturnType<typeof setInterval> | undefined;
 let refreshInFlight = false;
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   statusBar = new StatusBarManager();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
+
 
   // Register commands
   context.subscriptions.push(
@@ -35,6 +36,11 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(
     vscode.commands.registerCommand('claudewatch.openDashboard', openDashboard),
+  );
+  // Register diagnostics command
+  const { showDiagnostics } = await import('./commands.js');
+  context.subscriptions.push(
+    vscode.commands.registerCommand('claudewatch.diagnostics', showDiagnostics),
   );
 
   // Initial fetch

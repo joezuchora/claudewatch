@@ -14,7 +14,9 @@ Claude Code doesn't show how much of your usage window you've consumed. ClaudeWa
 
 - **Terminal status line** — shows usage inline in Claude Code's built-in status line
 - **VS Code extension** — status bar item with color-coded thresholds and hover tooltip
-- **Two usage windows** — current (5-hour) and weekly (7-day) utilization percentages
+- **Standard and Enterprise billing** — auto-detects the account tier and renders the appropriate view (5hr/7d rolling windows for standard, monthly credit pool for enterprise)
+- **Two usage windows** — current (5-hour) and weekly (7-day) utilization percentages on standard accounts
+- **Monthly credit pool** — utilization, credits used, and monthly limit on enterprise accounts
 - **Reset timing** — shows when each window resets
 - **Stale-while-error** — displays last known good data when refreshes fail
 - **Cooldown & retry** — backs off on repeated failures, retries once with a 2s delay
@@ -77,6 +79,31 @@ npx @vscode/vsce package --no-dependencies
 
 Then in VS Code: `Ctrl+Shift+P` > `Extensions: Install from VSIX...` > select the generated `.vsix` file.
 
+### Upgrade both surfaces (source install)
+
+If you built from source, update both the VS Code extension and Claude Code
+statusline with one command:
+
+Before running the upgrade command, close Claude Code so the statusline
+binary is not locked.
+
+Windows (PowerShell):
+
+```powershell
+bun run upgrade-all:windows
+```
+
+Linux:
+
+```bash
+bun run upgrade-all:linux
+```
+
+After it completes:
+
+1. VS Code: run `Developer: Restart Extension Host`
+2. Claude Code: fully restart the app
+
 ## Building and testing locally
 
 Clone the repo and install dependencies:
@@ -128,7 +155,11 @@ Test files live next to their source files as `*.test.ts`. All tests use mocked 
 4. Caches the result locally (`~/.cache/claudewatch/usage.json`) with a 10-minute TTL
 5. Renders the data in the terminal or VS Code status bar
 
+Note: `/api/oauth/usage` is not documented as a public API endpoint and does not have a published schema/versioning contract. ClaudeWatch treats it as best-effort and degrades gracefully when the shape drifts.
+
 ## Terminal output
+
+### Standard accounts
 
 Default format (width >= 60 chars):
 ```
@@ -147,11 +178,28 @@ current: ●●●●○○○○○○ 42% | weekly: ●●○○○○○○�
 Claude 4 Opus | resets 3:00pm | resets sat 7:00am
 ```
 
+### Enterprise accounts
+
+Enterprise accounts use a monthly credit pool instead of rolling windows. ClaudeWatch detects this automatically from the API response and switches the display:
+
+`used_credits` and `monthly_limit` from the endpoint are interpreted as currency minor units (for example, cents for USD), then rendered as major-unit currency values.
+
+```
+⊙ E 14% · $29k / $200k
+```
+
+Rich format:
+```
+myproject | 45.2k / 200k | 23%
+Enterprise: ●●○○○○○○○○ 14% ($29k / $200k)
+Claude 4 Opus
+```
+
 CLI flags: `--json`, `--refresh`, `--debug`, `--version`
 
 ## VS Code extension
 
-The status bar shows your primary usage window with color-coded thresholds:
+The status bar shows your primary usage with color-coded thresholds:
 
 | Utilization | Color |
 |---|---|
@@ -159,7 +207,9 @@ The status bar shows your primary usage window with color-coded thresholds:
 | 70-89% | Warning (yellow) |
 | 90%+ | Critical (red) |
 
-Hover for a detailed tooltip with both windows, reset times, and freshness status. Click to open the Anthropic usage dashboard.
+On standard accounts the status bar shows the more constrained of the two rolling windows (e.g. `$(graph) 42%`). On enterprise accounts it shows monthly credit utilization with an organization icon (e.g. `$(organization) E 14%`). The same thresholds apply to both.
+
+Hover for a detailed tooltip — windows and reset times for standard accounts, or monthly credits used/limit for enterprise. Click to open the Anthropic usage dashboard.
 
 ### Settings
 
@@ -197,6 +247,7 @@ All domain logic lives in `packages/core`. The statusline and VS Code packages a
 ## Known limitations
 
 - Uses an **undocumented** Anthropic API endpoint — it may change or break without notice
+- No publicly documented versioning contract for `/api/oauth/usage` — compatibility is best-effort
 - No macOS support yet (requires Keychain credential integration)
 - Not published to the VS Code Marketplace (manual `.vsix` install only)
 - No historical data, trends, or burn-rate analytics

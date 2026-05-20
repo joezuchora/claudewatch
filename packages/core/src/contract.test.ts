@@ -401,6 +401,56 @@ describe('contract: high utilization threshold scenarios', () => {
   });
 });
 
+describe('contract: enterprise response with extra_usage', () => {
+  // Synthetic fixture modeled after enterprise response shape.
+  const ENTERPRISE_RAW = {
+    five_hour: null,
+    seven_day: null,
+    seven_day_oauth_apps: null,
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    iguana_necktie: null,
+    omelette_promotional: { utilization: 0, resets_at: null },
+    extra_usage: {
+      is_enabled: true,
+      monthly_limit: 200000,
+      used_credits: 291,
+      utilization: 0.1455,
+      currency: 'USD',
+      disabled_reason: null,
+    },
+  };
+
+  test('normalizes to enterprise tier', () => {
+    const snapshot = normalize(ENTERPRISE_RAW, FETCHED_AT);
+    expect(snapshot.tier).toBe('enterprise');
+    expect(snapshot.source.usageEndpoint).toBe('success');
+    expect(snapshot.freshness.isStale).toBe(false);
+  });
+
+  test('classifies as Enterprise (not Degraded despite null windows)', () => {
+    const snapshot = normalize(ENTERPRISE_RAW, FETCHED_AT);
+    expect(classify(snapshot)).toBe('Enterprise');
+  });
+
+  test('exposes enterprise utilization for threshold evaluation', () => {
+    const snapshot = normalize(ENTERPRISE_RAW, FETCHED_AT);
+    expect(snapshot.enterprise!.utilizationPct).toBe(0.1455);
+    expect(evaluate(snapshot.enterprise!.utilizationPct)).toBe('normal');
+  });
+
+  test('full fetch flow returns enterprise snapshot end-to-end', async () => {
+    mockFetch(async () => new Response(JSON.stringify(ENTERPRISE_RAW), { status: 200 }));
+    const result = await fetchUsage('test-token');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const snapshot = normalize(result.data);
+      expect(snapshot.tier).toBe('enterprise');
+      expect(classify(snapshot)).toBe('Enterprise');
+    }
+  });
+});
+
 describe('contract: retry behavior', () => {
   test('succeeds on second attempt after 5xx', async () => {
     let callCount = 0;

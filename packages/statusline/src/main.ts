@@ -20,6 +20,7 @@ import {
   type UsageSnapshot,
   type CacheEnvelope,
   type SessionInfo,
+  type FailureClass,
 } from '@claudewatch/core';
 
 const VERSION = '0.1.0';
@@ -121,6 +122,34 @@ function printDebug(cache: CacheEnvelope | null): void {
   console.log(JSON.stringify(info, null, 2));
 }
 
+function printLiveDebug(
+  cache: CacheEnvelope | null,
+  snapshot: UsageSnapshot,
+  fetchError?: { failureClass: FailureClass; status: number | null; message: string },
+): void {
+  const info: Record<string, unknown> = {
+    credentialPath: getCredentialPath(),
+    cachePath: getCachePath(),
+    terminalWidth: getTerminalWidth(),
+    lastFetchedAt: snapshot.fetchedAt,
+    cacheAgeSec: cache ? Math.round((Date.now() - new Date(cache.snapshot.fetchedAt).getTime()) / 1000) : null,
+    stateClassification: classify(snapshot),
+    cooldownActive: cache ? isInCooldown(cache) : false,
+    cooldownUntil: cache?.cooldownUntil ?? null,
+    lastErrorClass: cache?.lastErrorClass ?? null,
+    lastHttpStatus: cache?.lastHttpStatus ?? null,
+    lastErrorMessage: cache?.lastErrorMessage ?? null,
+    normalizationWarnings: snapshot.rawMetadata.normalizationWarnings,
+    freshness: snapshot.freshness,
+  };
+
+  if (fetchError) {
+    info.fetchError = fetchError;
+  }
+
+  console.log(JSON.stringify(info, null, 2));
+}
+
 // --- Main ---
 
 export async function main(): Promise<never> {
@@ -139,9 +168,39 @@ export async function main(): Promise<never> {
   let cache = readCache();
 
   // --debug
-  if (flags.debug) {
+  if (flags.debug && !flags.refresh) {
     printDebug(cache);
     return process.exit(0);
+  }
+
+  if (flags.debug && flags.refresh) {
+    const creds = resolveCredentials();
+
+    if (creds.authState === 'missing' || !creds.accessToken) {
+      printLiveDebug(cache, makeErrorSnapshot('missing'));
+      return process.exit(2);
+    }
+
+    if (creds.authState === 'invalid') {
+      printLiveDebug(cache, makeErrorSnapshot('invalid'));
+      return process.exit(2);
+    }
+
+    const result = await fetchUsage(creds.accessToken);
+
+    if (result.ok) {
+      const snapshot = normalize(result.data);
+      printLiveDebug(cache, snapshot);
+      return process.exit(0);
+    }
+
+    const snapshot = makeErrorSnapshot(result.failureClass === 'authInvalid' ? 'invalid' : 'unknown');
+    printLiveDebug(cache, snapshot, {
+      failureClass: result.failureClass,
+      status: result.status,
+      message: result.message,
+    });
+    return process.exit(result.failureClass === 'authInvalid' ? 2 : 1);
   }
 
   // If cache is fresh and not --refresh → output and exit

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { formatStatusLine, formatTooltip, formatPct, formatFreshness, formatRichStatusLine } from './format.js';
-import { makeTestSnapshot } from './test-helpers.js';
+import { makeTestSnapshot, makeTestEnterpriseSnapshot } from './test-helpers.js';
 import type { UsageSnapshot, SessionInfo } from './types.js';
 
 /** Format tests use fixed timestamps for deterministic output */
@@ -408,5 +408,105 @@ describe('formatRichStatusLine', () => {
     expect(result).toContain('42%');
     expect(result).toContain('weekly:');
     expect(result).toContain('18%');
+  });
+});
+
+describe('formatStatusLine: enterprise', () => {
+  test('full mode shows E badge, percentage, and credit usage', () => {
+    const result = formatStatusLine(makeTestEnterpriseSnapshot());
+    expect(result).toContain('⊙ E');
+    expect(result).toContain('0.15%');     // 0.1455 → "0.15%" (sub-1% gets 2 decimals)
+    expect(result).toContain('$2.91');
+    expect(result).toContain('$2k');
+    expect(result).toContain('·');
+  });
+
+  test('compact mode (width < 60) shows only enterprise percentage', () => {
+    const result = formatStatusLine(makeTestEnterpriseSnapshot(), 50);
+    expect(result).toBe('⊙ E 0.15%');
+  });
+
+  test('stale enterprise statusline includes stale marker', () => {
+    const result = formatStatusLine(
+      makeTestEnterpriseSnapshot({
+        freshness: { isStale: true, staleReason: 'fetchFailed' },
+      }),
+    );
+    expect(result).toContain('stale');
+  });
+
+  test('formats higher-utilization enterprise without decimals', () => {
+    const snapshot = makeTestEnterpriseSnapshot({
+      enterprise: {
+        utilizationPct: 42.7,
+        monthlyLimitCredits: 200000,
+        usedCredits: 85400,
+        currency: 'USD',
+        isEnabled: true,
+        disabledReason: null,
+      },
+    });
+    const result = formatStatusLine(snapshot);
+    expect(result).toContain('43%'); // >=10% rounds to integer
+    expect(result).toContain('$854');
+  });
+});
+
+describe('formatTooltip: enterprise', () => {
+  test('shows enterprise plan section instead of usage windows', () => {
+    const result = formatTooltip(makeTestEnterpriseSnapshot());
+    expect(result).toContain('Plan: Enterprise');
+    expect(result).toContain('Monthly usage');
+    expect(result).toContain('0.15%');
+    expect(result).toContain('$2.91');
+    expect(result).toContain('$2,000');
+    expect(result).not.toContain('Current (5hr)');
+    expect(result).not.toContain('Weekly (7d)');
+  });
+
+  test('shows disabled reason when extra usage is disabled', () => {
+    const snapshot = makeTestEnterpriseSnapshot({
+      enterprise: {
+        utilizationPct: 0,
+        monthlyLimitCredits: 0,
+        usedCredits: 0,
+        currency: 'USD',
+        isEnabled: false,
+        disabledReason: 'org_policy',
+      },
+    });
+    const result = formatTooltip(snapshot);
+    expect(result).toContain('Extra usage disabled');
+    expect(result).toContain('org_policy');
+  });
+
+  test('includes Status section and dashboard link', () => {
+    const result = formatTooltip(makeTestEnterpriseSnapshot());
+    expect(result).toContain('Status');
+    expect(result).toContain('Fresh as of');
+    expect(result).toContain('Click to open usage dashboard');
+  });
+});
+
+describe('formatRichStatusLine: enterprise', () => {
+  test('replaces usage bars line with Enterprise label and credit summary', () => {
+    const result = formatRichStatusLine(makeTestEnterpriseSnapshot(), null);
+    expect(result).toContain('Enterprise');
+    expect(result).toContain('0.15%');
+    expect(result).toContain('$2.91');
+    expect(result).toContain('$2k');
+    expect(result).not.toContain('current:');
+    expect(result).not.toContain('weekly:');
+  });
+
+  test('keeps session info line 1 intact on enterprise', () => {
+    const session: SessionInfo = {
+      workspace: { project_dir: '/home/user/cool-app' },
+      model: { display_name: 'Claude Opus 4.7' },
+    };
+    const result = formatRichStatusLine(makeTestEnterpriseSnapshot(), session);
+    expect(result).toContain('cool-app');
+    expect(result).toContain('Claude Opus 4.7');
+    expect(result).toContain('Enterprise');
   });
 });

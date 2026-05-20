@@ -81,6 +81,29 @@ export class StatusBarManager {
         break;
       }
 
+      case 'Enterprise': {
+        // Enterprise utilization can span <1% to 100%, so use the same
+        // sub-1% precision as the statusline rather than rounding to "0%".
+        const ePct = snapshot.enterprise?.utilizationPct ?? null;
+        const pctText = ePct === null
+          ? 'E'
+          : ePct >= 10 ? `E ${Math.round(ePct)}%`
+          : ePct >= 1 ? `E ${ePct.toFixed(1)}%`
+          : `E ${ePct.toFixed(2)}%`;
+        if (loading) {
+          this.item.text = `$(sync~spin) ${pctText}`;
+        } else {
+          this.item.text = `$(organization) ${pctText}`;
+        }
+        if (ePct !== null) {
+          this.applyThresholdColor(evaluate(ePct, warnPct, critPct));
+        } else {
+          this.item.color = undefined;
+          this.item.backgroundColor = undefined;
+        }
+        break;
+      }
+
       case 'Degraded': {
         this.item.text = '$(warning) ClaudeWatch';
         this.item.color = new vscode.ThemeColor('errorForeground');

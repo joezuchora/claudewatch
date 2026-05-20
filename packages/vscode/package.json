@@ -28,6 +28,10 @@
       {
         "command": "claudewatch.openDashboard",
         "title": "ClaudeWatch: Open Usage Dashboard"
+      },
+      {
+        "command": "claudewatch.diagnostics",
+        "title": "ClaudeWatch: Show Diagnostics"
       }
     ],
     "configuration": {
