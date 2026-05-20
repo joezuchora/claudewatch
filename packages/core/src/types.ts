@@ -5,16 +5,29 @@ export interface UsageWindow {
   resetsAt: string | null; // ISO timestamp, always UTC
 }
 
+export type AccountTier = 'standard' | 'enterprise' | 'unknown';
+
+export interface EnterpriseUsage {
+  utilizationPct: number;       // 0-100, monthly credit consumption
+  monthlyLimitCredits: number;  // raw credit cap (currency units; see `currency`)
+  usedCredits: number;          // raw credits spent in the current period
+  currency: string;             // ISO currency code, e.g. "USD"
+  isEnabled: boolean;           // false if the org has disabled extra usage
+  disabledReason: string | null;
+}
+
 export interface UsageSnapshot {
   fetchedAt: string; // ISO timestamp, always UTC
   source: {
     usageEndpoint: 'success' | 'failed' | 'unavailable';
   };
   authState: 'valid' | 'invalid' | 'missing' | 'unknown';
+  tier: AccountTier;
   fiveHour: UsageWindow;
   sevenDay: UsageWindow;
+  enterprise: EnterpriseUsage | null;
   display: {
-    primaryWindow: 'fiveHour' | 'sevenDay' | 'unknown';
+    primaryWindow: 'fiveHour' | 'sevenDay' | 'enterprise' | 'unknown';
     primaryUtilizationPct: number | null;
     primaryResetsAt: string | null;
   };
@@ -41,7 +54,8 @@ export type RuntimeState =
   | 'Degraded'
   | 'AuthInvalid'
   | 'NotConfigured'
-  | 'HardFailure';
+  | 'HardFailure'
+  | 'Enterprise';
 
 export type FailureClass =
   | 'notConfigured'
@@ -70,10 +84,20 @@ export interface RawUsageWindow {
   resets_at: string | null;
 }
 
+export interface RawExtraUsage {
+  is_enabled: boolean;
+  monthly_limit: number;
+  used_credits: number;
+  utilization: number; // 0-100 percentage of monthly_limit
+  currency: string;
+  disabled_reason: string | null;
+}
+
 export interface RawUsageResponse {
   five_hour: RawUsageWindow | null;
   seven_day: RawUsageWindow | null;
   seven_day_opus?: RawUsageWindow | null;
+  extra_usage?: RawExtraUsage | null; // present on enterprise accounts
   [key: string]: unknown; // forward-compatible with unknown fields
 }
 

@@ -23,6 +23,15 @@ export function classify(snapshot: UsageSnapshot): RuntimeState {
     return 'NotConfigured';
   }
 
+  // Enterprise tier: classify before window checks since enterprise accounts
+  // have no five_hour/seven_day windows by design.
+  if (snapshot.tier === 'enterprise') {
+    if (snapshot.freshness.isStale) {
+      return snapshot.freshness.staleReason === 'malformedResponse' ? 'Degraded' : 'Stale';
+    }
+    return 'Enterprise';
+  }
+
   const hasValidWindow =
     snapshot.fiveHour.utilizationPct !== null ||
     snapshot.sevenDay.utilizationPct !== null;

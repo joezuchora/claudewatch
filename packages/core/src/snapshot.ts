@@ -35,8 +35,10 @@ export function makeErrorSnapshot(
     fetchedAt: new Date().toISOString(),
     source: { usageEndpoint: source },
     authState,
+    tier: 'unknown',
     fiveHour: { utilizationPct: null, resetsAt: null },
     sevenDay: { utilizationPct: null, resetsAt: null },
+    enterprise: null,
     display: { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null },
     freshness: {
       isStale: authState !== 'missing',

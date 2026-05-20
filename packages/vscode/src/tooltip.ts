@@ -71,7 +71,7 @@ export function buildTooltip(
 ): vscode.MarkdownString {
   const md = new vscode.MarkdownString();
 
-  if (state === 'Healthy' || state === 'Stale') {
+  if (state === 'Healthy' || state === 'Stale' || state === 'Enterprise') {
     if (snapshot) {
       md.appendText(formatTooltip(snapshot, lastError));
       return md;
