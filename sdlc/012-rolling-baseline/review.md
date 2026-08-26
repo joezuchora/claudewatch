@@ -103,7 +103,7 @@ That second line is the deliverable. The 270 s trip wire was the number `intent.
 *derive* from the code; it is now printed beside the verdict that had been hiding it.
 
 - [x] `bun run verify` exits 0
-- [ ] CI green on the PR head commit — pending the push
+- [x] CI green on the PR head commit — `0ba76ea`, run 63, `verify` success in 15 s
 - [x] Every acceptance criterion in `spec.md` is checked off
 
 ### Mutation checks
