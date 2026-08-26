@@ -109,9 +109,34 @@ becomes something people route around.
 > which changes nothing about what the test asserts: *exits rather than hanging forever* needs
 > a bound that a slow spawn cannot reach, not a tight one. Verified 5/5 consecutive clean runs.
 >
-> The original hang has **not recurred in 11 recorded runs.** It remains undiagnosed and
-> genuinely blocked on data — there is nothing to analyse until it happens again with
-> instrumentation in place.
+> **Update 2026-08-26 07:30 — and a correction to the update above.**
+>
+> The gate went red twice more. The 06:30 fix raised `runWithStdin`'s SIGKILL timer from 5 s
+> to 20 s and **changed nothing**, because that timer was never the binding constraint:
+> **Bun's default per-test timeout is 5000 ms**, and Bun aborted the test before the timer
+> could fire. Both failures reported exactly `[5000.50ms]`. The answer was in the number and
+> I read past it twice.
+>
+> Every spawning smoke case now declares its own 30 s ceiling, so the 20 s SIGKILL is the
+> binding constraint as intended — a genuine hang still fails the test rather than passing
+> quietly. Verified 6/6 consecutive clean `bun run verify` runs.
+>
+> **What the investigation has now established about the binary**, which is the useful part:
+>
+> | measurement | result |
+> |---|---|
+> | 150 consecutive runs, closed stdin | p50 48 ms, p95 56 ms, p99 83 ms, **max 123 ms** |
+> | runs exceeding 1 s | **0 / 150** |
+> | bare `bun test`, full suite | 10 / 10 clean |
+>
+> **The binary is not slow.** The slowness lives in the test harness under `verify`, which
+> spawns `bun test` as a child, making the smoke test's processes grandchildren. That is a
+> materially different problem from "the product hangs", and it is the first time the two have
+> been told apart.
+>
+> The **original** verify hang — the 550 s one — has still not recurred in 13 recorded runs.
+> It remains undiagnosed. Today's failures were a test-harness ceiling, not that, and
+> conflating them would poison the investigation.
 
 
 `bun run verify` **intermittently hangs**. A typical run is ~35 s (26 s of it the test suite);

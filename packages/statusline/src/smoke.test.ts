@@ -110,12 +110,21 @@ const SESSION_JSON = JSON.stringify({
 });
 
 describe('smoke: the compiled binary exits on every stdin state', () => {
+  // Bun's DEFAULT per-test timeout is 5000ms, and that — not the SIGKILL timer inside
+  // runWithStdin — is what killed these tests twice. The failures both read exactly
+  // "[5000.50ms]", which was the answer sitting in plain sight while a previous fix raised
+  // the SIGKILL timer from 5s to 20s and changed nothing, because Bun aborted the test first.
+  //
+  // Each spawning case now declares its own ceiling, so runWithStdin's 20s timer is the
+  // binding constraint and a genuine hang still fails the test rather than passing quietly.
+  const SPAWN_TIMEOUT_MS = 30_000;
+
   test('closed stdin', async () => {
     const r = await runWithStdin('ignore');
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('42%');
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('SOCKET stdin — the reported failure in sdlc/004', async () => {
     // The exact condition that hung: open, silent, never closed, and isTTY is undefined.
@@ -134,14 +143,14 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
       sock.destroy();
       pair.close();
     }
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('empty pipe, closed immediately', async () => {
     const r = await runWithStdin('pipe', { write: '' });
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('42%');
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('pipe carrying valid session JSON produces RICH output', async () => {
     // The compatibility guarantee: the only invocation path with users today.
@@ -150,7 +159,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('myproject');
     expect(r.stdout).toContain('Claude 4 Opus');
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('pipe carrying malformed JSON degrades to plain output', async () => {
     const r = await runWithStdin('pipe', { write: '{ not json at all' });
@@ -158,7 +167,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('42%');
     expect(r.stdout).not.toContain('myproject');
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('unwritten, unclosed pipe exits on the deadline rather than hanging', async () => {
     const r = await runWithStdin('pipe', { closeStdin: false });
@@ -170,7 +179,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     // tight figure: comfortably above spawn variance, and far below "forever", which is
     // what the code did before sdlc/005.
     expect(r.ms).toBeLessThan(10000);
-  });
+  }, SPAWN_TIMEOUT_MS);
 
   test('--version short-circuits before any stdin read', async () => {
     const r = await new Promise<RunResult>((res) => {
@@ -189,5 +198,5 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     });
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toMatch(/^claudewatch \d+\.\d+\.\d+$/);
-  });
+  }, SPAWN_TIMEOUT_MS);
 });
