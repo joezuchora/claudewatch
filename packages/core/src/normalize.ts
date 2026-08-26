@@ -1,4 +1,5 @@
 import type { UsageSnapshot, UsageWindow, EnterpriseUsage } from './types.js';
+import { emitProcess, schemaDriftEvent, categorizeWarning } from './telemetry.js';
 
 const ISO_CURRENCY_RE = /^[A-Z]{3}$/;
 
@@ -162,6 +163,17 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
     sevenDayOpus.utilizationPct === null
   ) {
     return makeMalformed(now, [...warnings, 'No valid usage windows found']);
+  }
+
+  // One event per successful normalize, never per warning: a malformed response with eight
+  // warnings is one drift, not eight. Emitted on the FETCH path only — warnings live on the
+  // snapshot and are re-read from cache for up to 600s, so emitting at render time would turn
+  // a single drift into hundreds of duplicates. See sdlc/003 and sdlc/007.
+  if (warnings.length > 0) {
+    emitProcess(schemaDriftEvent({
+      category: categorizeWarning(warnings[0]!),
+      count: warnings.length,
+    }));
   }
 
   const display = computePrimaryDisplay(fiveHour, sevenDay, sevenDayOpus);

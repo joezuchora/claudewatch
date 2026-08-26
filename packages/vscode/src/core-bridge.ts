@@ -34,6 +34,10 @@ export const shouldCooldown = core.shouldCooldown;
 export const markStale = core.markStale;
 export const makeErrorSnapshot = core.makeErrorSnapshot;
 export const extractLastError = core.extractLastError;
+export const setTelemetryConfig = core.setTelemetryConfig;
+export const emit = core.emit;
+export const renderEvent = core.renderEvent;
+export const utilizationBucket = core.utilizationBucket;
 
 export type {
   UsageSnapshot,

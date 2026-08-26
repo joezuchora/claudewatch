@@ -50,6 +50,36 @@ export interface SpoolState {
   firstDroppedAt: string | null;
 }
 
+/**
+ * Process-level telemetry consent.
+ *
+ * Deep core modules (client.ts, cache.ts, normalize.ts) have no access to VS Code's consent
+ * state, and sdlc/006 established that VS Code's global switch must win. If those modules
+ * resolved their own config they would read env and file only, and a VS Code user who had
+ * turned telemetry off globally would still be emitted for — voiding 006's guarantee one
+ * layer down.
+ *
+ * So the SURFACE decides and pushes the answer here. Core never resolves consent.
+ *
+ * Default is disabled: a surface that forgets to call setTelemetryConfig emits nothing. That
+ * is the only acceptable default for a consent flag — the dangerous mistake, a new surface
+ * silently inheriting "on", is not expressible.
+ */
+let processConfig: TelemetryConfig = { enabled: false };
+
+export function setTelemetryConfig(cfg: TelemetryConfig): void {
+  processConfig = { enabled: cfg.enabled === true };
+}
+
+export function getTelemetryConfig(): TelemetryConfig {
+  return processConfig;
+}
+
+/** Emit using the process config. The call sites in core use this. */
+export function emitProcess(event: MetricEvent): void {
+  emit(processConfig, event);
+}
+
 export function getSpoolPath(): string {
   return join(getCacheDir(), 'metrics-spool.jsonl');
 }

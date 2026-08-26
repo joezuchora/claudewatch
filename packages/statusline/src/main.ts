@@ -18,6 +18,7 @@ import {
   markStale,
   makeErrorSnapshot,
   resolveTelemetryConfig,
+  setTelemetryConfig,
   emit,
   renderEvent,
   utilizationBucket,
@@ -180,6 +181,9 @@ function printLiveDebug(
 // --- Main ---
 
 export async function main(): Promise<never> {
+  // The surface owns consent; core never resolves it. See sdlc/007.
+  setTelemetryConfig(resolveTelemetryConfig());
+
   const flags = parseFlags(process.argv.slice(2));
 
   // --version

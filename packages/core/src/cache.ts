@@ -3,6 +3,7 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CacheEnvelope } from './types.js';
+import { emitProcess, cacheEvent } from './telemetry.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -55,6 +56,7 @@ export function readCacheResult(): CacheReadResult {
   try {
     raw = readFileSync(path, 'utf-8');
   } catch {
+    emitProcess(cacheEvent({ outcome: 'miss' }));
     return { envelope: null, reason: 'miss' };
   }
 
@@ -64,11 +66,13 @@ export function readCacheResult(): CacheReadResult {
   } catch {
     // Corrupt JSON — delete and treat as a miss so we never get a stuck failure loop.
     tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'corruptJson' }));
     return { envelope: null, reason: 'corruptJson' };
   }
 
   if (parsed.version !== CACHE_VERSION) {
     tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'versionMismatch' }));
     return { envelope: null, reason: 'versionMismatch' };
   }
 
@@ -80,6 +84,7 @@ export function readCacheResult(): CacheReadResult {
     !parsed.snapshot.freshness
   ) {
     tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'invalidShape' }));
     return { envelope: null, reason: 'invalidShape' };
   }
 

@@ -36,6 +36,7 @@ export const resolveTelemetryConfig = core.resolveTelemetryConfig;
 export const emit = core.emit;
 export const renderEvent = core.renderEvent;
 export const utilizationBucket = core.utilizationBucket;
+export const setTelemetryConfig = core.setTelemetryConfig;
 
 export type {
   UsageSnapshot,

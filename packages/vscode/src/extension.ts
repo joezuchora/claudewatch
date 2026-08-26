@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveExtensionTelemetry } from './telemetry-gate.js';
+import { setTelemetryConfig } from './core-bridge.js';
 import {
   resolveCredentials,
   fetchUsage,
@@ -53,6 +54,12 @@ function recomputeTelemetryGate(): void {
   }
 
   telemetryAllowed = resolveExtensionTelemetry(globalEnabled, settingEnabled);
+
+  // Push the decision into core immediately. Core's call sites (client, cache, normalize)
+  // cannot see vscode.env, so this is the only path by which the global switch reaches them.
+  // Without it, sdlc/006's compliance guarantee would hold for `render` and silently fail for
+  // the other three kinds.
+  setTelemetryConfig({ enabled: telemetryAllowed });
 }
 
 /** The override handed to core's resolveTelemetryConfig, which treats it as highest priority. */
