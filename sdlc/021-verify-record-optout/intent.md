@@ -31,6 +31,12 @@ Anyone who runs `bun run verify` in a fork or a private branch. Today that is on
 container, which is precisely why it is worth fixing now rather than after the repository has
 other contributors — a default that has never been questioned is harder to change later.
 
+> **Correction made during Stage 2.** An earlier draft of the spec argued the gate "runs only
+> when someone types `bun run verify`". That is false:
+> `deploy/systemd/claudewatch-sdlc-loop.service:20` runs it hourly and unattended, and I wrote
+> that unit. The bounded-reach argument it supported does not survive, and the spec's default
+> flipped as a result.
+
 Not affected: the shipped product. Product telemetry is already off by default with no default
 destination, and this loop does not touch it.
 
