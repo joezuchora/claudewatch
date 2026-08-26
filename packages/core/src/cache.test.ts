@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
-import { readCache, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir } from './cache.js';
+import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir } from './cache.js';
 import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
 describe('cache', () => {
@@ -222,5 +222,47 @@ describe('writeCache and readCache round-trip', () => {
       const result = readCache();
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('readCacheResult: distinguishing why a read failed', () => {
+  let cleanup2: () => void;
+  beforeEach(() => { ({ cleanup: cleanup2 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup2(); });
+
+  test('hit on a valid current-version envelope', () => {
+    writeCache(makeCacheEnvelope(makeTestSnapshot()));
+    const r = readCacheResult();
+    expect(r.reason).toBe('hit');
+    expect(r.envelope).not.toBeNull();
+  });
+
+  test('miss when the file is absent', () => {
+    expect(readCacheResult()).toEqual({ envelope: null, reason: 'miss' });
+  });
+
+  test('corruptJson is distinguishable from a cold miss', () => {
+    writeFileSync(getCachePath(), '{ not json at all', 'utf-8');
+    expect(readCacheResult().reason).toBe('corruptJson');
+    expect(existsSync(getCachePath())).toBe(false);
+  });
+
+  test('versionMismatch is distinguishable from corruption', () => {
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 1, snapshot: makeTestSnapshot(), cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('versionMismatch');
+  });
+
+  test('invalidShape is distinguishable from versionMismatch', () => {
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 2, snapshot: { nope: true }, cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('invalidShape');
+  });
+
+  test('readCache still returns just the envelope, unchanged', () => {
+    writeCache(makeCacheEnvelope(makeTestSnapshot()));
+    expect(readCache()).toEqual(readCacheResult().envelope);
   });
 });

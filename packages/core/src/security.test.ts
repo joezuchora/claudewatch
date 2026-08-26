@@ -8,6 +8,12 @@
  * - TLS not disabled
  */
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
+import { existsSync } from 'fs';
+import { homedir } from 'os';
+import {
+  emit, getSpoolPath, fetchResultEvent, cacheEvent, renderEvent, schemaDriftEvent,
+  categorizeWarning, utilizationBucket,
+} from './telemetry.js';
 import { readFileSync } from 'fs';
 import { normalize } from './normalize.js';
 import { makeCacheEnvelope, writeCache, getCachePath } from './cache.js';
@@ -133,5 +139,105 @@ describe('security: credential file is read-only', () => {
     expect(credSource).not.toContain('writeFileSync');
     expect(credSource).not.toContain('writeFile');
     expect(credSource).toContain('readFileSync');
+  });
+});
+
+// === Telemetry leak boundary (sdlc/003-metrics-telemetry) ===
+//
+// Revision 1 of the spec proposed an allowlist of field NAMES and a test asserting
+// keys(payload) subset of ALLOWLIST. That test passes by construction and detects nothing,
+// and a name allowlist does not stop the actual leak vector here, which is a field VALUE:
+// client.ts puts fetch error messages into failures, and in Bun those carry hostnames,
+// proxy URLs and /home/<username>/ paths.
+//
+// These tests are adversarial instead: poison every string that reaches the pipeline and
+// assert none of it survives into a spooled line.
+
+describe('security: telemetry never leaks secrets or environment', () => {
+  const POISON = {
+    token: 'sk-ant-oat01-FAKEFAKEFAKE',
+    path: '/home/testuser/.claude/.credentials.json',
+    host: 'internal-proxy.corp.example.com',
+    user: 'testuser',
+  };
+  const ALL_POISON = Object.values(POISON);
+
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  const spool = () => (existsSync(getSpoolPath()) ? readFileSync(getSpoolPath(), 'utf-8') : '');
+
+  test('a poisoned normalization warning cannot reach the spool as text', () => {
+    const poisoned = `five_hour.resets_at is not a valid ISO timestamp: ${POISON.token} at ${POISON.path} via ${POISON.host}`;
+    emit({ enabled: true }, schemaDriftEvent({ category: categorizeWarning(poisoned), count: 1 }));
+
+    const raw = spool();
+    expect(raw.length).toBeGreaterThan(0);
+    for (const p of ALL_POISON) expect(raw).not.toContain(p);
+    // Only the category survives.
+    expect(JSON.parse(raw.trim()).payload.category).toBe('timestamp');
+  });
+
+  test('every event kind serializes to enumerated leaves only', () => {
+    emit({ enabled: true }, fetchResultEvent({ ok: false, statusClass: 'network', attempts: 2, durationMs: 5000 }));
+    emit({ enabled: true }, cacheEvent({ outcome: 'corruptJson' }));
+    emit({ enabled: true }, renderEvent({
+      surface: 'statusline', runtimeState: 'Degraded', tier: 'enterprise',
+      utilizationBucket: utilizationBucket(93), durationMs: 11,
+    }));
+    emit({ enabled: true }, schemaDriftEvent({ category: 'enterprise', count: 3 }));
+
+    const lines = spool().trim().split('\n');
+    expect(lines).toHaveLength(4);
+
+    for (const line of lines) {
+      for (const p of ALL_POISON) expect(line).not.toContain(p);
+      const payload = JSON.parse(line).payload as Record<string, unknown>;
+      for (const [key, value] of Object.entries(payload)) {
+        const t = typeof value;
+        expect(['number', 'boolean', 'string', 'object']).toContain(t);
+        if (t === 'string') {
+          // Any string leaf must be short and free of separators that indicate a path,
+          // URL, or credential rather than an enum member.
+          const v = value as string;
+          expect(v.length).toBeLessThanOrEqual(32);
+          expect(v).not.toContain('/');
+          expect(v).not.toContain('\\');
+          expect(v).not.toContain('@');
+          expect(v).not.toContain(':');
+          expect(v).not.toContain('.');
+        }
+        expect(key.length).toBeLessThanOrEqual(32);
+      }
+    }
+  });
+
+  test('enterprise credit amounts are never emitted', () => {
+    // An account's billing position is not a health signal. Only tier and a decile bucket.
+    emit({ enabled: true }, renderEvent({
+      surface: 'vscode', runtimeState: 'Enterprise', tier: 'enterprise',
+      utilizationBucket: utilizationBucket(14.5), durationMs: 3,
+    }));
+    const raw = spool();
+    expect(raw).not.toContain('290000');   // usedCredits in minor units
+    expect(raw).not.toContain('20000000'); // monthlyLimit in minor units
+    expect(raw).not.toContain('14.5');     // the raw utilization
+    expect(JSON.parse(raw.trim()).payload.utilizationBucket).toBe(1);
+  });
+
+  test('a spooled line never contains credential-shaped material', () => {
+    for (let i = 0; i < 10; i++) {
+      emit({ enabled: true }, renderEvent({
+        surface: 'statusline', runtimeState: 'Healthy', tier: 'standard',
+        utilizationBucket: i, durationMs: i,
+      }));
+    }
+    const raw = spool();
+    expect(raw).not.toContain('sk-ant');
+    expect(raw).not.toContain('Bearer');
+    expect(raw).not.toContain('accessToken');
+    expect(raw).not.toContain('refreshToken');
+    expect(raw).not.toContain(homedir());
   });
 });

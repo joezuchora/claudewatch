@@ -14,6 +14,13 @@
       "name": "@claudewatch/core",
       "version": "0.1.0",
     },
+    "packages/metrics": {
+      "name": "@claudewatch/metrics",
+      "version": "0.1.0",
+      "dependencies": {
+        "@claudewatch/core": "workspace:*",
+      },
+    },
     "packages/statusline": {
       "name": "@claudewatch/statusline",
       "version": "0.1.0",
@@ -34,6 +41,8 @@
   },
   "packages": {
     "@claudewatch/core": ["@claudewatch/core@workspace:packages/core"],
+
+    "@claudewatch/metrics": ["@claudewatch/metrics@workspace:packages/metrics"],
 
     "@claudewatch/statusline": ["@claudewatch/statusline@workspace:packages/statusline"],
 

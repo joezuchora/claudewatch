@@ -26,6 +26,13 @@ plan to disclose publicly, please give a reasonable window to ship a fix first.
 
 ## Design guarantees
 
+> **Changed 2026-08-26.** This project previously promised "no telemetry" outright. That
+> promise has been narrowed, deliberately and through a recorded spec amendment
+> (`sdlc/003-metrics-telemetry`, amending `SPEC.md` §12, §17 and §20). It is stated below in
+> its new form rather than quietly dropped. What has *not* changed: the shipped binary and
+> extension still open no network connection except to the usage endpoint, and no credential
+> or identifying detail can appear in any payload.
+
 These are invariants, specified in `SPEC.md §12` and re-checked on every change by the
 security pass in [`REVIEW.md`](./REVIEW.md). A violation of any of them is a vulnerability,
 not a bug:
@@ -39,8 +46,13 @@ not a bug:
   on, and the request times out after 5 seconds.
 - **Cache files are private.** Written atomically (temp file then rename), directory `0700`,
   file `0600`, with symlink targets checked before writing.
-- **No telemetry.** Nothing is transmitted anywhere except the documented Anthropic usage
-  endpoint. There is no analytics, no crash reporting, and no phone-home.
+- **Telemetry is off by default and has no default destination.** ClaudeWatch never opens a
+  network connection to anything but the documented Anthropic usage endpoint. When you enable
+  telemetry, the tool appends metrics to a local file; a separate agent *you* run ships them
+  to a service *you* host. The tool reports on itself to a service its owner runs — it does
+  not report on you to anyone else. No payload can contain a token, a path, a hostname, a
+  username, or an account identifier, because every field is a number, a boolean, or a value
+  from a fixed list.
 - **No third-party runtime dependencies** in `packages/core`, which keeps the supply-chain
   surface to Bun and the standard library.
 

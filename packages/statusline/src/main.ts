@@ -17,6 +17,10 @@ import {
   formatRichStatusLine,
   markStale,
   makeErrorSnapshot,
+  resolveTelemetryConfig,
+  emit,
+  renderEvent,
+  utilizationBucket,
   type UsageSnapshot,
   type CacheEnvelope,
   type SessionInfo,
@@ -313,6 +317,8 @@ export async function main(): Promise<never> {
 // --- Output helper ---
 
 function output(snapshot: UsageSnapshot, flags: CliFlags, session: SessionInfo | null = null): void {
+  const started = Bun.nanoseconds();
+
   if (flags.json) {
     console.log(JSON.stringify(snapshot, null, 2));
   } else if (session) {
@@ -320,6 +326,21 @@ function output(snapshot: UsageSnapshot, flags: CliFlags, session: SessionInfo |
   } else {
     console.log(formatStatusLine(snapshot, getTerminalWidth()));
   }
+
+  // Emitted AFTER the output is written, so telemetry can never delay what the user sees.
+  // Disabled by default: resolveTelemetryConfig short-circuits before any filesystem access.
+  // The statusline has no settings file of its own, so this resolves from the environment
+  // (CLAUDEWATCH_TELEMETRY) or ~/.config/claudewatch/config.json — see sdlc/003.
+  emit(
+    resolveTelemetryConfig(),
+    renderEvent({
+      surface: 'statusline',
+      runtimeState: classify(snapshot),
+      tier: snapshot.tier,
+      utilizationBucket: utilizationBucket(snapshot.display.primaryUtilizationPct),
+      durationMs: Math.round((Bun.nanoseconds() - started) / 1e6),
+    }),
+  );
 }
 
 // --- Run with top-level error catch ---

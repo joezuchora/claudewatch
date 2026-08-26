@@ -361,7 +361,7 @@ If only one valid window is available, that window becomes primary. If no window
 
 ### 8.1 Repository Structure
 
-All code lives in a single public GitHub repository named `claudewatch`. The repository is organized as a bun workspace monorepo with three packages:
+All code lives in a single public GitHub repository named `claudewatch`. The repository is organized as a bun workspace monorepo with four packages (`metrics` added 2026-08-26, `sdlc/003-metrics-telemetry`):
 
 ```
 claudewatch/
@@ -569,6 +569,9 @@ Optional fields must be omitted cleanly if unavailable. They must not render as 
 | `claudewatch.refreshIntervalSeconds` | number | 60 |
 | `claudewatch.warningThresholdPct` | number | 70 |
 | `claudewatch.criticalThresholdPct` | number | 90 |
+| `claudewatch.telemetry.enabled` | boolean | false |
+
+`claudewatch.telemetry.enabled` opts in to local metric spooling (§17). It is off by default, has no destination, and the statusline binary reads the same setting from `CLAUDEWATCH_TELEMETRY` or `~/.config/claudewatch/config.json` — VS Code settings do not reach it.
 
 ### 10.7 Error and Degraded States
 
@@ -658,6 +661,9 @@ After installation, restart Claude Code. No shell profile editing required.
 ---
 
 ## 12. Security and Trust Boundaries
+
+**Telemetry trust boundary** (added 2026-08-26, `sdlc/003-metrics-telemetry`): the product writes telemetry to a local spool file and never transmits it. Shipping is performed by a separate agent the user runs, to a service the user hosts. The product therefore has no telemetry destination to be misconfigured, redirected, or intercepted. Spool file mode `0600`, directory `0700`; modes are advisory on Windows, as for the cache.
+
 
 ClaudeWatch is a local companion utility, not a credential manager.
 
@@ -796,7 +802,13 @@ Use recorded or mocked responses for:
 
 ## 17. Observability and Debugging
 
-Logging is minimal and local-only. No telemetry in v1.
+Logging is minimal and local-only. **Telemetry is off by default and has no default destination** (amended 2026-08-26, `sdlc/003-metrics-telemetry`).
+
+When a user explicitly enables it, ClaudeWatch appends metric events to a local spool file. It does **not** transmit them: the product opens no network connection other than the documented usage endpoint. A separate agent, run by the user, ships the spool to a service the user hosts.
+
+**Allowed telemetry payload values:** numbers, booleans, and members of closed enumerations only. There are no free-text payload fields, because the leak vector is a value rather than a key — `client.ts` places `fetch` error messages into failures, and those carry hostnames and home-directory paths.
+
+**Forbidden in telemetry:** access or refresh tokens, filesystem paths, hostnames, usernames, project names, account identifiers, and enterprise credit amounts (an account's billing position is not a health signal — `tier` and a decile bucket carry the signal without it).
 
 **Allowed debug information** (surfaced via `--debug` flag): state classification, timestamp of last successful refresh, cache age, cooldown status, credential file path (not contents), normalization warnings, cache file path, terminal width detected.
 
@@ -1068,7 +1080,7 @@ To avoid drift, the following are fixed for v1:
 - Session-aware rich statusline is implemented via stdin JSON piped from Claude Code
 - Session analytics (historical trends, burn-rate) are deferred to v2
 - Missing optional fields are omitted, not guessed
-- No telemetry is shipped
+- No telemetry is enabled by default and no default destination exists; the product never opens a socket except to the documented usage endpoint (amended `sdlc/003-metrics-telemetry`)
 - No token is ever persisted outside the existing Claude Code credential file
 - Marketplace publishing is not required for v1 success
 - v1 targets Windows + Linux only; macOS is v2

@@ -32,6 +32,10 @@ export const formatStatusLine = core.formatStatusLine;
 export const formatRichStatusLine = core.formatRichStatusLine;
 export const markStale = core.markStale;
 export const makeErrorSnapshot = core.makeErrorSnapshot;
+export const resolveTelemetryConfig = core.resolveTelemetryConfig;
+export const emit = core.emit;
+export const renderEvent = core.renderEvent;
+export const utilizationBucket = core.utilizationBucket;
 
 export type {
   UsageSnapshot,

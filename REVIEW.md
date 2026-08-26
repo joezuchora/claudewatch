@@ -49,7 +49,7 @@ Run the `security-reviewer` subagent. Authoritative invariants are `SPEC.md §12
 - **Transport.** Hardcoded `https://`, TLS verification never disabled, 5s timeout intact.
 - **Filesystem.** Atomic writes (temp + rename), directories `0700`, files `0600`, symlink
   targets checked with `lstat` before write.
-- **No telemetry.** Nothing is transmitted anywhere but the documented usage endpoint.
+- **Telemetry stays local and opt-in.** The product transmits nothing but requests to the documented usage endpoint. Telemetry is written to a local spool and is off by default with no default destination. Verify against the diff: no new network call in `packages/core`, `packages/statusline` or `packages/vscode`; telemetry still defaults off; and **every payload leaf is a number, a boolean, or a member of a closed enumeration.** A free-text payload field is a blocking finding — the leak vector is the value, not the key.
 
 **Standing items** from `docs/audit-report.md`, open and re-checked whenever the diff comes
 near them:
