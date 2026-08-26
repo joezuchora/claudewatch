@@ -1,6 +1,6 @@
 # Spec: an opt-out for `verify_run` recording
 
-- **Status:** draft
+- **Status:** draft — two false claims in the rejected-alternatives table found and corrected before review returned
 - **Stage:** 2 — Design
 - **Reads:** `sdlc/021-verify-record-optout/intent.md`
 
@@ -40,7 +40,7 @@ honest position is: on by default, documented, and one environment variable away
 | Alternative | Why not |
 |---|---|
 | Reuse `CLAUDEWATCH_TELEMETRY` | Conflates two different things. `CLAUDEWATCH_TELEMETRY=1` would then also switch on the gate's recording for someone who only wanted product telemetry, and `=0` would silently disable the loop's data collection for the repo owner. One switch, two audiences, opposite defaults — a guaranteed surprise in both directions. |
-| A `--no-metrics` CLI flag | `verify` is invoked by CI, by the hook, and by `bun run` with no arg passthrough. An env var reaches all three; a flag reaches none of them without editing call sites. |
+| A `--no-metrics` CLI flag | **Not for the reason a first draft of this table gave.** It claimed `bun run` does not pass arguments through and that a hook invokes `verify`; both are false — `bun run verify --no-metrics` does reach `process.argv`, and the `PostToolUse` hook runs `bun run typecheck`, not `verify`. A flag is therefore workable. The real reason to prefer an env var: the choice belongs to the *environment* a clone runs in, not to each invocation. CI (`.github/workflows/ci.yml:29`), a future `make` target, and a contributor's shell all get it from one place, and nobody has to remember the flag at each call site. A flag would also have to be threaded past `verify`'s own step commands, which spawn `bun` themselves. |
 | A config-file key | `~/.config/claudewatch/config.json` is *product* configuration and is read by the shipped binary. Adding a dev-script key there mixes two audiences in one file. |
 | Off by default with an opt-in | See above. It is the choice that looks responsible and costs the project its only evidence. |
 
