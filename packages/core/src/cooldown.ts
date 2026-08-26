@@ -48,5 +48,9 @@ export function clearCooldown(envelope: CacheEnvelope): CacheEnvelope {
  * Auth failures don't trigger cooldown — they won't resolve on their own.
  */
 export function shouldCooldown(failureClass: FailureClass): boolean {
-  return failureClass === 'serviceUnavailable';
+  // Both, deliberately. sdlc/010 split 'timeout' out of 'serviceUnavailable'; leaving this
+  // line alone would have silently stopped timeouts from entering the 5-minute cooldown
+  // (SPEC.md §9.4) — the backoff that exists mainly FOR a slow endpoint. A behaviour
+  // regression wearing a type change's clothes.
+  return failureClass === 'serviceUnavailable' || failureClass === 'timeout';
 }

@@ -94,3 +94,22 @@ describe('cooldown', () => {
     });
   });
 });
+
+describe('shouldCooldown after the timeout split (sdlc/010)', () => {
+  test('REGRESSION GUARD: a timeout still enters cooldown', () => {
+    // sdlc/010 split 'timeout' out of 'serviceUnavailable'. If shouldCooldown had been left
+    // alone, timeouts would have silently stopped entering the 5-minute backoff that exists
+    // mainly for a slow endpoint — a behaviour regression wearing a type change's clothes.
+    expect(shouldCooldown('timeout')).toBe(true);
+  });
+
+  test('serviceUnavailable still enters cooldown', () => {
+    expect(shouldCooldown('serviceUnavailable')).toBe(true);
+  });
+
+  test('no other class enters cooldown', () => {
+    for (const c of ['notConfigured', 'authInvalid', 'malformedResponse', 'unexpectedFailure'] as const) {
+      expect(shouldCooldown(c)).toBe(false);
+    }
+  });
+});

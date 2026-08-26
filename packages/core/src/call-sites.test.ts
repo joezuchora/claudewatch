@@ -172,4 +172,49 @@ describe('telemetry call sites', () => {
       expect(JSON.stringify(events[0]!.payload)).not.toContain('ECONNREFUSED');
     });
   });
+
+  describe('timeout as a distinct failure class (sdlc/010)', () => {
+    const originalFetch = globalThis.fetch;
+    beforeEach(() => { setTelemetryConfig({ enabled: true }); });
+    afterEach(() => { globalThis.fetch = originalFetch; });
+
+    test('an aborted request reports timeout, not serviceUnavailable', async () => {
+      // Honour the abort signal the client passes, as a real fetch would.
+      globalThis.fetch = mock((_url: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise((_res, rej) => {
+          init?.signal?.addEventListener('abort', () =>
+            rej(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })));
+        })) as unknown as typeof fetch;
+
+      const result = await fetchUsage('sk-ant-oat01-FAKE');
+      expect(result.ok).toBe(false);
+      // FetchResult is a discriminated union; the success variant has no failureClass.
+      if (!result.ok) {
+        expect(result.failureClass).toBe('timeout');
+        expect(result.status).toBeNull();
+      }
+    }, 30_000);
+
+    test('a plain network error still reports serviceUnavailable', async () => {
+      globalThis.fetch = mock(async () => {
+        throw new Error('connect ECONNREFUSED 10.0.0.1:443');
+      }) as unknown as typeof fetch;
+
+      const result = await fetchUsage('sk-ant-oat01-FAKE');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.failureClass).toBe('serviceUnavailable');
+    });
+
+    test('telemetry reports statusClass timeout, which was unreachable before', async () => {
+      globalThis.fetch = mock((_url: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise((_res, rej) => {
+          init?.signal?.addEventListener('abort', () =>
+            rej(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        })) as unknown as typeof fetch;
+
+      await fetchUsage('sk-ant-oat01-FAKE');
+      const events = spoolLines().filter((e) => e.kind === 'fetch_result');
+      expect(events[0]!.payload.statusClass).toBe('timeout');
+    }, 30_000);
+  });
 });

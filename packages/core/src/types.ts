@@ -62,6 +62,8 @@ export type FailureClass =
   | 'notConfigured'
   | 'authInvalid'
   | 'serviceUnavailable'
+  /** The 5s hard timeout specifically, as distinct from an unreachable endpoint (sdlc/010). */
+  | 'timeout'
   | 'malformedResponse'
   | 'unexpectedFailure';
 

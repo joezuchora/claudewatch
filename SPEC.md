@@ -342,7 +342,8 @@ If only one valid window is available, that window becomes primary. If no window
 |---|---|
 | Not configured | Credentials file missing or unreadable |
 | Auth invalid | 401 or equivalent authentication failure; expired token |
-| Service unavailable | Network timeout, DNS failure, API unreachable, 5xx, 429 |
+| Timeout | The 5-second hard timeout aborted the request (amended 2026-08-26, `sdlc/010`) |
+| Service unavailable | DNS failure, API unreachable, 5xx, 429 |
 | Malformed response | Response shape no longer matches minimum required contract |
 | Unexpected runtime failure | Unhandled logic or environment issue |
 

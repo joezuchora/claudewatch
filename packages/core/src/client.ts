@@ -44,12 +44,12 @@ function delay(ms: number): Promise<void> {
 
 /** Map a result onto the closed status-class enumeration telemetry payloads accept. */
 function statusClassOf(result: FetchResult): StatusClass {
-  // 'network' covers every status-less failure, including the 5s timeout. FailureClass has
-  // no 'timeout' member (types.ts), so a timeout and a DNS failure are indistinguishable
-  // here without parsing the error message — and error messages are exactly the free text
-  // that must never reach a payload. StatusClass's 'timeout' is therefore currently
-  // unreachable from this call site; recorded in sdlc/007's review rather than faked.
-  if (result.status === null) return 'network';
+  // A status-less failure is either our own 5s timeout or an unreachable endpoint. sdlc/010
+  // made those distinguishable via an abort flag rather than message parsing, which is what
+  // finally makes StatusClass's 'timeout' reachable instead of decorative.
+  if (result.status === null) {
+    return result.failureClass === 'timeout' ? 'timeout' : 'network';
+  }
   if (result.status >= 500) return '5xx';
   if (result.status >= 400) return '4xx';
   return '2xx';
@@ -82,7 +82,11 @@ export async function fetchUsage(token: string): Promise<FetchResult> {
     const attemptStarted = Date.now();
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    // The timeout callback is the ONLY code that knows a timeout happened. Reading it from a
+    // flag beats parsing err.message, which varies by platform and Bun version and is exactly
+    // the free text the telemetry allowlist exists to keep out (sdlc/007, sdlc/010).
+    let timedOut = false;
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, TIMEOUT_MS);
 
     try {
       const result = await singleFetch(token, controller.signal);
@@ -103,7 +107,12 @@ export async function fetchUsage(token: string): Promise<FetchResult> {
       clearTimeout(timeout);
       fetchedMs += Date.now() - attemptStarted;
       const message = err instanceof Error ? err.message : 'Unknown network error';
-      lastError = { ok: false, status: null, failureClass: 'serviceUnavailable', message };
+      lastError = {
+        ok: false,
+        status: null,
+        failureClass: timedOut ? 'timeout' : 'serviceUnavailable',
+        message,
+      };
     }
   }
 
