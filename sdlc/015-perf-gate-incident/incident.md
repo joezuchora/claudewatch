@@ -2,7 +2,7 @@
 
 - **ID:** 015-perf-gate-incident
 - **Stage:** 6 — Maintain
-- **Status:** open
+- **Status:** open — second occurrence recorded 15:20, different specific cause, same root
 - **Detected:** 2026-08-26 14:22 UTC — by `bun run verify` on a clean tree, first run of the iteration
 - **Severity:** blocking. The gate is the entry condition for every change; while it is red, nothing can be committed under this repo's own rules.
 
@@ -27,6 +27,49 @@ p50: 58.0ms against 50ms — BREACH
 
 No code changed. The binary is the one `sdlc/013` measured at **41.1 ms** roughly ninety minutes
 earlier, on this same container.
+
+## Second occurrence, 2026-08-26 15:20 — a different specific cause, and a new product finding
+
+The mitigation below (report-only) held: the budget breach no longer fails the gate. The gate
+went red anyway, on the next iteration's first run, for a different reason:
+
+```
+(fail) THE SHIPPED ARTIFACT: the real binary measures clean and makes no network call
++   "code": 2,
++   "err": "sample -1 timed out after 5000ms"
+```
+
+**A single spawn of the compiled binary took over five seconds**, against a p50 of ~40–50 ms.
+A 100× outlier, on a warm-up sample — the first exec of the run.
+
+### The pattern, now three for three
+
+| Iteration | first-run test step | normal | outcome |
+|---|---|---|---|
+| 13:26 | 10.4 s | ~7 s | failed, output lost |
+| 14:22 | 13.4 s | ~7 s | failed, p50 breach at 54–60 ms |
+| 15:20 | 11.2 s | ~7 s | failed, one spawn > 5000 ms |
+
+Every failure is the **first workload after ~50 minutes of container idle**, and every one is
+slower across the whole test step, not just the perf part. The binary is **99.3 MB**.
+
+### What this is data for, stated carefully
+
+The queue carries "the intermittent 550 s verify hang — blocked on data, do not speculate."
+This is data, and it should be recorded without being oversold:
+
+- **Observed, captured, timestamped:** a spawn of the shipped binary exceeding 5 s, caught by
+  the per-sample timeout that `sdlc/013`'s security pass insisted on. Without that guard it
+  would have been an unexplained slow run.
+- **Not established:** that this is the same phenomenon as the 550 s hang, or that page-cache
+  eviction of a 99 MB binary is the mechanism. Both are plausible and neither is tested. Cache
+  state cannot be dropped without privileges this container lacks, so the obvious experiment is
+  not available here.
+
+**The genuinely new product finding**, independent of the hang: `SPEC.md §11.7` budgets only the
+warm path. A user returning after an idle period pays a cold exec of a 99 MB binary on the
+statusline, which renders on every prompt. Nothing in the spec, the tests, or the budget looks at
+that, and this is the first time anything has measured it — accidentally.
 
 ## Impact
 
@@ -79,9 +122,16 @@ Observed p50 across sessions is now 41.1, 41.4, 42.6, 42.7, 54.0, 56.8, 58.9, 59
 product; it was wrong about the instrument's stability, on evidence that was already in the
 document.
 
-- **Introduced by:** `sdlc/013-perf-budget`, the `verify` p50 gate
+**Both occurrences share one root, and it is broader than the p50 margin.** Every timing
+constant `sdlc/013` chose — the 50 ms p50 budget, the 5 s per-sample timeout — was set against a
+measurement window that turned out to be the favourable one. The budget was 1.22× the observed
+p50; the timeout was ~120× the observed p50 and still not enough for a cold exec. The error is
+not any single number, it is having calibrated a whole instrument from one afternoon's readings
+on one machine, in a document that argued against exactly that for the tail.
+
+- **Introduced by:** `sdlc/013-perf-budget`, the `verify` p50 gate and the 5 s per-sample timeout
 - **Stage that should have caught it:** Design. The variance argument was written, applied to
-  one number, and not applied to the other.
+  one number, and not applied to the others.
 - **Why it didn't:** the spec reviewer challenged the p95 grounding hard and I rewrote it; the
   p50 row was inherited unchanged from the old SPEC and read as "preserved", so neither of us
   re-derived it. A number that survives review by looking familiar is not a number that has been
@@ -96,10 +146,17 @@ already requires for changes touching the startup path.
 This is a mitigation, not the fix. It restores the loop and keeps the measurement visible on
 every run, but it removes the automated tripwire that was the point of putting it in the gate.
 
+**Second mitigation (15:20).** `SAMPLE_TIMEOUT_MS` goes from 5 s to 30 s. Five seconds was
+chosen as "a generous multiple of the budget" and is demonstrably not generous: a real cold exec
+exceeded it. Thirty still bounds a hang — it would have caught the 550 s event by a factor of
+18 — while tolerating a cold page-in. The guard's stated purpose, from `scripts/verify.ts`, is
+that "a hang is RECORDED rather than hanging the terminal forever", and 30 s serves that.
+
 ## Follow-up
 
 | Follow-up | New intent ID | Status |
 |---|---|---|
+| Measure the **cold** path, or state in `SPEC.md §11.7` that it is unmeasured — a 99 MB binary's first exec after idle is what a returning user actually pays, and nothing looks at it | `017-cold-start-unmeasured` | drafted |
 | A regression check against a **recorded baseline** rather than a fixed threshold — the shape `packages/metrics/src/anomaly.ts` already implements for `verify` durations, and which `sdlc/013`'s own spec named as the right instrument for the tail | `016-perf-regression-baseline` | drafted |
 
 ## What we are not changing

@@ -56,8 +56,14 @@ export const SENTINEL_PCT = 37;
  * Per-sample ceiling. Overridable so the timeout guard can be TESTED rather than reasoned
  * about — the same affordance `scripts/verify.ts` gives its own step timeout. The audit found
  * that removing this guard entirely left every test green.
+ *
+ * 30s, not the 5s this started at. Five was picked as "a generous multiple of the budget" and
+ * was not: a real cold exec of this 99MB binary exceeded it on the first run after the host
+ * had been idle, turning the gate red for no code reason (sdlc/015). Thirty still does the job
+ * the guard exists for — bounding a hang so it is RECORDED rather than hanging the terminal —
+ * and would have caught the 550s event by a factor of 18.
  */
-const SAMPLE_TIMEOUT_MS = Number(process.env.CLAUDEWATCH_PERF_SAMPLE_TIMEOUT_MS ?? 5_000);
+const SAMPLE_TIMEOUT_MS = Number(process.env.CLAUDEWATCH_PERF_SAMPLE_TIMEOUT_MS ?? 30_000);
 
 const DEFAULT_BIN = join(import.meta.dir, '..', 'packages', 'statusline', 'dist', 'claudewatch');
 
