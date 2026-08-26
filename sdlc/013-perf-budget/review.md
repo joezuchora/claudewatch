@@ -56,7 +56,9 @@ number will be re-estimated one day and the method is what would repeat.
 |---|---|---|---|
 | 1 | major | **CI red on `e9080dd`, and it was my test, not the budget.** The isolation test asserted the ambient HOME stayed *entirely* empty. `bun run` creates `$HOME/.bun` when `BUN_INSTALL` is not redirected — true on the runner, false here — so it passed locally and failed on CI. The assertion was a claim about bun, not about `perf.ts`. | **Fixed** and narrowed to the property meant: no `.claude`, no `.cache/claudewatch`. Verified it still has teeth by pointing `perf.ts` at the ambient HOME. |
 | 2 | major | **`expect(childEnv(log)).toHaveLength(WARMUP + 30)` could not detect `WARMUP` changing** — the constant moves both sides of the assertion. Same tautology the audit caught in `expect(GENERAL_LIMIT).toBe(1000)` last loop. | **Fixed.** `WARMUP` is pinned to its literal separately, which is what makes the spec's "5 discarded warm-ups" a claim rather than a description. |
-| 3 | minor | A lint **error** (unused `readdirSync`) reached a commit — `verify` catches it, but I pushed before re-running the full gate after that edit. | Fixed; three new warnings of mine fixed too, so the count is back to exactly 12, unchanged by this loop. |
+| 3 | major | **CI red again on `da35774`, and again it was ambient state making a test lie.** `THE SHIPPED ARTIFACT` failed in 14.86 ms — far too fast for 35 spawns. `verify` runs `test` **before** `build`, and `dist/` is gitignored, so on a fresh checkout the shipped artifact does not exist when that file runs. It passed locally only because a binary was sitting there from an earlier build. | **Fixed** — a `beforeAll` that builds if absent, exactly as `smoke.test.ts` does. Verified by deleting `dist/claudewatch` and re-running both the file and the whole gate. Note the shape: the *previous* CI failure was also ambient state (`$HOME/.bun` existing on the runner and not here). Two consecutive red runs, both from something present on one machine and not the other. |
+| 4 | minor | The `sleep 5` timeout stub left an orphan process the runner had to reap (`Terminate orphan process: pid (2588) (sleep)`). `Bun.spawnSync`'s timeout kills the shell, not the `sleep` it forked. | Fixed with `exec sleep 5`, so the shell is replaced and the timeout kills the real process. |
+| 5 | minor | A lint **error** (unused `readdirSync`) reached a commit — `verify` catches it, but I pushed before re-running the full gate after that edit. | Fixed; three new warnings of mine fixed too, so the count is back to exactly 12, unchanged by this loop. |
 
 ### Mutation results, after the fixes
 
@@ -128,6 +130,13 @@ $ echo $?
   iteration next has room. Recorded so it is not mistaken for current.
 
 ## What this loop says about the loop
+
+**Two consecutive CI failures, both ambient state.** First `$HOME/.bun`, which exists on the
+runner and not here; then a built binary, which existed here and not on a fresh checkout. Both
+tests passed locally for reasons that had nothing to do with what they were testing. The gate
+cannot catch this class on the machine that created the state — only a clean checkout can, which
+is the argument for CI running the identical command rather than a weaker one, and the argument
+against ever reading a local green as proof.
 
 **I asserted a broader property than the one I meant, four times in one session.** Twice a *cap*
 where the design gives a *floor* (`sdlc/012`), once an empty directory where the claim was "no

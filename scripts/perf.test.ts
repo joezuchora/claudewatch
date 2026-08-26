@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
+import { spawnSync } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -6,9 +7,24 @@ import { evaluate, makeSandbox, BUDGET_P50_MS, BUDGET_P95_MS, P95_MIN_SAMPLES, M
 
 const REPO = join(import.meta.dir, '..');
 const SCRIPT = join(import.meta.dir, 'perf.ts');
+const BIN = join(REPO, 'packages', 'statusline', 'dist', 'claudewatch');
 
 let dir: string;
-beforeAll(() => { dir = mkdtempSync(join(tmpdir(), 'cw-perf-test-')); });
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), 'cw-perf-test-'));
+
+  // Build the binary if it is absent, exactly as smoke.test.ts does.
+  //
+  // `verify` runs `test` BEFORE `build`, and `dist/` is gitignored — so on a fresh checkout the
+  // shipped artifact does not exist when this file runs. It passed locally only because a
+  // binary was already sitting there from an earlier build, which is precisely the kind of
+  // ambient state that makes a test lie. CI found it on the first clean run.
+  if (!existsSync(BIN)) {
+    const built = spawnSync('bun', ['run', '--filter', '@claudewatch/statusline', 'build'],
+      { cwd: REPO, stdio: 'ignore' });
+    if (built.status !== 0) throw new Error('could not build the statusline binary for perf tests');
+  }
+});
 afterAll(() => { rmSync(dir, { recursive: true, force: true }); });
 
 /**
@@ -273,7 +289,7 @@ describe('the CLI, run the way the gate runs it', () => {
   });
 
   test('a sample that outlives the per-sample timeout is exit 2, naming the index', () => {
-    const r = run(['--bin', stub('slow', 'sleep 5'), '--samples', '30'],
+    const r = run(['--bin', stub('slow', 'exec sleep 5'), '--samples', '30'],
       { CLAUDEWATCH_PERF_SAMPLE_TIMEOUT_MS: '100' });
     expect(r.code).toBe(2);
     expect(r.err).toContain('timed out');
