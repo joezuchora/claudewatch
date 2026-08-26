@@ -25,16 +25,35 @@ green and nothing downstream can be trusted.
 
 ```
 package.json
+bun.lock
 .oxlintrc.json
-packages/statusline/src/deps.ts
+.oxlintrc.README.md
+packages/statusline/src/core-deps.ts
 packages/statusline/src/main.ts
 packages/statusline/src/main.test.ts
+packages/vscode/src/core-bridge.ts
+packages/vscode/src/statusbar.ts
+packages/vscode/src/statusbar.test.ts
+packages/vscode/src/tooltip.ts
+packages/vscode/src/tooltip.test.ts
+packages/vscode/src/extension.ts
+packages/core/src/client.test.ts
+packages/core/src/cooldown.test.ts
+packages/core/src/credentials.test.ts
+packages/core/src/types.test.ts
 .github/workflows/ci.yml
 CLAUDE.md
 .claude/settings.json
 sdlc/001-quality-gate/plan.md
 sdlc/001-quality-gate/review.md
 ```
+
+> **Fence amended during implementation (2026-08-26).** The original fence covered only
+> `packages/statusline`. Two discoveries widened it, both recorded in `review.md`:
+> `packages/vscode/src/statusbar.test.ts` turned out to be a *second* file mocking the shared
+> core barrel, so the same indirection had to be applied there; and the linter's first run
+> found unused imports in four `packages/core` test files. The original fence is preserved in
+> git history at commit `bbeff04`.
 
 Any lint fix required in a file outside this list is an excursion and must be recorded in
 `review.md`. That is expected to happen — the linter has never run on this tree — so the
