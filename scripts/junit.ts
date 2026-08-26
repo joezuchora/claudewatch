@@ -98,7 +98,11 @@ export function scrubPaths(value: string): string {
     // neither of the other two branches — found by the sdlc/020 security pass.
     .replace(/\\\\[^\s"']+/g, '<path>')
     .replace(/[A-Za-z]:[\\/][^\s"']*/g, '<path>')
-    .replace(/\/[^\s"'/]+(?:\/[^\s"'/]*)+/g, '<path>');
+    // The leading slash must start a token — begin-of-string, whitespace, or a quote. Without
+    // that boundary, a describe name like `A5/A6/A7` matches at `/A6/A7` and is recorded as
+    // `A5<path>`, which is worse than useless: the whole point of naming the failing test is to
+    // send a reader to the right place. Found when this loop's own gate went red. (sdlc/021)
+    .replace(/(^|[\s"'])(\/[^\s"'/]+(?:\/[^\s"'/]*)+)/g, '$1<path>');
 }
 
 /**

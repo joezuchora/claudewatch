@@ -445,3 +445,34 @@ describe('A13 — tightenMode, against a report bun really wrote', () => {
     expect(() => tightenMode(join(tmpdir(), 'definitely-not-here-9f3a.xml'))).not.toThrow();
   });
 });
+
+describe('scrubPaths does not mangle names that merely contain slashes (sdlc/021)', () => {
+  test('a describe chain like A5/A6/A7 survives intact', () => {
+    // Found when this loop's gate went red for real: the recorded name came back as
+    // `A5<path> — the switch...`, because `/A6/A7` looked like a two-segment path. A mangled
+    // name defeats the purpose of recording it at all.
+    const xml = wrap(testcase('name="A5/A6/A7 — the switch against the real script" file="a.test.ts"'));
+    expect(parseJunitFailures(xml, ROOT)[0]!.name).toBe('A5/A6/A7 — the switch against the real script');
+  });
+
+  test('date-like and ratio-like text survives', () => {
+    for (const name of ['handles 2026/08/26 input', 'a 3/4 majority', 'reads config a/b/c']) {
+      const xml = wrap(testcase(`name="${name}" file="a.test.ts"`));
+      expect(parseJunitFailures(xml, ROOT)[0]!.name).toBe(name);
+    }
+  });
+
+  test('but a REAL absolute path is still scrubbed — the guard did not just get weaker', () => {
+    // The non-vacuous half. Loosening a sanitizer is exactly where a silent regression hides.
+    for (const [name, expected] of [
+      ['fails for /home/joe/secret/x', 'fails for <path>'],
+      ['/home/joe/secret/x at the start', '<path> at the start'],
+      // &quot; because a raw " inside an XML attribute is malformed — bun escapes it, and so
+      // must a fixture claiming to represent bun's output.
+      ['quoted &quot;/home/joe/secret/x&quot; here', 'quoted "<path>" here'],
+    ]) {
+      const xml = wrap(testcase(`name="${name}" file="a.test.ts"`));
+      expect(parseJunitFailures(xml, ROOT)[0]!.name).toBe(expected);
+    }
+  });
+});

@@ -136,9 +136,24 @@ function makeFixture(failing: boolean): { dir: string; home: string } {
 }
 
 function runGate(fixture: { dir: string; home: string }, env: Record<string, string>): number {
+  // The child env is built by DELETING the switch first, then applying `env`.
+  //
+  // Spreading `...process.env` alone made the "unset" case a lie: the loop's own runbook now
+  // exports CLAUDEWATCH_VERIFY_METRICS=1 before running the gate, so the parent had it set and
+  // the child inherited it. The test asserting "unset behaves as disabled" was really asserting
+  // "=1 behaves as disabled", and it failed the moment the runbook was followed. Found by the
+  // gate going red for real — and named by the very event loop 020 added.
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: fixture.home,
+    USERPROFILE: fixture.home,
+  };
+  delete childEnv[VERIFY_METRICS_ENV];
+  Object.assign(childEnv, env);
+
   const proc = spawnSync('bun', ['run', VERIFY], {
     cwd: fixture.dir,
-    env: { ...process.env, HOME: fixture.home, USERPROFILE: fixture.home, ...env },
+    env: childEnv,
     stdio: 'ignore',
     timeout: 120_000,
   });
@@ -185,7 +200,9 @@ describe('A5/A6/A7 — the switch against the real script', () => {
     }
   }, 180_000);
 
-  test('A5 — unset behaves as disabled', () => {
+  test('A5 — unset behaves as disabled, even when the PARENT has it set', () => {
+    // Guards the inheritance bug above: this test is meaningless unless the child genuinely
+    // lacks the variable, and the parent process running the suite may well have it.
     const f = makeFixture(false);
     try {
       expect(runGate(f, {})).toBe(0);
