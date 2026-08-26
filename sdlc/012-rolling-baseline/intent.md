@@ -2,9 +2,30 @@
 
 - **ID:** 012-rolling-baseline
 - **Stage:** 1 — Plan
-- **Status:** draft
+- **Status:** amended — see the correction below
 - **Author:** the metrics pipeline, read after loop 011 shipped
 - **Date:** 2026-08-26
+
+## Correction, 2026-08-26 (Design stage)
+
+**Two of the numbers below are wrong, and the spec-reviewer caught both.** They are left in
+place rather than edited away, because an intent that quietly acquires the right answer is
+worthless as a record of how the answer was reached.
+
+1. **"until the pre-011 runs age out of the 90-day retention window" / "for the next three
+   months" is wrong by about two orders of magnitude.** `percentile` indexes
+   `sorted[floor(0.95·n)]`, so five slow runs stop occupying the p95 index once
+   `floor(0.95·n) ≤ n−6` — first true at **n = 101**, i.e. about 82 more runs. At the rate this
+   gate is now run that is a couple of hours, not three months. The desensitisation is real;
+   the urgency was invented.
+
+2. **"a hang makes the following hang harder to see" holds only at n ≤ 20.** At n = 21 the p95
+   index stops being the maximum index, so a single hang no longer touches the threshold. The
+   ratchet needs hangs to be ≥5% of the sample to exist at all.
+
+What survived the review, and what the loop is now actually about, is in `spec.md`. It is a
+different and larger defect than the one described below, found by reading the code path that
+feeds the detector rather than the detector itself.
 
 ## Problem
 

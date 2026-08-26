@@ -1,173 +1,235 @@
-# Spec: a baseline that reflects the gate as it is now
+# Spec: give the duration detector a window it actually controls
 
 - **ID:** 012-rolling-baseline
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** revised after review — see "What the review changed"
 - **Derived from:** [`intent.md`](./intent.md)
 
-## Summary
+## What the review changed
 
-`detectDurationOutlier` will compare the latest verify run against the **median of a bounded
-window of recent runs**, rather than against the p95 of all retained history. A step change in
-the gate's duration will re-anchor the detector as soon as it is the majority of the window,
-instead of persisting for the 90-day retention period.
+The first draft of this spec proposed replacing p95-of-all-history with median-of-a-50-run
+window at an 8× multiple. The `spec-reviewer` returned four blocking findings and the design
+did not survive them. Recording that here, because the corrections are more useful than the
+proposal was:
 
-## Two defects, not one
+- **The regime table was cohorted by value, not by time** — I sorted runs into "fast" and
+  "slow" buckets *by their duration* and then reported that within-bucket spread was small.
+  That is circular. Cohorted honestly by `ts`, the post-011 window (n = 14) has median 5 936 ms
+  and max **59 483 ms** — a spread of **10.02×**, not the 1.43× the draft claimed. The 59 s run
+  is a passing, 4-step, non-timeout `verify` at 10:30:54, sitting between fast runs on both
+  sides. It is one of my own before/after measurements, run on a stashed pre-011 tree.
+- **So the proposed 8× multiple would have fired on it.** At a 5 959 ms median the wire sits at
+  47.7 s, and the store contains a legitimate 59.5 s run. Against this module's standing rule —
+  a false positive costs more than a miss — that is disqualifying.
+- **The proposal was also *blunter* than the code it replaced.** At steady state with ~101 fast
+  runs, the current rule gives 4 × p95 ≈ 33 s; the proposal gives 8 × median ≈ 48 s. The draft
+  never compared the two rules at any sample size other than today's.
+- **Two of the intent's premises were wrong**, corrected in the note at the top of `intent.md`.
 
-The intent named the all-time baseline. Reading the real store surfaced a second, and it is
-the worse of the two.
+**The statistic is therefore not changing.** p95 and the 4× multiple stay exactly as they are.
 
-**Defect 1 — the baseline never moves.** `runs.slice(0, -1)` is every retained run.
+## The defect that is actually worth fixing
 
-**Defect 2 — at these sample sizes, p95 *is* the maximum.** `percentile` indexes
-`sorted[floor(0.95 * n)]`. With the 19-sample baseline that `minVerifyRuns: 20` guarantees,
-that is `sorted[18]` — the largest element. The store confirms it directly:
+It is not in `anomaly.ts` at all. It is one line up the call chain, in `cli-detect.ts:171`:
 
+```ts
+const events = store.query({ limit: 1000 });
 ```
-min 2132  p50 5959  p90 59965  p95 67537  max 67537
-                                  ^^^^^      ^^^^^  identical
+
+No `kind` filter — though `store.query` supports one — ordered `received_at DESC` and capped at
+1000 by `store.ts`. **The detector's entire input is the most recent 1000 events of any kind.**
+
+Three consequences, none of them visible from reading `anomaly.ts`:
+
+1. **The baseline was never "all-time".** It is already windowed — by an accidental, undeclared
+   quantity. `runs.slice(0, -1)` looks unbounded; it is bounded by whatever share of 1000
+   recent events happens to be `verify_run`.
+2. **The window shrinks as the product succeeds.** Loops 003, 007 and 008 wired `render`,
+   `fetch_result`, `cache_event` and `schema_drift`. Today the store is 20 events, all
+   `verify_run`, so the cap is invisible. One `render` per statusline invocation makes 1000
+   events *minutes* of ordinary use — at which point the detector sees a handful of verify runs,
+   or none, and reports `insufficient-data` in perpetuity while the store holds thousands.
+3. **It fails in the silent direction.** `insufficient-data` and a truncated baseline both look
+   like the system working. This is the intent's actual complaint — an instrument that loses
+   sensitivity without saying so — just located somewhere other than where the intent looked.
+
+## Behavior
+
+### 1. The window becomes explicit and kind-scoped
+
+`cli-detect` asks for verify runs *as verify runs*:
+
+```ts
+store.query({ kind: 'verify_run', limit: BOUNDS.verifyBaselineWindow + 1 })
 ```
 
-So the trip wire is "4× the slowest run we have ever seen." That is a **ratchet**: every slow
-run raises the bar for detecting the next one, and a hang makes the following hang harder to
-see. A detector that becomes less sensitive each time it nearly fires is worse than the
-all-time window on its own, and fixing only Defect 1 would leave it in place.
+concatenated with the existing general query (which still feeds the drift and fetch detectors)
+and deduplicated on `eventId`. `detectDurationOutlier` then takes the last
+`verifyBaselineWindow` runs, **excluding the latest**, in the existing `(receivedAt, ts)`
+ordering — which becomes load-bearing here in a way it was not when the baseline was
+everything, so it is stated rather than assumed.
 
-## The statistic
+`verifyBaselineWindow: 50`. Bounded, stated, and by run count rather than by time: a time
+window's sample size depends on how often the gate happens to be run, and loop 011 just changed
+that by 10×.
 
-**Median of the window, not p95.** Two reasons, both load-bearing:
+### 2. An absolute floor, as a deliberate desensitisation
 
-1. **It is robust.** A hang cannot move the median, so the ratchet disappears. p95 over a small
-   window is definitionally the extreme value it is supposed to be measuring against.
-2. **It re-anchors on 50% turnover, not 95%.** With 15 of the current 20 runs post-011, the
-   median is already 5 959 ms while the p95 is still 67 537 ms. The median has effectively
-   re-anchored; the p95 has not moved at all. That difference *is* the intent's complaint.
+`minOutlierMs: 120_000`. No verify run under two minutes is called an anomaly, whatever the
+ratio.
 
-## The multiple, derived from data rather than chosen
+This is derived, not chosen. The slowest legitimate run in the store is 67 537 ms; 120 s leaves
+~1.8× above it. It removes a false positive the **current** code already has latently: once the
+pre-011 runs wash out, 4 × p95 ≈ 33 s, and the next stale-tree `verify` at 59 s would raise a
+high-severity incident about nothing.
 
-`4× p95` and a multiple of the median are not comparable numbers, so the multiple must change
-with the statistic. Observed within-regime spread, from the 20 runs in the store:
+It also repairs a contradiction with `sdlc/009-anomaly-detection/spec.md`, whose guard 2 says a
+single breach never raises **except** for the hang detector, "where one event of the right
+magnitude is the signal". At a 33 s wire, one event is not of the right magnitude. At 120 s it
+is: the event this detector exists for was 550 s.
 
-| Regime | n | median | max | max ÷ median |
-|---|---|---|---|---|
-| post-011 (fast gate) | 15 | 5 798 ms | 8 268 ms | **1.43×** |
-| pre-011 (slow gate) | 5 | 59 500 ms | 67 537 ms | **1.13×** |
+Being explicit: this reduces sensitivity on purpose, unlike the accidental reduction the loop is
+fixing.
 
-Normal variation stays within ~1.5× of the median in both regimes. **`durationOutlierMultiple:
-8`** leaves roughly 5.5× of headroom above the worst normal run observed — comfortable, given
-this detector's standing rule that a false positive costs more than a miss.
-
-At today's median that sets the trip wire at ~48 s. The undiagnosed 550 s hang is 92× and fires
-easily. A return to the pre-011 60 s gate also fires — correctly, because at the current
-baseline that *is* a 10× regression, and it stops firing once the median absorbs it.
-
-## The window
-
-**By count (`verifyBaselineWindow: 50`), not by time.** A time window's sample size depends on
-how often someone happens to run the gate — and loop 011 just changed that by an order of
-magnitude, which is precisely the wrong thing for a window to be sensitive to. A count also
-matches the existing `passRateWindow: 10`.
-
-Fifty is bounded and stated, which is what the intent asked for. Because the statistic is the
-median, full turnover is not required: the detector re-anchors once the new regime is the
-majority of the window.
-
-## An absolute floor
-
-**`minOutlierMs: 20_000`.** No run under 20 s is called an anomaly, whatever the ratio. If the
-gate ever reaches a 2 s median, `8×` would put the wire at 16 s, and raising an incident record
-because a gate took 20 s would be absurd by any standard this project has ever held. Twenty
-seconds is deliberately far below any plausible hang — the event this detector exists for was
-550 s.
-
-This is a *deliberate* reduction in sensitivity, unlike the accidental one this loop is fixing.
-Recorded as such rather than slipped in.
-
-## Making the sensitivity visible
-
-The intent's real complaint is not that the threshold was wrong — it is that it was wrong
-**silently**, while `healthy` kept printing. So `detect` will report the baseline it used:
+### 3. The instrument reports its own sensitivity
 
 ```ts
 export interface DurationBaseline {
-  samples: number;      // how many runs the window actually held
-  medianMs: number;
-  thresholdMs: number;  // max(median * multiple, minOutlierMs)
+  windowSize: number;    // BOUNDS.verifyBaselineWindow — the configured bound
+  samples: number;       // non-null durations the window actually held
+  p95Ms: number;
+  thresholdMs: number;   // max(p95 * multiple, minOutlierMs)
 }
 ```
 
-carried on the `healthy` and `anomalies` results and printed by `cli-detect`. A future reader
-sees what the instrument is currently able to detect, instead of having to derive it from the
-code and the store. Had this existed, this loop would have been a five-second observation
-rather than a discovery.
+Reported on `healthy` and `anomalies` whenever a p95 could be computed — **including** when the
+latest run's duration is `null` and no verdict follows, since that is exactly when a reader
+needs it. Printed by `cli-detect` as a single line of stated format:
+
+```
+baseline: p95 8268ms over 19 runs (window 50), threshold 120000ms
+```
+
+Had this line existed, this loop would have been a five-second observation instead of a
+discovery.
+
+### 4. The window must contain real durations
+
+The current `baseline.length < BOUNDS.minVerifyRuns - 1` guard runs *after* the `d !== null`
+filter, so it guarantees ≥19 real numbers. `minVerifyRuns` counts `verify_run` **events**, not
+events with durations. Under a fixed 50-run window that guard must be kept and stated, or a
+window of 50 events with 48 nulls yields a p95 over two samples and an authoritative-looking
+`samples: 2`.
 
 ## Data and types
 
-- `BOUNDS` gains `verifyBaselineWindow` and `minOutlierMs`; `durationOutlierMultiple` changes
-  from 4 to 8 and now applies to the median.
-- `DetectResult`'s `healthy` and `anomalies` variants gain `durationBaseline?:
-  DurationBaseline` — **optional**, because `insufficient-data` has no baseline and the project
-  rule is that a missing optional field is omitted, not guessed.
-- The anomaly's `evidence` replaces `baselineP95Ms` with `baselineMedianMs` and gains
-  `thresholdMs` and `windowSize`. Evidence goes into an incident record verbatim, so a stale
-  field name would mislead whoever reads it.
-- No stored schema change. This is all read-side; `schema_version` is untouched.
+- `BOUNDS` gains `verifyBaselineWindow: 50` and `minOutlierMs: 120_000`.
+  `durationOutlierMultiple` stays **4** and still applies to p95.
+- `DetectResult`'s `healthy` and `anomalies` variants gain `durationBaseline?: DurationBaseline`
+  — optional, because `insufficient-data` has none, and the project rule is that a missing
+  optional field is omitted rather than guessed.
+- `evidence` keeps `baselineP95Ms` (no rename — the statistic did not change) and gains
+  `thresholdMs` and `windowSize`. Evidence goes verbatim into an incident record.
+- `evidence.multiple` stays `latest / p95`. When the floor binds, that ratio can read 5× beside
+  a `thresholdMs` the run only just exceeded, so both fields are present and the incident
+  template shows them together.
+- Firing is `latest.durationMs > thresholdMs` — strictly greater, matching the current
+  `multiple <= bound → null`.
+- No stored schema change. Read-side only; `schema_version` untouched.
 
 ## Edge cases
 
 | Case | Expected behavior |
 |---|---|
-| Fewer than `minVerifyRuns` runs | `insufficient-data`, unchanged. No baseline reported. |
-| Window larger than available runs | Use what exists. The `minVerifyRuns` floor already guarantees enough. |
-| Latest run is *faster* than the baseline | Never fires. The rule stays one-sided — a gate getting faster is good news, not an incident. |
-| Mixed window during a transition | The median sits between the regimes, so the threshold is *higher* than the new normal warrants. Blunt, never a false positive — the safe direction, and now a stated conclusion rather than an accident. |
-| Latest run has `durationMs === null` | No verdict from this detector, unchanged. |
-| Median resolves to 0 or negative | No verdict. A zero baseline makes every ratio infinite. |
-| Latest exceeds the multiple but is under `minOutlierMs` | Does not fire. |
-| Some runs in the window failed | Included. The median is robust: a minority of fast failures barely moves it, and excluding them would shrink the sample for no measurable gain. See rejected alternatives. |
+| Fewer than `minVerifyRuns` runs | `insufficient-data`, unchanged. No baseline. |
+| Window larger than available runs | Use what exists; the `minVerifyRuns` floor still applies. |
+| Window holds 50 events but only 18 non-null durations | No verdict, and `durationBaseline` is **not** reported — there is no honest p95 to report. |
+| Latest run faster than baseline | Never fires. The rule stays one-sided. |
+| Latest `durationMs === null` | No verdict, but `durationBaseline` **is** reported. |
+| p95 resolves to 0 or negative | No verdict. A zero baseline makes every ratio infinite. |
+| Latest exceeds `4 × p95` but is under 120 s | Does not fire. This is the observed 59.5 s stale-tree case. |
+| Latest is exactly `thresholdMs` | Does not fire. Strictly greater. |
+| A slow run enters the window | p95 of 50 is `sorted[47]`, so three such runs are needed to move it. The ratchet is bounded by the window, not eliminated — stated, not claimed away. |
+| A late-arriving old event | Sorts last by `receivedAt` and becomes "the latest run". Pre-existing behaviour of the `(receivedAt, ts)` ordering, unchanged and now tested. |
 
 ## Backward compatibility
 
-- **Stored data is untouched.** Read-side only; every existing event stays valid.
-- **`detect()`'s signature is unchanged**, and the added result field is optional, so
-  `cli-detect` and the tests compile without modification before they are updated to use it.
-- **The other three detectors are unchanged.** They were examined for the same defect and do
-  not have it: `detectPassRate` is windowed at 10 runs, `detectDriftSpike` compares 24 h
-  against the prior 7 days, `detectFetchFailures` is a 24 h window. The all-time baseline was
-  unique to the duration rule. Examined, stated, and left alone.
+- Stored data untouched; every existing event stays valid.
+- `detect()`'s signature is unchanged and the new result field is optional, so existing callers
+  compile unmodified.
+- **The existing duration tests pass unchanged — and that is the problem, not the reassurance.**
+  They are parameterised on `BOUNDS.durationOutlierMultiple` and use a uniform 30 s baseline
+  where median, p95 and max coincide. The current suite provides no evidence either way about
+  this change, so every criterion below names a test that discriminates.
+
+## What was examined and deliberately not changed
+
+The claim "the other three detectors do not have this defect" is narrowed to what was actually
+checked: **none of them uses an unbounded or accidental baseline.** `detectPassRate` windows 10
+runs; `detectDriftSpike` compares 24 h against the prior 7 days; `detectFetchFailures` is a
+24 h window.
+
+Two observations found while checking, both out of scope per `intent.md`, both recorded so they
+are not rediscovered:
+
+- All three filter with `within()`, which uses `receivedAt` — a **batch ingest stamp**. The live
+  store shows 60 minutes of skew (batch `receivedAt 10:21:22` carries `ts 09:21:16`). A spool
+  that fails to ship for two days and then ships at once makes two days of history "within
+  24 h".
+- `detectDriftSpike` has a desensitisation of the same *class* as the one this loop fixes: a
+  single drift event six days ago sets `baseline.length > 0` and blinds the spike detector for
+  a week.
 
 ## Acceptance criteria
 
-- [ ] A window of runs at ~6 s with a much slower run in the *distant* history does not push the threshold up — verified by a test whose history contains a 67 s run outside the window
-- [ ] A latest run at 10× the recent median fires — tested
-- [ ] A latest run at 10× the median but under `minOutlierMs` does **not** fire — tested
-- [ ] A latest run *faster* than the baseline never fires, at any ratio — tested
-- [ ] A mixed transition window produces a threshold above the new normal and does not fire — tested
-- [ ] A single slow run in the window does **not** raise the threshold materially (the ratchet is gone) — tested by comparing thresholds with and without it
-- [ ] `detect` reports `durationBaseline` on `healthy` and `anomalies`, and `cli-detect` prints it — verified by running it against the real store
-- [ ] Every new bound is tested from **both** sides, per the rule loop 009 set
-- [ ] `bun run verify` exits 0
+Each names a test that fails if the behaviour is absent — the first draft's criteria did not,
+and two of them were satisfiable by the alternative this spec rejects.
+
+- [ ] **The window is real, not incidental**: 60 runs at 60 s followed by 30 at 6 s. All-time
+      p95 is in the 60 s regime; the last-50 p95 is in the 6 s regime. Assert
+      `durationBaseline.p95Ms` is in the 6 s regime and `samples === 50`. Fails if
+      `runs.slice(0, -1)` is kept.
+- [ ] **`cli-detect` asks for verify runs by kind**: a fixture db holding 30 verify runs plus
+      1 200 `render` events yields a verdict, not `insufficient-data`. Fails against the
+      current `store.query({ limit: 1000 })`.
+- [ ] **The observed false positive does not fire**: 59 483 ms against a 5 959 ms p95 —
+      a 10× ratio, under the floor — does not raise.
+- [ ] **The floor is tested from both sides**: exactly 120 000 ms does not fire; 120 001 ms with
+      a sufficient ratio does.
+- [ ] **The case this exists for still fires**: 550 s against a fast baseline raises.
+- [ ] **One-sided**: a latest run faster than the baseline never fires, at any ratio.
+- [ ] **Null-duration guard, both sides**: 19 non-null durations in a 50-event window gives a
+      verdict; 18 gives none and reports no baseline.
+- [ ] **Baseline is reported when the latest duration is null** — the case a reader most needs.
+- [ ] **`cli-detect` prints the baseline line** in the stated format, asserted against a fixture
+      db via `CLAUDEWATCH_METRICS_DB`, not against the machine-local store.
+- [ ] **Ordering**: a batch whose `receivedAt` order differs from its `ts` order selects the
+      right latest run and the right window, mirroring `anomaly.test.ts:225-273`.
+- [ ] `bun run verify` exits 0.
 
 ## Rejected alternatives
 
-- **Keep p95, enlarge the window until p95 ≠ max.** Needs ~100 samples before p95 has two runs
-  above it, and even then it tracks the extreme. It treats the symptom of Defect 2 while
-  leaving the ratchet's mechanism intact.
-- **A time-based window (last 7 days).** Sample size becomes a function of how often the gate
-  is run, which loop 011 just changed by 10×. A window should not be sensitive to that.
-- **Mean instead of median.** One 550 s hang in fifty 6 s runs moves the mean by 18%, so the
-  ratchet survives in a weaker form. The whole point of choosing the statistic deliberately is
-  to pick one a hang cannot move.
-- **Exclude failed runs from the baseline.** Examined, not adopted. It is the right instinct
-  for a *mean*; for a median a minority of fast failures shifts the centre negligibly, and it
-  costs sample size for no measurable gain. Revisit if the pass rate ever falls far enough that
-  failures are the majority — at which point `detectPassRate` is already firing.
-- **Detect the step change itself as an anomaly.** "The baseline moved 10×" is real
-  information, but a gate getting faster raising an incident is exactly how a monitor starts
-  crying wolf. Reporting `durationBaseline` gives a human the same information without
-  demanding anyone act on it.
-- **Shorten retention so old runs age out.** Fixes the symptom by deleting evidence, and turns
-  a detection change into a data-loss change.
+- **Median at an 8× multiple** (this spec's own first draft). Fires on an observed legitimate
+  59.5 s run, and is ~1.5× blunter than the current rule at steady state. Rejected on the
+  reviewer's arithmetic, not on taste.
+- **Raising `minVerifyRuns` to 21 so p95 is never the maximum.** True, and it would remove the
+  small-sample artifact — but it changes when the detector starts working at all, which is a
+  different decision with different evidence. Reporting `samples` lets a reader see the
+  artifact instead; visibility before tuning.
+- **Shorten retention so old runs age out.** Fixes a detection problem by deleting evidence.
+- **Detect the step change itself as an anomaly.** A gate getting faster raising an incident is
+  how a monitor starts crying wolf. `durationBaseline` gives a human the same information
+  without demanding anyone act on it.
+- **Aligning `verifyBaselineWindow` with `passRateWindow: 10`.** Would keep the two detectors
+  looking at the same history, but 10 runs is far too small a sample for a p95.
+
+## Open, and deliberately not settled here
+
+`magnitudeBucket` is `floor(log10(ms))`, so bucket `'5'` spans 100 s–1000 s: a 150 s blip and a
+900 s hang share a fingerprint and `suppressionHours: 24`. The 120 s floor keeps firings inside
+that one bucket, so this is not made worse by this change — but it is not made better either,
+and a suppressed 900 s hang is a real miss. Recorded for its own loop rather than folded in
+here.
 
 ---
 
