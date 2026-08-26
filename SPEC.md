@@ -573,6 +573,8 @@ Optional fields must be omitted cleanly if unavailable. They must not render as 
 | `claudewatch.criticalThresholdPct` | number | 90 |
 | `claudewatch.telemetry.enabled` | boolean | false |
 
+**VS Code's global telemetry setting takes precedence.** When `telemetry.telemetryLevel` is `off`, the extension emits nothing regardless of `claudewatch.telemetry.enabled`, per VS Code's telemetry guidance for extension authors. The extension setting can only narrow, never widen. Both inputs are re-evaluated live (`sdlc/006-marketplace-telemetry`).
+
 `claudewatch.telemetry.enabled` opts in to local metric spooling (§17). It is off by default, has no destination, and the statusline binary reads the same setting from `CLAUDEWATCH_TELEMETRY` or `~/.config/claudewatch/config.json` — VS Code settings do not reach it.
 
 ### 10.7 Error and Degraded States
@@ -1048,7 +1050,7 @@ If all five steps work, you have a working statusline binary. The VS Code extens
 ### 19.1 High Priority (Before v1 Ship)
 
 - Validate API endpoint still returns expected schema on current Claude Code version
-- Finalize extension ID and publisher naming
+- Finalize extension ID and publisher naming — **proposed** in `sdlc/006-marketplace-telemetry`: publisher `joezuchora`, ID `joezuchora.claudewatch` (requires renaming `name` from `claudewatch-vscode`). Deferred deliberately: the rename changes extension identity and would orphan installed copies rather than upgrade them, so it is the maintainer's decision.
 - Validate Cursor behavior explicitly
 - ~~Add minimum polling interval enforcement~~ ✅ Implemented (extension.ts enforces 30s minimum)
 - Test 429 rate-limiting behavior and confirm cooldown + stale-while-error handles it gracefully

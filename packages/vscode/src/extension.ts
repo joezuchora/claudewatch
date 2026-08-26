@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { resolveExtensionTelemetry } from './telemetry-gate.js';
 import {
   resolveCredentials,
   fetchUsage,
@@ -23,7 +24,54 @@ let statusBar: StatusBarManager | undefined;
 let pollingTimer: ReturnType<typeof setInterval> | undefined;
 let refreshInFlight = false;
 
+/**
+ * Whether telemetry may be emitted right now.
+ *
+ * The AND of VS Code's global switch and our own setting, per VS Code's telemetry guidance:
+ * if isTelemetryEnabled reports false, telemetry must not be sent even when our setting is
+ * on. Re-evaluated on both change events rather than read once at activation — reading once
+ * would keep collecting from a user who turned telemetry off mid-session until they reloaded.
+ */
+let telemetryAllowed = false;
+
+function recomputeTelemetryGate(): void {
+  let globalEnabled: unknown;
+  let settingEnabled: unknown;
+
+  // Either read can throw on a host that does not implement it. A failed read is not consent.
+  try {
+    globalEnabled = (vscode.env as { isTelemetryEnabled?: unknown }).isTelemetryEnabled;
+  } catch {
+    globalEnabled = null;
+  }
+  try {
+    settingEnabled = vscode.workspace
+      .getConfiguration('claudewatch')
+      .get<boolean>('telemetry.enabled');
+  } catch {
+    settingEnabled = null;
+  }
+
+  telemetryAllowed = resolveExtensionTelemetry(globalEnabled, settingEnabled);
+}
+
+/** The override handed to core's resolveTelemetryConfig, which treats it as highest priority. */
+export function telemetryOverride(): { enabled: boolean } {
+  return { enabled: telemetryAllowed };
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  recomputeTelemetryGate();
+
+  // VS Code's global telemetry switch can change at any time; honour it immediately.
+  if (typeof (vscode.env as { onDidChangeTelemetryEnabled?: unknown }).onDidChangeTelemetryEnabled === 'function') {
+    context.subscriptions.push(
+      (vscode.env as unknown as {
+        onDidChangeTelemetryEnabled: (cb: () => void) => vscode.Disposable;
+      }).onDidChangeTelemetryEnabled(() => recomputeTelemetryGate()),
+    );
+  }
+
   statusBar = new StatusBarManager();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 
@@ -63,6 +111,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         e.affectsConfiguration('claudewatch.criticalThresholdPct')
       ) {
         statusBar?.updateThresholds();
+      }
+      if (e.affectsConfiguration('claudewatch.telemetry.enabled')) {
+        recomputeTelemetryGate();
       }
     }),
   );
