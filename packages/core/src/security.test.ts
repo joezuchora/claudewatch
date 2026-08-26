@@ -219,11 +219,21 @@ describe('security: telemetry never leaks secrets or environment', () => {
       surface: 'vscode', runtimeState: 'Enterprise', tier: 'enterprise',
       utilizationBucket: utilizationBucket(14.5), durationMs: 3,
     }));
-    const raw = spool();
-    expect(raw).not.toContain('290000');   // usedCredits in minor units
-    expect(raw).not.toContain('20000000'); // monthlyLimit in minor units
-    expect(raw).not.toContain('14.5');     // the raw utilization
-    expect(JSON.parse(raw.trim()).payload.utilizationBucket).toBe(1);
+
+    // NUMERIC needles are asserted against the PAYLOAD, not the whole line.
+    //
+    // The envelope legitimately contains digits — a random UUID eventId and an ISO
+    // timestamp whose seconds-and-milliseconds render as `SS.mmm`. So a whole-line
+    // assertion for "14.5" matches any instant at second 14 with milliseconds 5xx: 0.18%
+    // of the time, measured. That is invisible locally and fails in CI, which is exactly
+    // what happened. Distinctive string needles (tokens, paths, hostnames) are still
+    // asserted against the whole line below, where they are safe and where the real
+    // security guarantee lives.
+    const payload = JSON.stringify(JSON.parse(spool().trim()).payload);
+    expect(payload).not.toContain('290000');   // usedCredits in minor units
+    expect(payload).not.toContain('20000000'); // monthlyLimit in minor units
+    expect(payload).not.toContain('14.5');     // the raw utilization
+    expect(JSON.parse(spool().trim()).payload.utilizationBucket).toBe(1);
   });
 
   test('a spooled line never contains credential-shaped material', () => {
