@@ -255,7 +255,11 @@ All domain logic lives in `packages/core`. The statusline and VS Code packages a
 
 ## Contributing
 
-Contributions welcome. The spec is in `SPEC.md` — read it before making architectural changes. All business logic belongs in `packages/core`.
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop and
+[REVIEW.md](REVIEW.md) for the review policy every change is held to.
+
+The spec is in `SPEC.md` — read it before making architectural changes. All business logic
+belongs in `packages/core`.
 
 ## License
 

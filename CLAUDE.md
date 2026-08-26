@@ -1,18 +1,37 @@
 # ClaudeWatch
 
-A personal open-source companion tool for Claude Code that shows usage window data in VS Code and terminal.
+A personal open-source companion tool for Claude Code that shows usage window data in VS Code
+and terminal.
 
 ## Spec
 
 The complete specification is in SPEC.md. Read it before making architectural decisions.
+It is the source of truth for the domain; when this file and SPEC.md disagree, SPEC.md wins.
+
+## Development loop
+
+This repo follows an AI-native SDLC. Work moves through six stages, each ending by committing
+an artifact that the next stage reads:
+
+```
+intent.md → spec.md → plan.md → diff + tests → review.md → incident.md
+```
+
+Artifacts live in `sdlc/<NNN>-<slug>/`. Run the stage skills in order: `/sdlc-intent`,
+`/sdlc-spec`, `/sdlc-plan`, `/sdlc-implement`, `/sdlc-review`, and `/sdlc-incident` when
+something ships broken. See CONTRIBUTING.md for the full walkthrough and REVIEW.md for the
+review policy every change is held to.
+
+Small, obvious fixes (a typo, a broken link) may skip the loop. Anything that changes
+behavior does not.
 
 ## Stack
 
-- Language: TypeScript (strict mode)
-- Runtime: Bun (workspaces, build, test, compile)
-- Monorepo: bun workspaces with packages/core, packages/vscode, packages/statusline
-- Statusline ships as a compiled binary via `bun build --compile`
-- VS Code extension targets CommonJS via `bun build --external vscode`
+- TypeScript (strict), ES modules, no `any`
+- Bun for everything: workspaces, build, test, `--compile`
+- Monorepo: `packages/core`, `packages/statusline`, `packages/vscode`
+
+Package-specific rules live in each package's own `CLAUDE.md`.
 
 ## Key Commands
 
@@ -24,32 +43,24 @@ The complete specification is in SPEC.md. Read it before making architectural de
 
 ## Code Style
 
-- ES modules (import/export), not CommonJS
-- Strict TypeScript, no `any`
-- All timestamps internal as UTC ISO strings
-- No access tokens in logs, cache files, or debug output
+- All timestamps internal as UTC ISO strings; convert to local only at display
+- No access tokens in logs, cache files, debug output, or process arguments
 - Atomic file writes (write to temp, rename) for cache
+- Missing optional fields are omitted, not guessed
 
 ## Architecture Rules
 
-- All business logic in packages/core. Surfaces are thin rendering layers.
-- packages/statusline and packages/vscode must not contain domain logic.
+- All business logic in `packages/core`. Surfaces are thin rendering layers.
+- `packages/statusline` and `packages/vscode` must not contain domain logic.
+- Reuse before adding — check `packages/core/src/` and `test-helpers.ts` first.
 - When in doubt about a design decision, check SPEC.md.
-
-## Build & Bundling
-
-- This project uses TypeScript with CommonJS module format for VS Code extensions. Always bundle as CJS (not ESM) when targeting VS Code extension host.
 
 ## Testing
 
-- `bun test` for unit tests
 - Test files live next to source files as `*.test.ts`
 - Mock HTTP responses for contract tests — never hit the real API in tests
-- Always run tests after making changes. Use `bun test` to verify. Ensure test isolation — avoid mock contamination across test files.
-
-## VS Code Extension
-
-- This is a monorepo with a CLI component and a VS Code extension. When packaging the VS Code extension, verify the .vsix includes all required assets (README, etc.) before considering the task done.
+- Keep tests isolated; mock state must not leak across test files
+- Every behavior ships with its check, in the same commit
 
 ## Pre-Commit Verification Pipeline
 
@@ -65,4 +76,6 @@ Before committing any changes, run the full pipeline and fix any issues:
 
 ## Git Workflow
 
-- When working with git, always confirm the current branch before committing. Do not assume work should go on a feature branch — ask if unsure.
+- Always confirm the current branch before committing.
+- Feature branches are named for their change: `sdlc/<NNN>-<slug>`.
+- Never commit directly to `main`.
