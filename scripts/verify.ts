@@ -37,7 +37,12 @@ const STEPS: Array<{ name: string; cmd: string[] }> = [
   // verdict on its own and prints that it declined. No suppression flag: a gate that says
   // "p95: not evaluated (n<200)" is more honest than one that silently omits the line, and it
   // exercises the full verdict path rather than a special case. See sdlc/013.
-  { name: 'perf', cmd: ['bun', 'run', 'perf', '--samples', '40'] },
+  // REPORT-ONLY since sdlc/015. The step measures and prints on every run — that visibility is
+  // what makes a drift noticeable — but it does not fail the gate. The machine's startup floor
+  // moved 41ms -> 57ms between two sessions with no code change and a load average of 0.5,
+  // which is larger than the p50 budget's 1.22x margin. A gate that goes red because the host
+  // got slower teaches everyone to ignore it. The enforcing verdict is `bun run perf`.
+  { name: 'perf', cmd: ['bun', 'run', 'perf', '--samples', '40', '--report-only'] },
 ];
 
 /** Per-step ceiling. Generous versus a ~35s healthy run, tight enough to bound a hang. */

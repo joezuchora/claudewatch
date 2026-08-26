@@ -349,3 +349,50 @@ asserted a broader property than the one I meant** — twice a *cap* where the d
 The common shape is reaching for the assertion easiest to write about the situation in front of
 you, rather than the one that would fail if the code were wrong. Mutation testing caught three of
 the four, and is now the default for any guard whose absence would be silent.
+
+
+## The gate I built went red for no code reason, ninety minutes later (loop 015)
+
+`sdlc/013` put a startup budget in `bun run verify`: p50 < 50 ms, measured at 41.1 ms. The next
+iteration opened with the gate red on a clean tree — and the one after that too. Not contention,
+which was my first theory, and not ambient load, which was my second. Both were refuted by the
+same measurement: the gate's `perf` step runs alone, after build, and breached at a load average
+of **0.51 on 4 CPUs with nothing else running**.
+
+The machine's startup floor had moved from ~41 ms to ~57 ms between sessions. Same container,
+same binary, no code change.
+
+**The design error was mine, and it was already visible in the document that made it.**
+`sdlc/013`'s spec set the p95 ceiling at ~2× the observed reading and argued for that headroom
+explicitly — between-session variance, a threshold high enough that red means real. Then it set
+p50 at **1.22×** the observed reading and called it "met with 18% to spare". The same spec that
+wrote
+
+> a target set to the current measurement can never fail, which is how §11.7 got into this
+> condition
+
+used a measurement-derived target for the median. Observed p50 across sessions now spans
+41.1–60.6 ms: a 1.5× spread, wider than the margin.
+
+Why review did not catch it: the spec-reviewer challenged the p95 grounding hard enough that I
+rewrote it from scratch, and the p50 row was inherited unchanged from the old SPEC, so it read as
+*preserved* rather than *decided*. **A number that survives review by looking familiar has not
+been reviewed.** That is the sentence worth keeping.
+
+The distinction the incident forced, which I had blurred:
+
+> A budget is a claim about **the product on a representative machine**. A gate is a check for
+> **regression on whatever machine is running**. Enforcing the first as the second makes the gate
+> red for reasons no change caused — and a gate that cries wolf is worse than no gate, which is
+> the argument `sdlc/009` used to set the anomaly bounds far outside observed spread and which I
+> failed to apply to my own.
+
+The gate now reports the distribution on every run and does not fail; `bun run perf` keeps the
+enforcing verdict. That is a **mitigation, not a fix** — it removes the tripwire the gate existed
+for — and `016-perf-regression-baseline` records the instrument that would actually work: a
+comparison against this machine's own recent history, which is what `anomaly.ts` already does for
+gate durations and what `sdlc/013`'s spec named before deciding not to build it.
+
+That follow-up is deliberately **not** being built yet. Designing a baseline rule against three
+measurements would repeat the original error at one remove; the report-only line now prints a
+distribution on every run, so the data to design it properly is accumulating on its own.

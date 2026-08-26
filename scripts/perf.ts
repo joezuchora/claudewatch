@@ -19,6 +19,14 @@
  *
  * Exit codes: 0 every evaluated budget holds; 1 a budget was breached; 2 could not measure.
  * A missing binary must never read as a pass.
+ *
+ * `--report-only` prints the distribution and verdicts but always exits 0 (2 still applies —
+ * a run that could not measure is not a run that passed). `bun run verify` uses it, because
+ * sdlc/015 found the machine's startup floor moving ~40% between sessions with no code change,
+ * which is more than the p50 budget's margin. Enforcing a PRODUCT target as a REGRESSION gate
+ * on whatever machine happens to be running conflates two instruments; the enforcing verdict
+ * lives in a deliberate `bun run perf`, which REVIEW.md already requires for startup-path
+ * changes.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, existsSync } from 'fs';
 import { join } from 'path';
@@ -253,5 +261,9 @@ if (import.meta.main) {
     }
   }
 
-  process.exit(verdicts.some((v) => v.evaluated && !v.ok) ? 1 : 0);
+  const breached = verdicts.some((v) => v.evaluated && !v.ok);
+  if (breached && has('report-only')) {
+    console.log('  (report-only: not failing the gate — see sdlc/015-perf-gate-incident)');
+  }
+  process.exit(breached && !has('report-only') ? 1 : 0);
 }

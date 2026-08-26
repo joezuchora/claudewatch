@@ -168,6 +168,20 @@ describe('the CLI, run the way the gate runs it', () => {
     expect(r.err).toContain('not cache hits');
   });
 
+  test('--report-only still exits 0 on a breach, but says so', () => {
+    // The mitigation itself needs a guard: if --report-only ever stopped suppressing the exit
+    // code, the gate would go red again for environmental reasons (sdlc/015).
+    const r = run(['--bin', okStub('fast5'), '--samples', '30', '--budget-p50', '0', '--report-only']);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('BREACH');
+    expect(r.out).toContain('report-only');
+  });
+
+  test('--report-only does NOT suppress exit 2 — a run that could not measure never passes', () => {
+    const r = run(['--bin', join(dir, 'nope'), '--samples', '30', '--report-only']);
+    expect(r.code).toBe(2);
+  });
+
   test('an impossible budget exits 1', () => {
     const r = run(['--bin', okStub('fast'), '--samples', '30', '--budget-p50', '0']);
     expect(r.code).toBe(1);
@@ -303,7 +317,11 @@ describe('the CLI, run the way the gate runs it', () => {
     // the sandbox credential is a fixture that would 401 immediately, so any run that reached
     // the fetch path would exit non-zero and be reported as exit 2. A clean exit 0 across 30
     // samples IS the evidence that no request left the machine.
-    const r = run(['--samples', '30']);
+    // --report-only, deliberately: this asserts the PLUMBING — the sandbox, the cache-hit
+    // guard, a clean exit, a printed distribution — not the budget. A latency budget asserted
+    // inside `bun test` measures the host's mood, and sdlc/015 is the record of it going red
+    // for no code reason. The budget verdict belongs to a deliberate `bun run perf`.
+    const r = run(['--samples', '30', '--report-only']);
     expect({ code: r.code, err: r.err }).toEqual({ code: 0, err: '' });
     expect(r.out).toMatch(/^n=30 {2}p50=/m);
     expect(r.out).toContain('p95: not evaluated');

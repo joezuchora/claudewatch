@@ -659,7 +659,7 @@ After installation, restart Claude Code. No shell profile editing required.
 
 | Scenario | Target | Status |
 |---|---|---|
-| Cache hit, **p50** | **< 50 ms** | measured, enforced by `bun run verify` |
+| Cache hit, **p50** | **< 50 ms** | measured; **reported** by `bun run verify`, enforced by `bun run perf` — see the note |
 | Cache hit, **p95** | **< 100 ms** | measured, checked by `bun run perf` |
 | Cache miss (binary start → fetch → stdout) | < 1000ms | **unmeasured** |
 | HTTP timeout (hard kill) | 5 seconds | **unmeasured** — `DEFAULT_TIMEOUT_MS` is asserted in `client.test.ts`, but no test measures the hard kill end to end |
@@ -673,8 +673,20 @@ in one run read 41.5, 51.1 and 213.5 ms. Both cache-hit rows therefore mean:
 > in the child environment, stdin closed, ≥ 200 samples after 5 discarded warm-ups, nearest-rank
 > percentile, on a developer machine or CI container.
 
-`bun run perf` is that measurement. `bun run verify` runs its p50 half at n=40; forty samples
-supports a median and not a tail, which is why the p95 check is manual.
+`bun run perf` is that measurement, and its verdict is enforcing. `bun run verify` runs the same
+measurement at n=40 in **report-only** mode: it prints the distribution on every run but does not
+fail the gate.
+
+**Why reported and not enforced** (amended 2026-08-26, `sdlc/015-perf-gate-incident`). The gate
+enforced this for about ninety minutes and then went red on a clean tree: the development
+machine's startup floor moved from ~41 ms to ~57 ms between two sessions, with no code change
+and a load average of 0.5 on 4 CPUs. Observed p50 across sessions spans 41.1–60.6 ms, a 1.5×
+spread — wider than the 1.22× margin this budget was set with.
+
+The targets above are a claim about **the product on a representative machine**. A gate is a
+check for **regression on whatever machine is running**. Those are different instruments, and
+enforcing the first as the second makes the gate red for reasons no change caused, which teaches
+everyone to ignore it. The measurement stays visible on every run; the verdict is deliberate.
 
 Three notes on what changed and why:
 
