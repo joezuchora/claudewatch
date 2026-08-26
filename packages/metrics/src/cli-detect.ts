@@ -10,7 +10,8 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { MetricsStore, defaultDbPath } from './store.js';
-import { detect, BOUNDS, type Anomaly, type Suppression } from './anomaly.js';
+import { detect, BOUNDS, formatBaseline, type Anomaly, type Suppression } from './anomaly.js';
+import { collectDetectorInput } from './detector-input.js';
 
 const repoRoot = process.env.CLAUDEWATCH_REPO ?? process.cwd();
 const sdlcDir = join(repoRoot, 'sdlc');
@@ -168,7 +169,7 @@ cause.
 // --- run ---
 
 const store = new MetricsStore(process.env.CLAUDEWATCH_METRICS_DB ?? defaultDbPath());
-const events = store.query({ limit: 1000 });
+const events = collectDetectorInput(store);
 const now = Date.now();
 const result = detect(events, now, readSuppressions());
 
@@ -176,6 +177,12 @@ if (result.status === 'insufficient-data') {
   console.log(`insufficient data: ${result.have} verify runs, need ${result.need}. No verdict.`);
   store.close();
   process.exit(0);
+}
+
+if (result.durationBaseline) {
+  // Print the instrument's own sensitivity, not just its verdict. The defect this loop fixed
+  // was invisible precisely because `healthy` printed while the baseline quietly narrowed.
+  console.log(formatBaseline(result.durationBaseline));
 }
 
 for (const s of result.suppressed) {

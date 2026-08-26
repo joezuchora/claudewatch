@@ -18,6 +18,27 @@ export const BOUNDS = {
   minVerifyRuns: 20,
   /** A run exceeding this multiple of baseline p95. The 550s hang against ~30s is 18x. */
   durationOutlierMultiple: 4,
+  /**
+   * Runs the duration baseline is drawn from, most recent first, excluding the latest.
+   *
+   * By COUNT, not by time: a time window's sample size depends on how often the gate happens
+   * to be run, and sdlc/011 changed that by 10x in an afternoon. 50 is enough for a p95 to
+   * mean something (sorted[47], so three runs sit above it) while still turning over.
+   */
+  verifyBaselineWindow: 50,
+  /**
+   * No run under this is an anomaly, whatever the ratio.
+   *
+   * Derived, not chosen: the slowest LEGITIMATE run in the real store is 67537ms — a verify on
+   * a stale tree, passing, four steps, no timeout. 120s leaves ~1.8x above it. Without a floor
+   * the wire lands near 33s once the baseline is all fast runs, and every branch switch would
+   * raise a high-severity incident about nothing.
+   *
+   * It also keeps sdlc/009's guard 2 honest. That spec exempts this detector from the
+   * two-event rule because "one event of the right magnitude is the signal" — true at 550s,
+   * false at 33s. The floor is what makes the exemption mean something.
+   */
+  minOutlierMs: 120_000,
   /** Pass rate below this over the recent window. Below it, the gate is not a gate. */
   minPassRate: 0.7,
   /** Runs considered for the pass-rate window. */
@@ -47,6 +68,28 @@ export interface Anomaly {
   evidence: Record<string, string | number>;
 }
 
+/**
+ * What the duration detector could see when it ran.
+ *
+ * Reported whether or not a verdict followed, because the failure this loop exists to fix was
+ * an instrument losing sensitivity SILENTLY while `healthy` kept printing (sdlc/012). A
+ * threshold nobody can see is a threshold nobody can check.
+ */
+export interface DurationBaseline {
+  /** The configured bound. */
+  windowSize: number;
+  /** Non-null durations the window actually held. */
+  samples: number;
+  p95Ms: number;
+  /** max(p95 * multiple, minOutlierMs) — what a run must exceed. */
+  thresholdMs: number;
+}
+
+export function formatBaseline(b: DurationBaseline): string {
+  return `baseline: p95 ${b.p95Ms}ms over ${b.samples} runs (window ${b.windowSize}), ` +
+    `threshold ${b.thresholdMs}ms`;
+}
+
 export interface Suppression {
   fingerprint: string;
   raisedAt: string;
@@ -54,8 +97,19 @@ export interface Suppression {
 
 export type DetectResult =
   | { status: 'insufficient-data'; have: number; need: number }
-  | { status: 'healthy'; evaluated: number; suppressed: Anomaly[] }
-  | { status: 'anomalies'; anomalies: Anomaly[]; suppressed: Anomaly[]; evaluated: number };
+  | {
+      status: 'healthy';
+      evaluated: number;
+      suppressed: Anomaly[];
+      durationBaseline?: DurationBaseline;
+    }
+  | {
+      status: 'anomalies';
+      anomalies: Anomaly[];
+      suppressed: Anomaly[];
+      evaluated: number;
+      durationBaseline?: DurationBaseline;
+    };
 
 const HOUR_MS = 3_600_000;
 
@@ -76,38 +130,71 @@ function magnitudeBucket(value: number): string {
   return String(Math.floor(Math.log10(value)));
 }
 
-function detectDurationOutlier(runs: StoredEvent[]): Anomaly | null {
+/**
+ * The latest run against a bounded window of the runs before it.
+ *
+ * Returns the baseline separately from the anomaly, so `detect` can report what the instrument
+ * could see even when it reached no verdict — which is exactly when a reader needs it.
+ */
+function detectDurationOutlier(
+  runs: StoredEvent[],
+): { anomaly: Anomaly | null; baseline: DurationBaseline | null } {
   // Single-event by design: a hang is not a trend, and waiting for a second one means
-  // waiting an hour to notice the terminal stopped moving.
+  // waiting an hour to notice the terminal stopped moving. `minOutlierMs` is what keeps that
+  // exemption defensible — see the bound's own note.
   const latest = runs[runs.length - 1];
-  if (!latest || latest.durationMs === null) return null;
 
-  const baseline = runs.slice(0, -1)
+  // The window, not everything before it. `runs.slice(0, -1)` LOOKED unbounded and was in fact
+  // bounded by an accident: cli-detect asked for the last 1000 events of ANY kind, so the
+  // baseline shrank as other telemetry kinds got noisier. sdlc/012.
+  const window = runs.slice(-(BOUNDS.verifyBaselineWindow + 1), -1);
+
+  // Guard AFTER the null filter. minVerifyRuns counts verify_run EVENTS; a window of 50 events
+  // carrying 48 nulls would otherwise yield a p95 over two samples and report it as fact.
+  const durations = window
     .map((r) => r.durationMs)
     .filter((d): d is number => d !== null)
     .sort((a, b) => a - b);
-  if (baseline.length < BOUNDS.minVerifyRuns - 1) return null;
+  if (durations.length < BOUNDS.minVerifyRuns - 1) return { anomaly: null, baseline: null };
 
-  const p95 = percentile(baseline, 0.95);
-  if (p95 === null || p95 <= 0) return null;
+  const p95 = percentile(durations, 0.95);
+  if (p95 === null || p95 <= 0) return { anomaly: null, baseline: null };
+
+  const thresholdMs = Math.max(p95 * BOUNDS.durationOutlierMultiple, BOUNDS.minOutlierMs);
+  const baseline: DurationBaseline = {
+    windowSize: BOUNDS.verifyBaselineWindow,
+    samples: durations.length,
+    p95Ms: p95,
+    thresholdMs,
+  };
+
+  if (!latest || latest.durationMs === null) return { anomaly: null, baseline };
+  if (latest.durationMs <= thresholdMs) return { anomaly: null, baseline };
 
   const multiple = latest.durationMs / p95;
-  if (multiple <= BOUNDS.durationOutlierMultiple) return null;
-
   return {
-    kind: 'verify_duration_outlier',
-    fingerprint: `verify_duration_outlier:${magnitudeBucket(latest.durationMs)}`,
-    severity: 'high',
-    summary:
-      `A verify run took ${(latest.durationMs / 1000).toFixed(1)}s against a baseline p95 of ` +
-      `${(p95 / 1000).toFixed(1)}s — ${multiple.toFixed(1)}x.`,
-    evidence: {
-      durationMs: latest.durationMs,
-      baselineP95Ms: p95,
-      multiple: Number(multiple.toFixed(2)),
-      baselineSamples: baseline.length,
-      outcome: String(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail')),
+    anomaly: {
+      kind: 'verify_duration_outlier',
+      fingerprint: `verify_duration_outlier:${magnitudeBucket(latest.durationMs)}`,
+      severity: 'high',
+      summary:
+        `A verify run took ${(latest.durationMs / 1000).toFixed(1)}s against a baseline p95 of ` +
+        `${(p95 / 1000).toFixed(1)}s over ${durations.length} runs — ${multiple.toFixed(1)}x, ` +
+        `past a ${(thresholdMs / 1000).toFixed(0)}s threshold.`,
+      evidence: {
+        durationMs: latest.durationMs,
+        baselineP95Ms: p95,
+        // Both are present because they can disagree: when the floor binds, `multiple` can read
+        // 9x beside a threshold the run only just exceeded. Evidence goes verbatim into an
+        // incident record, so a reader must see which one actually fired.
+        thresholdMs,
+        multiple: Number(multiple.toFixed(2)),
+        baselineSamples: durations.length,
+        windowSize: BOUNDS.verifyBaselineWindow,
+        outcome: String(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail')),
+      },
     },
+    baseline,
   };
 }
 
@@ -207,12 +294,16 @@ export function detect(
     return { status: 'insufficient-data', have: runs.length, need: BOUNDS.minVerifyRuns };
   }
 
+  const duration = detectDurationOutlier(runs);
   const found = [
-    detectDurationOutlier(runs),
+    duration.anomaly,
     detectPassRate(runs),
     detectDriftSpike(ordered, now),
     detectFetchFailures(ordered, now),
   ].filter((a): a is Anomaly => a !== null);
+
+  // Omitted, not guessed, when there was no honest p95 to report.
+  const baselineField = duration.baseline === null ? {} : { durationBaseline: duration.baseline };
 
   const suppressed = found.filter((a) => isSuppressed(a, suppressions, now));
   const raised = found.filter((a) => !isSuppressed(a, suppressions, now));
@@ -220,7 +311,9 @@ export function detect(
   // Suppressed anomalies are reported, never silently dropped — a detector that hides its
   // own decisions cannot be debugged.
   if (raised.length === 0) {
-    return { status: 'healthy', evaluated: runs.length, suppressed };
+    return { status: 'healthy', evaluated: runs.length, suppressed, ...baselineField };
   }
-  return { status: 'anomalies', anomalies: raised, suppressed, evaluated: runs.length };
+  return {
+    status: 'anomalies', anomalies: raised, suppressed, evaluated: runs.length, ...baselineField,
+  };
 }

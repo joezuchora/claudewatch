@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detect, BOUNDS, type Suppression } from './anomaly.js';
+import { detect, BOUNDS, formatBaseline, type Suppression } from './anomaly.js';
 import type { StoredEvent } from './types.js';
 
 const T0 = Date.parse('2026-08-26T08:00:00.000Z');
@@ -269,5 +269,150 @@ describe('detect: ordering within a shipped batch', () => {
       }));
     }
     expect(detect(runs, T0).status).toBe('healthy');
+  });
+});
+
+describe('detect: the baseline window (sdlc/012)', () => {
+  /** Runs at `ms`, oldest first, continuing a sequence so receivedAt stays ordered. */
+  function era(n: number, ms: number, startHoursAgo: number): StoredEvent[] {
+    return Array.from({ length: n }, (_, i) =>
+      ev({
+        kind: 'verify_run',
+        durationMs: ms,
+        receivedAt: hoursAgo(startHoursAgo - i * 0.001),
+        payload: { outcome: 'pass' },
+      }));
+  }
+
+  test('a slow era outside the window does not set the baseline', () => {
+    // 60 runs at 60s, then 60 at 6s. The last 50 before the latest are all fast, so a windowed
+    // p95 is in the 6s regime. An ALL-TIME p95 is sorted[113] of 119 — squarely in the 60s
+    // regime. The counts matter: with only 30 fast runs the window would still hold 21 slow
+    // ones and sorted[47] would land among them, and this test would pass against the very
+    // code it exists to reject.
+    const runs = [...era(60, 60_000, 10), ...era(60, 6_000, 4)];
+    const r = detect(runs, T0);
+    expect(r.status).toBe('healthy');
+    if (r.status === 'healthy') {
+      expect(r.durationBaseline).toBeDefined();
+      expect(r.durationBaseline!.p95Ms).toBe(6_000);
+      expect(r.durationBaseline!.samples).toBe(BOUNDS.verifyBaselineWindow);
+      expect(r.durationBaseline!.windowSize).toBe(BOUNDS.verifyBaselineWindow);
+    }
+  });
+
+  test('the window respects (receivedAt, ts), not insertion order', () => {
+    // One batch shares a receivedAt; ts breaks the tie. Build it shuffled and assert the
+    // window still ends at the newest ts. Mirrors the sdlc/009 regression above.
+    const shared = hoursAgo(1);
+    const batch = Array.from({ length: 60 }, (_, i) =>
+      ev({
+        kind: 'verify_run',
+        durationMs: i === 59 ? 550_000 : 6_000,
+        ts: new Date(T0 - (60 - i) * 60_000).toISOString(),
+        receivedAt: shared,
+        payload: { outcome: i === 59 ? 'timeout' : 'pass' },
+      }));
+    const shuffled = [...batch.slice(30), ...batch.slice(0, 30)];
+
+    const r = detect(shuffled, T0);
+    expect(r.status).toBe('anomalies');
+    if (r.status === 'anomalies') {
+      expect(r.anomalies[0]!.kind).toBe('verify_duration_outlier');
+      // The hang is the LATEST by ts, so it must not also be in its own baseline.
+      expect(r.durationBaseline!.p95Ms).toBe(6_000);
+    }
+  });
+});
+
+describe('detect: the absolute floor (sdlc/012)', () => {
+  const fastBaseline = (n = 25) => baselineRuns(n, 6_000);
+  const withLatest = (ms: number, n = 25) => [...fastBaseline(n), ev({
+    kind: 'verify_run', durationMs: ms, receivedAt: hoursAgo(0), payload: { outcome: 'pass' },
+  })];
+
+  test('REGRESSION: 59.5s against a 6s p95 does not raise — a stale tree is not a hang', () => {
+    // The exact run from the real store: ts 10:30:54, durationMs 59483, passing, four steps,
+    // no timeout — one of my own before/after measurements on a stashed pre-011 tree, sitting
+    // between fast runs on both sides. It is a 9.9x ratio. An earlier draft of this loop set
+    // the wire at 8x of the median and would have raised a high-severity incident about it.
+    const r = detect(withLatest(59_483), T0);
+    expect(r.status).toBe('healthy');
+  });
+
+  test('exactly at the floor does not fire', () => {
+    expect(detect(withLatest(BOUNDS.minOutlierMs), T0).status).toBe('healthy');
+  });
+
+  test('one ms above the floor fires', () => {
+    const r = detect(withLatest(BOUNDS.minOutlierMs + 1), T0);
+    expect(r.status).toBe('anomalies');
+    if (r.status === 'anomalies') {
+      expect(r.anomalies[0]!.evidence.thresholdMs).toBe(BOUNDS.minOutlierMs);
+    }
+  });
+
+  test('the case this exists for still fires against a FAST baseline', () => {
+    const r = detect(withLatest(550_000), T0);
+    expect(r.status).toBe('anomalies');
+    if (r.status === 'anomalies') expect(r.anomalies[0]!.severity).toBe('high');
+  });
+
+  test('the ratio alone is not enough: 100x of a 100ms baseline stays under the floor', () => {
+    const r = detect([...baselineRuns(25, 100), ev({
+      kind: 'verify_run', durationMs: 10_000, receivedAt: hoursAgo(0), payload: { outcome: 'pass' },
+    })], T0);
+    expect(r.status).toBe('healthy');
+  });
+
+  test('a faster-than-baseline run never fires, at any ratio', () => {
+    for (const ms of [1, 100, 5_999]) {
+      expect(detect(withLatest(ms), T0).status).toBe('healthy');
+    }
+  });
+});
+
+describe('detect: the baseline is reported, not just used (sdlc/012)', () => {
+  test('a null latest duration still reports the baseline', () => {
+    // The case a reader most needs it: no verdict was reached, so without this the output says
+    // nothing at all about what the detector could see.
+    const runs = [...baselineRuns(25, 6_000), ev({
+      kind: 'verify_run', durationMs: null, receivedAt: hoursAgo(0), payload: { outcome: 'pass' },
+    })];
+    const r = detect(runs, T0);
+    expect(r.status).toBe('healthy');
+    if (r.status === 'healthy') {
+      expect(r.durationBaseline).toBeDefined();
+      expect(r.durationBaseline!.p95Ms).toBe(6_000);
+      expect(r.durationBaseline!.thresholdMs).toBe(BOUNDS.minOutlierMs);
+    }
+  });
+
+  test('19 non-null durations in the window give a verdict', () => {
+    const nulls = Array.from({ length: 31 }, (_, i) =>
+      ev({ kind: 'verify_run', durationMs: null, receivedAt: hoursAgo(9 - i * 0.01) }));
+    const real = baselineRuns(19, 6_000);
+    const r = detect([...nulls, ...real, ev({
+      kind: 'verify_run', durationMs: 6_000, receivedAt: hoursAgo(0),
+    })], T0);
+    expect(r.status).toBe('healthy');
+    if (r.status === 'healthy') expect(r.durationBaseline!.samples).toBe(19);
+  });
+
+  test('18 non-null durations give none, and report no baseline', () => {
+    const nulls = Array.from({ length: 32 }, (_, i) =>
+      ev({ kind: 'verify_run', durationMs: null, receivedAt: hoursAgo(9 - i * 0.01) }));
+    const real = baselineRuns(18, 6_000);
+    const r = detect([...nulls, ...real, ev({
+      kind: 'verify_run', durationMs: 550_000, receivedAt: hoursAgo(0),
+    })], T0);
+    // Enough verify_run EVENTS to pass minVerifyRuns, not enough real durations to have a p95.
+    expect(r.status).toBe('healthy');
+    if (r.status === 'healthy') expect(r.durationBaseline).toBeUndefined();
+  });
+
+  test('formatBaseline renders the stated format', () => {
+    expect(formatBaseline({ windowSize: 50, samples: 19, p95Ms: 8268, thresholdMs: 120_000 }))
+      .toBe('baseline: p95 8268ms over 19 runs (window 50), threshold 120000ms');
   });
 });

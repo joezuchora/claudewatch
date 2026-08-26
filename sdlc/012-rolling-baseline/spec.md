@@ -185,10 +185,13 @@ are not rediscovered:
 Each names a test that fails if the behaviour is absent — the first draft's criteria did not,
 and two of them were satisfiable by the alternative this spec rejects.
 
-- [ ] **The window is real, not incidental**: 60 runs at 60 s followed by 30 at 6 s. All-time
-      p95 is in the 60 s regime; the last-50 p95 is in the 6 s regime. Assert
+- [ ] **The window is real, not incidental**: 60 runs at 60 s followed by **60** at 6 s.
+      All-time p95 is in the 60 s regime; the last-50 p95 is in the 6 s regime. Assert
       `durationBaseline.p95Ms` is in the 6 s regime and `samples === 50`. Fails if
       `runs.slice(0, -1)` is kept.
+      *(Amended in Stage 3: this first said "30 at 6 s", which does not discriminate — the
+      window would hold 21 slow runs and `sorted[47]` of 50 still lands in the slow group, so
+      the test would have passed against the unwindowed code. See `plan.md`.)*
 - [ ] **`cli-detect` asks for verify runs by kind**: a fixture db holding 30 verify runs plus
       1 200 `render` events yields a verdict, not `insufficient-data`. Fails against the
       current `store.query({ limit: 1000 })`.
