@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ClaudeWatch SDLC loop hourly
+
+[Timer]
+OnBootSec=5min
+# Hourly at :17 rather than :00 — nothing else on the box fires then.
+OnCalendar=*-*-* *:17:00
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
