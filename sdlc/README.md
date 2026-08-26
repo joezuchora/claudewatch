@@ -111,6 +111,34 @@ intermittently hanging gate is a gate people learn to skip.** It should be the n
 `intent.md` after the release-note one, and its `spec.md` should start with a spike rather
 than a hypothesis — per the design rule above, which this repo has now paid for twice.
 
+## A fourth pattern, found by CI on this very branch
+
+The instrumented gate went green locally and **CI failed twice in a row**, on two different
+tests, both mine, both the same class of defect:
+
+1. `expect(JSON.stringify(event)).not.toContain('87')` — the event carries a random UUID
+   `eventId`, and a 32-character hex string contains any given two-character substring about
+   half the time. Measured: **19 failures in 200**.
+2. `expect(raw).not.toContain('14.5')` — the spooled line carries an ISO timestamp whose
+   seconds and milliseconds render as `SS.mmm`, so any instant at second 14 with milliseconds
+   5xx matches. Measured: **0.18% of instants**, e.g. `2026-08-26T03:20:14.523Z`.
+
+Both passed locally, repeatedly, by luck.
+
+**The rule, now enforced in the tests themselves:** a substring assertion against serialized
+output is only safe when the needle is *distinctive*. Numeric or very short needles must be
+asserted against the object under construction — here the payload — not the whole envelope,
+because the envelope legitimately contains digits nobody chose.
+
+The generalisation worth carrying: **a test that passes locally and fails in CI is usually not
+an environment difference. It is usually a probabilistic assertion that happened to be lucky
+on your machine.** The instinct to re-run it is exactly wrong; the fix is to compute the
+failure rate and remove the randomness from the assertion.
+
+This is also the first time the loop's own machinery caught a defect in the loop's own work
+*after* the local gate went green — which is the whole reason CI runs the same command rather
+than a weaker one.
+
 ## The finding that justifies the whole thing
 
 `bun test` had been reporting 128 failures out of 341 — and CI was green the entire time,
