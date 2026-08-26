@@ -1,6 +1,6 @@
 # Spec: record the failing tests in `verify_run`
 
-- **Status:** draft
+- **Status:** revised — E2 was false; see "What this cannot do"
 - **Stage:** 2 — Design
 - **Reads:** `sdlc/020-which-test-failed/intent.md`
 
@@ -71,7 +71,7 @@ guessed" rule (SPEC.md §3.3), and it keeps the common case byte-identical.
 | # | Case | Behavior |
 |---|---|---|
 | E1 | `test` step passes | No junit parse, no new fields. The XML file is still written by bun; it is deleted. |
-| E2 | `test` step **times out** (SIGKILL at the step ceiling) | The outfile is absent or truncated mid-write. Parse whatever exists; a parse failure yields `[]` and the run still records `outcome: 'timeout'`. **This is the case the change most exists for** — the 550s hang — so it must not be the case that throws. |
+| E2 | `test` step **times out** (SIGKILL at the step ceiling) | **No outfile exists.** Bun writes the junit XML once, at the end of a run; a SIGKILLed process writes nothing. Verified directly: a hanging test killed at 3s left no file. `failedTests` is therefore omitted on a timeout, and the run records `outcome: 'timeout'` exactly as it does today. See "What this cannot do" below — this is a limitation, not a behavior. |
 | E3 | Outfile missing entirely | `failedTests` omitted. Not an error. |
 | E4 | Malformed / truncated XML | `[]`. Never throws. |
 | E5 | A failure with no `file` attribute | Entry kept, `file: null`. |
@@ -108,6 +108,24 @@ Each is mechanically checkable.
   Rejected as complexity bought for a constraint that is not real.
 - **Record only the file, not the name.** Cheaper, and would have identified none of the four
   timing failures — they were four different tests, and two were in the same file.
+
+## What this cannot do, stated before it is built
+
+**A hanging test step yields nothing.** The intent said the timeout case was "the case the
+change most exists for". That was written before the case was tested, and it is false: bun
+emits the junit file at the end of a run, so SIGKILL at the step ceiling leaves no file. The
+intermittent ~550s hang — the thing that motivated queueing this item — is **not** made
+reconstructable by this change.
+
+What this change does cover is the case that has actually recurred four times: a test that
+*fails* on the first run of an iteration. Those runs complete, so they produce a file.
+
+Recovering the hang case needs a different mechanism (capturing the child's stdout rather than
+inheriting it, or a per-test heartbeat), which is a separate design with its own cost to the
+console output a human reads. It is not folded in here. `sdlc/017` and the hang item stay open.
+
+This paragraph exists because the alternative was shipping a change whose stated purpose it
+does not serve, and discovering that the next time the gate hangs.
 
 ## Risks
 

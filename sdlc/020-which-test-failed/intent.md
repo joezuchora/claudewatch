@@ -8,6 +8,13 @@
 
 `verify_run` records `failedStep: 'test'`. It does not record *which* test.
 
+> **Correction, made during Stage 2 and left here deliberately.** An earlier draft of this
+> intent implied this change would make the intermittent ~550s `verify` hang reconstructable.
+> It will not. Bun writes its junit file at the end of a run, so a SIGKILLed step leaves
+> nothing to parse — verified, not assumed. This change covers tests that *fail*, which is the
+> four recurring cases below; it does not cover tests that *hang*. The hang stays open and
+> still needs data.
+
 There have been **four consecutive first-run-of-iteration gate failures** (13:26, 14:22, 15:20,
 17:18), each a different tight-timing assertion, all on the first workload after ~50 minutes of
 container idle. Every one of those was diagnosed by scrolling terminal output that no longer
