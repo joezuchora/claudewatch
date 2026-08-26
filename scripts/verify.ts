@@ -24,6 +24,7 @@ import { homedir, tmpdir } from 'os';
 // exists for is worse than duplicating a number, and `junit.test.ts` asserts the two agree.
 // (sdlc/020)
 import { readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type TestFailureRecord } from './junit.js';
+import { shouldRecordVerifyMetrics } from './env.js';
 
 interface StepResult {
   name: string;
@@ -97,9 +98,18 @@ function spoolPath(): string {
 }
 
 /**
- * SDLC process metrics are always recorded. They contain no user data, never run in a
- * shipped artifact, and are written to a local file — so they need no consent gate. Product
- * telemetry, which does concern a user, remains opt-in and off by default.
+ * Records a `verify_run` event, if the machine has opted in.
+ *
+ * The comment this replaces claimed these metrics needed no consent gate, justified by a payload
+ * holding nothing but step durations. `sdlc/020` made that false:
+ * the payload now carries repo-relative source paths, test names and describe chains — a
+ * description of someone's repository at the moment their tests were failing. Still not user
+ * data, but no longer nothing.
+ *
+ * So it is off unless `CLAUDEWATCH_VERIFY_METRICS` says otherwise. The systemd unit driving the
+ * hourly loop sets it explicitly, so the continuous series is unaffected. See sdlc/021.
+ *
+ * Product telemetry, which does concern a user, remains separately opt-in and off by default.
  */
 function record(
   steps: StepResult[],
@@ -108,6 +118,11 @@ function record(
   failedStep: string | null,
   testFailures: TestFailureRecord | null,
 ): void {
+  // FIRST statement, before the mkdirSync below. A guard next to appendFileSync would still
+  // create ~/.cache/claudewatch on a machine that opted out — the directory is an observable
+  // side effect, not just the file.
+  if (!shouldRecordVerifyMetrics(process.env)) return;
+
   try {
     // Widened from `string | number | boolean | null` to admit `failedTests`. Only THIS local
     // annotation moves: `packages/core`'s MetricEvent.payload stays as it was, because

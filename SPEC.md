@@ -869,6 +869,12 @@ nothing about a user or their account.
 Every one of those free-text fields is scrubbed of path-shaped substrings before it is recorded,
 so the prohibitions below hold even when a test is *named* after a path.
 
+**`source: 'sdlc'` recording is opt-in (2026-08-26, sdlc/021).** `scripts/verify.ts` writes
+nothing unless `CLAUDEWATCH_VERIFY_METRICS` is set to a true value (`1`, `true`, `yes`, `on`);
+unset means off, and an unrecognised value means off with one line to stderr. The systemd unit
+that drives the continuous loop sets it explicitly, so unattended collection is unaffected while
+a clone on someone else's machine records nothing by default.
+
 Unchanged for **every** event regardless of source: no token, no absolute path, no home
 directory, no hostname, no username, no account identifier. `verify.ts` and the product append to
 the same spool, so an absolute path in either would leave the machine by the same route.

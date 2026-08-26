@@ -27,6 +27,12 @@ event whatever the outcome — **including the firings that hang**, because the 
 step and records a `timeout` rather than blocking forever. That is the data the hang
 investigation needs and could not previously collect.
 
+Recording is **opt-in** and the unit opts in for you: `claudewatch-sdlc-loop.service` sets
+`Environment=CLAUDEWATCH_VERIFY_METRICS=1`. Elsewhere — a clone on a laptop, a contributor's
+fork, CI — `bun run verify` records nothing unless that variable is set. The gate's payload
+carries repo-relative source paths and test names, so it is a description of a repository, and
+the machine's owner decides whether to keep one. See `SPEC.md` §17.
+
 ## Network exposure
 
 The service binds to `127.0.0.1` by default. To reach it from another machine you must set

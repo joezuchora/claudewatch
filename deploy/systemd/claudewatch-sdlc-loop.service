@@ -11,12 +11,21 @@ Type=oneshot
 WorkingDirectory=%h/claudewatch
 EnvironmentFile=-%h/.config/claudewatch/metrics.env
 
-# The loop is: refresh the repo, run the instrumented gate (which records a verify_run
-# event whatever the outcome), then ship the spool.
+# AFTER EnvironmentFile, deliberately: `Environment=` wins over both that file and anything
+# inherited. ExecStart runs `bash -lc`, a LOGIN shell, so without this line an
+# `export CLAUDEWATCH_VERIFY_METRICS=0` in ~/.profile would silently stop the hourly series
+# with no error and no gap marker.
+#
+# `bun run verify` records nothing unless this says otherwise (sdlc/021). The gate's payload
+# now carries repo-relative source paths and test names, so recording is opt-in — and this
+# unattended loop is the machine whose owner opted in.
+Environment=CLAUDEWATCH_VERIFY_METRICS=1
+
+# The loop is: refresh the repo, run the instrumented gate, then ship the spool.
 #
 # This is the part that makes monitoring continuous rather than manual: every firing
-# produces a data point, including the firings that hang — the wrapper bounds each step
-# and records a timeout rather than blocking forever.
+# produces a data point — including the firings that hang, since the wrapper bounds each
+# step and records a timeout rather than blocking forever.
 ExecStart=/usr/bin/env bash -lc 'git -C %h/claudewatch fetch --quiet origin && bun run verify; rc=$?; bun run %h/claudewatch/packages/metrics/src/cli-ship.ts || true; exit 0'
 
 # Never let a red gate mark the unit failed — a failing verify IS the signal we are

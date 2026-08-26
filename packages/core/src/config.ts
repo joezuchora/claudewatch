@@ -30,14 +30,31 @@ export function getConfigPath(): string {
   return join(base, 'config.json');
 }
 
-function fromEnv(env: Record<string, string | undefined>): boolean | null {
-  const raw = env.CLAUDEWATCH_TELEMETRY;
-  if (raw === undefined) return null;
+/**
+ * The project's shared vocabulary for a boolean environment variable.
+ *
+ * Exported so `scripts/env.ts` can be tested against it. That script deliberately keeps its own
+ * copy of the table — `scripts/verify.ts` must not import `packages/core`, because a syntax
+ * error there would stop the gate before it could report the syntax error (sdlc/020). Exporting
+ * this is what lets `scripts/env.test.ts` prove the two agree, instead of comparing a hand-copied
+ * table against itself and going green by construction. (sdlc/021)
+ *
+ * Returns `null` for anything unrecognised — NOT `false`. Callers decide what an absent decision
+ * means, and here they differ: `resolveTelemetryConfig` falls through to the config file, while
+ * the gate's switch falls back to its own default.
+ */
+export function parseBooleanEnvValue(raw: string): boolean | null {
   const v = raw.trim().toLowerCase();
   if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
   if (v === '0' || v === 'false' || v === 'no' || v === 'off' || v === '') return false;
-  // Anything else is not a decision — fall through rather than guessing.
   return null;
+}
+
+function fromEnv(env: Record<string, string | undefined>): boolean | null {
+  const raw = env.CLAUDEWATCH_TELEMETRY;
+  if (raw === undefined) return null;
+  // Anything unrecognised is not a decision — fall through rather than guessing.
+  return parseBooleanEnvValue(raw);
 }
 
 function fromFile(): boolean | null {

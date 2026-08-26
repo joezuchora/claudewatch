@@ -22,6 +22,12 @@ bun run verify     # typecheck, lint, test, build
 
 If `verify` does not pass on a clean checkout, that is a bug — please open an issue.
 
+`verify` **records nothing about your checkout by default.** When
+`CLAUDEWATCH_VERIFY_METRICS=1` is set it appends a `verify_run` event — step durations, and on a
+failing test step the names and repo-relative paths of the failing tests — to
+`~/.cache/claudewatch/metrics-spool.jsonl`. Nothing transmits it; a separate agent, run
+deliberately, would. Unset means off, so you have to opt in on purpose. See `SPEC.md` §17.
+
 ## The loop
 
 Each stage has a skill that does the work and hands off to the next. Run them in order.
