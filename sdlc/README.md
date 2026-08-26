@@ -425,3 +425,49 @@ other invisible.
 I had also reported "typecheck ok" after every `perf.ts` edit that afternoon. Those reports were
 true and worthless: the check was clean because it was empty. A green check on an empty set is
 indistinguishable from a green check on a covered one, unless you plant a failure and watch.
+
+
+## A test with a one-millisecond budget (loop 019)
+
+```
+(fail) cache > isCacheFresh > returns true for snapshot at exactly TTL boundary minus 1ms
+```
+
+```ts
+const justUnder = new Date(Date.now() - 59_999).toISOString();
+// ...ISO round-trip, two object constructions...
+expect(isCacheFresh(envelope, 60)).toBe(true);   // isCacheFresh reads Date.now() AGAIN
+```
+
+The age the assertion sees is `59_999 + (however long the test took)`. **One millisecond of
+budget.** Fine on an idle machine; not on this container's first workload after a resume.
+
+Two things make this worth recording beyond "flaky test fixed".
+
+**The sweep mattered more than the fix.** The tempting conclusion — "the suite is full of flaky
+timing tests" — is wrong, and checking took one grep. Every other age-based test has 60–300 s
+of margin:
+
+| test | offset | threshold | margin |
+|---|---|---|---|
+| older than TTL | 120 s | 60 s | 60 s |
+| 5-minute-old cache | 300 s | 600 s | 300 s |
+| 11-minute-old cache | 660 s | 600 s | 60 s |
+| **TTL boundary minus 1 ms** | **59.999 s** | **60 s** | **1 ms** |
+
+One outlier, not a class. Recording *which* it is beats recording that some exist.
+
+**The old test could not test the boundary at all.** It asserted only the side it had slack on;
+`60_000` — the side that distinguishes `<` from `<=` — was unreachable, because there was no
+slack there to be lucky with. Passing `now` as a defaulted parameter, the same shape `sdlc/011`
+used for fetch timings and for the same reason, makes both sides exact. Mutation confirms it:
+flipping `<` to `<=` now fails, and so does ignoring the injected clock.
+
+> A flaky test is usually a test that was measuring the machine. The fix is rarely a wider
+> margin — it is removing the machine from the measurement, which usually turns out to make the
+> assertion *stronger* rather than merely calmer.
+
+`sdlc/001` recorded this exact lesson about two other tests ("a test that passes locally and
+fails in CI is a probabilistic assertion that was lucky on your machine") and applied it to the
+two that had already failed. Nobody swept for siblings. This one waited eighteen loops for a
+slow enough afternoon.

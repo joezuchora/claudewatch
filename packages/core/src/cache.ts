@@ -111,9 +111,24 @@ export function writeCache(envelope: CacheEnvelope): void {
   renameSync(tempPath, path);
 }
 
-export function isCacheFresh(envelope: CacheEnvelope, ttlSeconds: number = 600): boolean {
+/**
+ * `now` is a defaulted parameter, not an ambient read, for the same reason `sdlc/011` made
+ * fetch timings injectable: time is a property of a CALL, not of the process.
+ *
+ * With `Date.now()` read inside, a boundary test could only assert the side it had slack on —
+ * `age < ttl` computed at assertion time includes however long the test itself took. One such
+ * test gave itself a 1 ms budget and went red on a slow container (sdlc/019). Passing `now`
+ * makes the boundary exact from both sides, which is the part that was untestable before.
+ *
+ * Every production caller passes one or two arguments and gets ambient time, unchanged.
+ */
+export function isCacheFresh(
+  envelope: CacheEnvelope,
+  ttlSeconds: number = 600,
+  now: number = Date.now(),
+): boolean {
   const fetchedAt = new Date(envelope.snapshot.fetchedAt).getTime();
-  const age = Date.now() - fetchedAt;
+  const age = now - fetchedAt;
   return age < ttlSeconds * 1000;
 }
 

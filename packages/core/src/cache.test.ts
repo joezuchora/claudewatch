@@ -66,11 +66,40 @@ describe('cache', () => {
       expect(isCacheFresh(envelope, 60)).toBe(false);
     });
 
-    test('returns true for snapshot at exactly TTL boundary minus 1ms', () => {
-      const justUnder = new Date(Date.now() - 59_999).toISOString();
-      const snapshot = makeTestSnapshot({ fetchedAt: justUnder });
-      const envelope = makeCacheEnvelope(snapshot);
-      expect(isCacheFresh(envelope, 60)).toBe(true);
+    /**
+     * A fixed clock, so the boundary is exact.
+     *
+     * This test used to compute `Date.now() - 59_999` and let `isCacheFresh` read the clock
+     * again at the assertion — giving itself a ONE MILLISECOND budget for an ISO round-trip and
+     * two object constructions. It went red on a slow container (sdlc/019). It also could only
+     * ever assert the side it had slack on; the boundary itself was untested.
+     */
+    const NOW = Date.parse('2026-03-07T12:00:00.000Z');
+    const agedMs = (ms: number) =>
+      makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date(NOW - ms).toISOString() }));
+
+    test('one ms under the TTL is fresh', () => {
+      expect(isCacheFresh(agedMs(59_999), 60, NOW)).toBe(true);
+    });
+
+    test('exactly AT the TTL is stale — the boundary is `<`, not `<=`', () => {
+      // The side the old test could never reach, because it had no slack there.
+      expect(isCacheFresh(agedMs(60_000), 60, NOW)).toBe(false);
+    });
+
+    test('one ms over the TTL is stale', () => {
+      expect(isCacheFresh(agedMs(60_001), 60, NOW)).toBe(false);
+    });
+
+    test('the ambient clock is still the default when no `now` is passed', () => {
+      // Margin measured in minutes, not milliseconds — this asserts the DEFAULT is wired, and
+      // is deliberately nowhere near a boundary.
+      const fresh = makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date().toISOString() }));
+      expect(isCacheFresh(fresh, 600)).toBe(true);
+      const old = makeCacheEnvelope(
+        makeTestSnapshot({ fetchedAt: new Date(Date.now() - 3_600_000).toISOString() }),
+      );
+      expect(isCacheFresh(old, 600)).toBe(false);
     });
 
     test('uses default TTL of 600s (10 minutes)', () => {
