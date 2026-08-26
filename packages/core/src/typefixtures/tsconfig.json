@@ -1,0 +1,9 @@
+{
+  "extends": "../../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["*.expect-error.ts", "*.expect-clean.ts"],
+  "//": "exclude MUST be reset. The root config excludes this very directory, and `extends` inherits exclude with paths rebased, so without this line the project matches zero files and tsc exits 2 with TS18003 — a non-zero exit that says nothing was checked. exhaustive-guard.test.ts asserts TS18003 is absent for exactly that reason.",
+  "exclude": []
+}

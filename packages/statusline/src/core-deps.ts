@@ -23,6 +23,7 @@ export const isInCooldown = core.isInCooldown;
 export const enterCooldown = core.enterCooldown;
 export const clearCooldown = core.clearCooldown;
 export const shouldCooldown = core.shouldCooldown;
+export const failurePolicy = core.failurePolicy;
 export const resolveCredentials = core.resolveCredentials;
 export const getCredentialPath = core.getCredentialPath;
 export const fetchUsage = core.fetchUsage;
@@ -39,6 +40,7 @@ export const utilizationBucket = core.utilizationBucket;
 export const setTelemetryConfig = core.setTelemetryConfig;
 
 export type {
+  FailurePolicy,
   UsageSnapshot,
   CacheEnvelope,
   SessionInfo,

@@ -1,4 +1,5 @@
-import type { FetchResult } from './types.js';
+import type { FailureClass, FetchResult } from './types.js';
+import { failurePolicy } from './cooldown.js';
 import { emitProcess, fetchResultEvent } from './telemetry.js';
 import type { StatusClass } from './telemetry.js';
 
@@ -105,13 +106,39 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * How a status-less failure maps onto the telemetry enumeration.
+ *
+ * A status-less failure is either our own 5s timeout or an unreachable endpoint. sdlc/010
+ * made those distinguishable via an abort flag rather than message parsing, which is what
+ * finally makes StatusClass's 'timeout' reachable instead of decorative.
+ *
+ * Exhaustive rather than `=== 'timeout' ? ... : 'network'` so that a new `FailureClass` has to
+ * declare which side it lands on. Unlike `failurePolicy` this does NOT throw on an unhandled
+ * member: it runs inside telemetry reporting on the return path of every fetch, and losing a
+ * successful fetch result to a telemetry mapping would be a worse failure than one mislabelled
+ * event. The compile error is the enforcement; 'network' is the degradation. (sdlc/014)
+ */
+function statusLessClassOf(fc: FailureClass): 'timeout' | 'network' {
+  switch (fc) {
+    case 'timeout':
+      return 'timeout';
+    case 'notConfigured':
+    case 'authInvalid':
+    case 'serviceUnavailable':
+    case 'malformedResponse':
+    case 'unexpectedFailure':
+      return 'network';
+  }
+  const unhandled: never = fc;
+  void unhandled;
+  return 'network';
+}
+
 /** Map a result onto the closed status-class enumeration telemetry payloads accept. */
 function statusClassOf(result: FetchResult): StatusClass {
-  // A status-less failure is either our own 5s timeout or an unreachable endpoint. sdlc/010
-  // made those distinguishable via an abort flag rather than message parsing, which is what
-  // finally makes StatusClass's 'timeout' reachable instead of decorative.
   if (result.status === null) {
-    return result.failureClass === 'timeout' ? 'timeout' : 'network';
+    return statusLessClassOf(result.failureClass);
   }
   if (result.status >= 500) return '5xx';
   if (result.status >= 400) return '4xx';
@@ -161,8 +188,17 @@ export async function fetchUsage(
       clearTimeout(timeout);
       fetchedMs += Date.now() - attemptStarted;
 
-      // Don't retry auth errors or rate limits — they won't resolve on retry
-      if (!result.ok && (result.failureClass === 'authInvalid' || result.status === 429)) {
+      // Don't retry auth errors or rate limits — they won't resolve on retry.
+      //
+      // The two halves cannot merge. `retryable` is a property of the CLASS, and 429 and 5xx
+      // are the same class (`serviceUnavailable`) with opposite answers: a rate limit will not
+      // clear in 2 s, a server error might. Deriving retry from the class alone would start
+      // retrying every 429; deriving it from the status alone would lose `notConfigured`.
+      // (sdlc/014)
+      if (
+        !result.ok &&
+        (!failurePolicy(result.failureClass).retryable || result.status === 429)
+      ) {
         return report(result);
       }
 

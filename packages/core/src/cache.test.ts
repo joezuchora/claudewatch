@@ -295,3 +295,70 @@ describe('readCacheResult: distinguishing why a read failed', () => {
     expect(readCache()).toEqual(readCacheResult().envelope);
   });
 });
+
+describe('lastErrorClass validation (sdlc/014)', () => {
+  let cleanup: () => void;
+
+  beforeEach(() => {
+    ({ cleanup } = setupTestCacheDir());
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  function writeRaw(lastErrorClass: unknown): void {
+    const envelope = { ...makeCacheEnvelope(makeTestSnapshot()), lastErrorClass };
+    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+  }
+
+  test('an unknown lastErrorClass is nulled, not rejected', () => {
+    // The snapshot beside it is fine. Discarding the envelope over a corrupt error-class field
+    // would cost a live fetch on every read for a field nothing renders.
+    writeRaw('someClassFromAFutureVersion');
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope?.lastErrorClass).toBeNull();
+    expect(result.envelope?.snapshot.display.primaryUtilizationPct).toBe(
+      makeTestSnapshot().display.primaryUtilizationPct,
+    );
+  });
+
+  test('the cache file survives — this is not corruption recovery', () => {
+    writeRaw('someClassFromAFutureVersion');
+    readCacheResult();
+    expect(existsSync(getCachePath())).toBe(true);
+  });
+
+  test('the cooldown timestamp is kept, since it does not depend on the class', () => {
+    // Nulling the class must not release a backoff. Otherwise a corrupt field turns into
+    // unthrottled retries against an endpoint that just rate-limited us.
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const envelope = {
+      ...makeCacheEnvelope(makeTestSnapshot(), future),
+      lastErrorClass: 'notAClass',
+    };
+    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+    expect(readCacheResult().envelope?.cooldownUntil).toBe(future);
+  });
+
+  test('a non-string lastErrorClass is nulled too', () => {
+    for (const value of [42, {}, ['authInvalid'], true]) {
+      writeRaw(value);
+      expect(readCacheResult().envelope?.lastErrorClass).toBeNull();
+    }
+  });
+
+  test('a missing lastErrorClass field reads as null', () => {
+    const envelope = makeCacheEnvelope(makeTestSnapshot()) as unknown as Record<string, unknown>;
+    delete envelope.lastErrorClass;
+    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+    expect(readCacheResult().envelope?.lastErrorClass).toBeNull();
+  });
+
+  test('a valid lastErrorClass is preserved untouched', () => {
+    writeRaw('timeout');
+    expect(readCacheResult().envelope?.lastErrorClass).toBe('timeout');
+  });
+});

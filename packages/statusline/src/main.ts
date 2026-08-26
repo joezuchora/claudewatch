@@ -8,6 +8,7 @@ import {
   enterCooldown,
   clearCooldown,
   shouldCooldown,
+  failurePolicy,
   resolveCredentials,
   getCredentialPath,
   fetchUsage,
@@ -26,6 +27,7 @@ import {
   type CacheEnvelope,
   type SessionInfo,
   type FailureClass,
+  type FailurePolicy,
 } from './core-deps.js';
 
 const VERSION = '0.1.0';
@@ -225,13 +227,13 @@ export async function main(): Promise<never> {
       return process.exit(0);
     }
 
-    const snapshot = makeErrorSnapshot(result.failureClass === 'authInvalid' ? 'invalid' : 'unknown');
-    printLiveDebug(cache, snapshot, {
+    const policy = failurePolicy(result.failureClass);
+    printLiveDebug(cache, makeErrorSnapshot(policy.presentation), {
       failureClass: result.failureClass,
       status: result.status,
       message: result.message,
     });
-    return process.exit(result.failureClass === 'authInvalid' ? 2 : 1);
+    return process.exit(policy.statuslineExitCode);
   }
 
   // If cache is fresh and not --refresh → output and exit
@@ -320,25 +322,40 @@ export async function main(): Promise<never> {
     writeCache(cooledDown);
   }
 
-  // Auth failure
-  if (failureClass === 'authInvalid') {
-    if (flags.json) {
-      const snapshot = makeErrorSnapshot('invalid');
-      console.log(JSON.stringify(snapshot, null, 2));
-    } else {
-      console.log('⊙ auth invalid');
-    }
-    return process.exit(2);
-  }
-
-  // No cache, fetch failed
+  // Nothing renderable. Presentation and exit code both come from the policy: before sdlc/014
+  // they were two independent `=== 'authInvalid'` comparisons, so a new FailureClass could
+  // have picked up 'unknown' rendering with an exit code that disagreed with it.
+  //
+  // The stale-cache branch above returns before reaching here and exits 0 whatever the class
+  // says — a rendered number is a success from the caller's point of view (SPEC.md §11.7).
+  const policy = failurePolicy(failureClass);
   if (flags.json) {
-    const snapshot = makeErrorSnapshot('unknown');
-    console.log(JSON.stringify(snapshot, null, 2));
+    console.log(JSON.stringify(makeErrorSnapshot(policy.presentation), null, 2));
   } else {
-    console.log('⊙ error');
+    console.log(errorLineFor(policy.presentation));
   }
-  return process.exit(1);
+  return process.exit(policy.statuslineExitCode);
+}
+
+/**
+ * The one-line non-JSON rendering of a failed fetch.
+ *
+ * Exhaustive over the three presentations rather than an `=== 'invalid'` ternary, for the same
+ * reason `failurePolicy` is exhaustive over FailureClass: a fourth presentation must not be
+ * able to silently inherit '⊙ error'. The strings match the credential-resolution paths above,
+ * which reach the same states without going through a fetch.
+ */
+function errorLineFor(presentation: FailurePolicy['presentation']): string {
+  switch (presentation) {
+    case 'invalid':
+      return '⊙ auth invalid';
+    case 'missing':
+      return '⊙ no credentials';
+    case 'unknown':
+      return '⊙ error';
+  }
+  const unhandled: never = presentation;
+  throw new Error(`unhandled presentation: ${String(unhandled)}`);
 }
 
 // --- Output helper ---

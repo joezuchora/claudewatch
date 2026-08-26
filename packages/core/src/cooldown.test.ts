@@ -1,5 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { isInCooldown, enterCooldown, clearCooldown, shouldCooldown } from './cooldown.js';
+import {
+  isInCooldown,
+  enterCooldown,
+  clearCooldown,
+  shouldCooldown,
+  failurePolicy,
+  isFailureClass,
+  FAILURE_CLASSES,
+  type FailurePolicy,
+} from './cooldown.js';
+import type { FailureClass } from './types.js';
 import { makeTestEnvelope } from './test-helpers.js';
 
 describe('cooldown', () => {
@@ -110,6 +120,92 @@ describe('shouldCooldown after the timeout split (sdlc/010)', () => {
   test('no other class enters cooldown', () => {
     for (const c of ['notConfigured', 'authInvalid', 'malformedResponse', 'unexpectedFailure'] as const) {
       expect(shouldCooldown(c)).toBe(false);
+    }
+  });
+});
+
+describe('failurePolicy (sdlc/014)', () => {
+  /**
+   * Hand-written, deliberately. Deriving the expectation from `failurePolicy` would assert
+   * that the function equals itself. Typed as a total `Record`, so adding a `FailureClass`
+   * breaks THIS table at compile time too — the test cannot fall behind the union it covers.
+   */
+  const EXPECTED: Record<FailureClass, FailurePolicy> = {
+    notConfigured: { cooldown: false, retryable: false, presentation: 'missing', statuslineExitCode: 2 },
+    authInvalid: { cooldown: false, retryable: false, presentation: 'invalid', statuslineExitCode: 2 },
+    serviceUnavailable: { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
+    timeout: { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
+    malformedResponse: { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
+    unexpectedFailure: { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
+  };
+
+  test('every member has exactly the documented policy', () => {
+    for (const fc of FAILURE_CLASSES) {
+      expect(failurePolicy(fc)).toEqual(EXPECTED[fc]);
+    }
+  });
+
+  test('FAILURE_CLASSES holds all six members, in the union order', () => {
+    // A count, not a spot check: `satisfies` catches a member here that is not in the union,
+    // and the `never` assignment in cooldown.ts catches a union member this array lacks, but
+    // neither notices a DUPLICATE — which would make every `for (const fc of ...)` loop above
+    // silently cover five classes while looking like six.
+    expect(FAILURE_CLASSES).toHaveLength(6);
+    expect(new Set(FAILURE_CLASSES).size).toBe(6);
+  });
+
+  test('shouldCooldown agrees with the policy for every member', () => {
+    for (const fc of FAILURE_CLASSES) {
+      expect(shouldCooldown(fc)).toBe(failurePolicy(fc).cooldown);
+    }
+  });
+
+  test('an unknown class throws rather than receiving a default policy', () => {
+    // Reachable only past a cast — which is exactly how a corrupt cache file used to deliver
+    // one. Before sdlc/014 the same value would have quietly landed in the default bucket.
+    expect(() => failurePolicy('somethingElse' as FailureClass)).toThrow(/unhandled FailureClass/);
+  });
+});
+
+describe('isFailureClass (sdlc/014)', () => {
+  test('accepts every member', () => {
+    for (const fc of FAILURE_CLASSES) {
+      expect(isFailureClass(fc)).toBe(true);
+    }
+  });
+
+  test('rejects non-members and non-strings', () => {
+    for (const value of ['', 'authinvalid', 'AUTHINVALID', 'notConfigured ', null, undefined, 0, {}, ['authInvalid']]) {
+      expect(isFailureClass(value)).toBe(false);
+    }
+  });
+});
+
+describe('the surfaces no longer compare FailureClass strings (sdlc/014)', () => {
+  /**
+   * The point of one exhaustive switch is lost the moment a surface re-derives a decision from
+   * an equality check, because that check has no compile-time obligation to the union. This
+   * scans for the pattern rather than trusting review to notice it coming back.
+   */
+  const SURFACES = [
+    'packages/statusline/src/main.ts',
+    'packages/vscode/src/extension.ts',
+  ];
+
+  test('no surface branches on a FailureClass literal', () => {
+    const repoRoot = new URL('../../../', import.meta.url).pathname;
+    for (const surface of SURFACES) {
+      const source = Bun.spawnSync(['cat', repoRoot + surface]).stdout.toString();
+      expect(source.length).toBeGreaterThan(0);
+      // Comments are allowed to mention the classes — the reasoning for this change does.
+      const code = source
+        .split('\n')
+        .filter(line => !line.trimStart().startsWith('//') && !line.trimStart().startsWith('*'))
+        .join('\n');
+      for (const fc of FAILURE_CLASSES) {
+        expect(code).not.toContain(`=== '${fc}'`);
+        expect(code).not.toContain(`!== '${fc}'`);
+      }
     }
   });
 });

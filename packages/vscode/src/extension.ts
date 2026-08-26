@@ -13,6 +13,7 @@ import {
   enterCooldown,
   clearCooldown,
   shouldCooldown,
+  failurePolicy,
   markStale,
   makeErrorSnapshot,
   extractLastError,
@@ -213,9 +214,16 @@ async function doRefresh(manual: boolean): Promise<void> {
       return;
     }
 
-    // Fetch failed
-    if (result.failureClass === 'authInvalid') {
-      const snapshot = makeErrorSnapshot('invalid');
+    // Fetch failed.
+    //
+    // A class with a definite presentation ('invalid' or 'missing') describes a condition
+    // stale data would misrepresent — the user's credentials, not the endpoint — so it
+    // replaces the status bar rather than falling through to stale-while-error below.
+    // Reading the policy instead of `=== 'authInvalid'` is what makes a new FailureClass
+    // choose that side explicitly. (sdlc/014)
+    const policy = failurePolicy(result.failureClass);
+    if (policy.presentation !== 'unknown') {
+      const snapshot = makeErrorSnapshot(policy.presentation);
       writeCacheFromSnapshot(snapshot, cached);
       statusBar?.update(snapshot, false);
       return;

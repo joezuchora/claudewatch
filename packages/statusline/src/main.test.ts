@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, mock, spyOn } from 'bun:test';
 import { makeTestSnapshot, makeTestEnvelope } from '@claudewatch/core/test-helpers';
-import { classify as realClassify, formatRichStatusLine, markStale as realMarkStale, makeErrorSnapshot as realMakeErrorSnapshot } from '@claudewatch/core';
+import { classify as realClassify, formatRichStatusLine, markStale as realMarkStale, makeErrorSnapshot as realMakeErrorSnapshot, failurePolicy as realFailurePolicy, FAILURE_CLASSES } from '@claudewatch/core';
 import type { UsageSnapshot, CacheEnvelope, CredentialResult, FetchResult, FailureClass } from '@claudewatch/core';
 
 // --- Exit sentinel ---
@@ -70,6 +70,10 @@ mock.module('./core-deps.js', () => {
     formatRichStatusLine,
     markStale: realMarkStale,
     makeErrorSnapshot: realMakeErrorSnapshot,
+    // Passed through real, like the two above. `failurePolicy` is a pure total function of a
+    // closed union: a stub would only let these tests assert against a policy table that is
+    // not the one shipping. sdlc/014.
+    failurePolicy: realFailurePolicy,
   };
 });
 
@@ -620,5 +624,55 @@ describe('main', () => {
       // Should NOT re-write cache since it's already stale with fetchFailed
       expect(mockWriteCache).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('the exit code comes from the policy (sdlc/014)', () => {
+  test('REGRESSION GUARD: a renderable stale cache exits 0 for EVERY failure class', async () => {
+    // The exit code is a property of the FailureClass on the two paths that have nothing to
+    // render. This path has something to render, so it exits 0 regardless — a displayed
+    // number is a success from the caller's point of view (SPEC.md §11.7).
+    //
+    // This is the specific regression a mechanical "replace the comparison with the policy"
+    // pass would cause: authInvalid's policy says exit 2, and consulting it here would turn a
+    // rendered stale statusline into a failure exit for anyone whose token expired.
+    for (const failureClass of FAILURE_CLASSES) {
+      mockReadCache.mockReturnValue(makeTestEnvelope({ snapshot: makeTestSnapshot() }));
+      mockIsCacheFresh.mockReturnValue(false);
+      mockIsInCooldown.mockReturnValue(false);
+      mockFetchUsage.mockResolvedValue({ ok: false, status: 500, failureClass, message: 'x' });
+
+      const { exitCode } = await runMain([]);
+      expect(exitCode).toBe(0);
+    }
+  });
+
+  test('with nothing renderable, each class exits on its own policy', async () => {
+    for (const failureClass of FAILURE_CLASSES) {
+      mockReadCache.mockReturnValue(null);
+      mockIsCacheFresh.mockReturnValue(false);
+      mockIsInCooldown.mockReturnValue(false);
+      mockFetchUsage.mockResolvedValue({ ok: false, status: 500, failureClass, message: 'x' });
+
+      const { exitCode } = await runMain([]);
+      expect(exitCode).toBe(realFailurePolicy(failureClass).statuslineExitCode);
+    }
+  });
+
+  test('the rendered line matches the policy presentation', async () => {
+    const expected: Record<string, string> = {
+      invalid: '⊙ auth invalid',
+      missing: '⊙ no credentials',
+      unknown: '⊙ error',
+    };
+    for (const failureClass of FAILURE_CLASSES) {
+      mockReadCache.mockReturnValue(null);
+      mockIsCacheFresh.mockReturnValue(false);
+      mockIsInCooldown.mockReturnValue(false);
+      mockFetchUsage.mockResolvedValue({ ok: false, status: 500, failureClass, message: 'x' });
+
+      const { output } = await runMain([]);
+      expect(output.join('\n')).toContain(expected[realFailurePolicy(failureClass).presentation]!);
+    }
   });
 });

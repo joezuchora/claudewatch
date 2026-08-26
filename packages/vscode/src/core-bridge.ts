@@ -31,6 +31,7 @@ export const isInCooldown = core.isInCooldown;
 export const enterCooldown = core.enterCooldown;
 export const clearCooldown = core.clearCooldown;
 export const shouldCooldown = core.shouldCooldown;
+export const failurePolicy = core.failurePolicy;
 export const markStale = core.markStale;
 export const makeErrorSnapshot = core.makeErrorSnapshot;
 export const extractLastError = core.extractLastError;

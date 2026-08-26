@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CacheEnvelope } from './types.js';
 import { emitProcess, cacheEvent } from './telemetry.js';
+import { isFailureClass } from './cooldown.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -86,6 +87,17 @@ export function readCacheResult(): CacheReadResult {
     tryDelete(path);
     emitProcess(cacheEvent({ outcome: 'invalidShape' }));
     return { envelope: null, reason: 'invalidShape' };
+  }
+
+  // `lastErrorClass` is the one field that crosses the cast at `JSON.parse(raw) as
+  // CacheEnvelope` and is later branched on — `failurePolicy` would `throw` on a non-member.
+  // Nothing checked it before sdlc/014; it was inert only because no consumer branched on it.
+  //
+  // Nulled rather than rejected: a corrupt error-class field says nothing about the snapshot
+  // beside it, and discarding a good snapshot over it would cost a live fetch on every read.
+  // The cooldown timestamp is independent of the class, so the backoff still holds.
+  if (parsed.lastErrorClass !== null && !isFailureClass(parsed.lastErrorClass)) {
+    parsed = { ...parsed, lastErrorClass: null };
   }
 
   return { envelope: parsed, reason: 'hit' };

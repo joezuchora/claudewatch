@@ -2,7 +2,7 @@
 
 - **ID:** 014-exhaustive-failure-class
 - **Stage:** 3 — Build
-- **Status:** draft
+- **Status:** implemented
 - **Derived from:** [`spec.md`](./spec.md)
 - **Branch:** `claude/ai-sdlc-setup-plan-nqyqbk`
 

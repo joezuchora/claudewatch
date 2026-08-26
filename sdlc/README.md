@@ -471,3 +471,51 @@ flipping `<` to `<=` now fails, and so does ignoring the injected clock.
 fails in CI is a probabilistic assertion that was lucky on your machine") and applied it to the
 two that had already failed. Nobody swept for siblings. This one waited eighteen loops for a
 slow enough afternoon.
+
+## A guard that compiles is not a guard that works (loop 014)
+
+The subject of loop 014 was that four separate decisions — cooldown, retryable, presentation,
+statusline exit code — were each an equality check against a subset of `FailureClass` with an
+implicit default. `sdlc/010` had added `'timeout'` to that union and very nearly shipped a
+version where timeouts silently stopped entering the 5-minute backoff, with `tsc` green
+throughout. The fix is one exhaustive `switch` with a `never` fallback, which the compiler
+cannot let you extend without deciding every case.
+
+The loop then produced three instances of the same failure, one per stage, and they are worth
+recording together because they are all the same shape:
+
+**Stage 2 — the guard that compiles clean.** The spec proposed
+`const _x: Exclude<FailureClass, typeof FAILURE_CLASSES[number]>[] = []` as the check that
+`FAILURE_CLASSES` covers the union. It compiles with a member missing: an empty array literal is
+assignable to every array type, `never[]` included. Caught by the spec-reviewer, verified by
+running both forms — mine exit 0, theirs exit 2 with TS2322. In the loop whose entire subject
+was guards that never fire.
+
+**Stage 4 — the checker that checked nothing.** The fixture project meant to prove the guards
+fail inherited its `exclude` from the root config, which excludes the fixture directory itself.
+`tsc` matched zero files and exited 2 with `TS18003: No inputs were found`. The harness's own
+self-check — `exitCode !== 0`, output contains `error TS` — passed on it. Three assertions
+downstream went green against an empty string.
+
+**Stage 4 again — the fixtures that collided.** Two fixtures had no top-level `import` or
+`export`, so TypeScript compiled them as global scripts and they collided on a shared type name.
+The error under test was still there, buried under six duplicate-identifier errors that had
+nothing to do with anything.
+
+The through-line: **a non-zero exit is not evidence that a checker checked something, and a
+compiling guard is not evidence that a guard guards.** Both are the same mistake as the one
+already recorded here about green checks on empty sets, and neither is visible by reading. The
+only thing that distinguishes a live guard from a decorative one is having watched it fail.
+
+So the loop shipped the negative control it needed:
+`packages/core/src/typefixtures/inert-empty-array.expect-clean.ts` is the Stage 2 bug, frozen,
+with a test asserting `tsc` reports **nothing** for it. Three sibling fixtures must fail; that
+one must not. Sixteen mutations, sixteen caught, recorded in
+[`014-exhaustive-failure-class/review.md`](./014-exhaustive-failure-class/review.md).
+
+One more thing the mutation pass established, which no amount of reading had: the retry
+condition's two halves are **independently** load-bearing. `!policy.retryable` alone starts
+retrying every 429; `result.status === 429` alone starts retrying 401s. 429 and 5xx are the same
+`FailureClass` and want opposite answers, so retry is the one decision here that is not a pure
+function of the class — and the "obvious" tidy-up that merges them is a live bug in both
+directions.
