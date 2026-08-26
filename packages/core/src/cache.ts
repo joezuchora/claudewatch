@@ -4,7 +4,7 @@ import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CacheEnvelope } from './types.js';
 import { emitProcess, cacheEvent } from './telemetry.js';
-import { isFailureClass } from './cooldown.js';
+import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -50,6 +50,28 @@ export interface CacheReadResult {
   reason: CacheReadReason;
 }
 
+/**
+ * Bring a `cooldownUntil` read off disk into the range `isInCooldown` can reason about.
+ *
+ * Garbage (a non-string, or a string `Date.parse` rejects) becomes `null`: no cooldown, one
+ * fetch, and the next failure writes a real one. Failing open is right here because failing
+ * closed on an unparseable value would let a corrupt byte wedge the tool permanently.
+ *
+ * A value beyond one full cooldown from now is clamped down to that ceiling. Failing closed is
+ * right there for the mirror reason: `8.64e15` would otherwise pin the tool on stale data
+ * forever, and no honest writer of this file ever sets a longer backoff than we do.
+ *
+ * `now` is injectable for the reason sdlc/019 made `isCacheFresh`'s injectable: a clamp test
+ * that reads ambient time can only assert the side it has slack on.
+ */
+export function sanitizeCooldownUntil(value: unknown, now: number = Date.now()): string | null {
+  if (typeof value !== 'string') return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  const ceiling = now + COOLDOWN_DURATION_MS;
+  return ms > ceiling ? new Date(ceiling).toISOString() : value;
+}
+
 export function readCacheResult(): CacheReadResult {
   const path = getCachePath();
 
@@ -66,6 +88,18 @@ export function readCacheResult(): CacheReadResult {
     parsed = JSON.parse(raw) as CacheEnvelope;
   } catch {
     // Corrupt JSON — delete and treat as a miss so we never get a stuck failure loop.
+    tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'corruptJson' }));
+    return { envelope: null, reason: 'corruptJson' };
+  }
+
+  // `JSON.parse` returns any JSON value, not necessarily an object. A cache file containing
+  // the literal `null` (or `4`, or `[]`) survives the parse and then throws TypeError on
+  // `parsed.version` below — out of readCacheResult, out of main(), into the top-level catch,
+  // and the file is never deleted. Every subsequent invocation repeats it: exit 3 forever.
+  // That is precisely the stuck failure loop SPEC.md §9 exists to prevent, and the `as`
+  // assertion above is what hid it. Found by the sdlc/014 security pass.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     tryDelete(path);
     emitProcess(cacheEvent({ outcome: 'corruptJson' }));
     return { envelope: null, reason: 'corruptJson' };
@@ -89,16 +123,31 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'invalidShape' };
   }
 
-  // `lastErrorClass` is the one field that crosses the cast at `JSON.parse(raw) as
-  // CacheEnvelope` and is later branched on — `failurePolicy` would `throw` on a non-member.
-  // Nothing checked it before sdlc/014; it was inert only because no consumer branched on it.
-  //
-  // Nulled rather than rejected: a corrupt error-class field says nothing about the snapshot
-  // beside it, and discarding a good snapshot over it would cost a live fetch on every read.
-  // The cooldown timestamp is independent of the class, so the backoff still holds.
+  // Two fields cross the `as CacheEnvelope` assertion unchecked. Both are nulled rather than
+  // rejected: neither says anything about the snapshot beside it, and discarding a good
+  // snapshot would cost a live token-bearing fetch on every read.
+
+  // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
+  // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
+  // more — so the `throw` there is not currently reachable from a cache file. It is checked
+  // here so that the day someone does branch on it, the check already exists. Claiming more
+  // than that was a review finding against this very change (sdlc/014).
   if (parsed.lastErrorClass !== null && !isFailureClass(parsed.lastErrorClass)) {
     parsed = { ...parsed, lastErrorClass: null };
   }
+
+  // `cooldownUntil` is the live one, and it guards a security property: the 5-minute backoff
+  // is the ONLY throttle on token-bearing requests (SPEC.md §9.4).
+  //
+  // `isInCooldown` does `Date.now() < new Date(cooldownUntil).getTime()`. An unparseable
+  // string gives NaN, every comparison against NaN is false, and the cooldown is silently
+  // released — so a corrupt byte in this field turns into a fresh authenticated request on
+  // every single prompt render. A far-future value wedges the opposite way, pinning the tool
+  // on stale data indefinitely.
+  //
+  // Nulled on garbage (fail open, one fetch, then a real cooldown is written), and clamped on
+  // magnitude (fail closed, never longer than the backoff we would have set ourselves).
+  parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
 
   return { envelope: parsed, reason: 'hit' };
 }

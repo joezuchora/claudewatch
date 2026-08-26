@@ -64,8 +64,8 @@ mock.module('./core-deps.js', () => {
     normalize: (...args: unknown[]) => mockNormalize(...args),
     classify: (...args: unknown[]) => mockClassify(...args),
     formatStatusLine: (...args: unknown[]) => mockFormatStatusLine(...args),
-    // The mock replaces ./deps.js, so it must provide exactly what deps.ts exports and
-    // nothing more. Passing real core functions through here re-binds them for other test
+    // The mock replaces ./core-deps.js, so it must provide exactly what core-deps.ts exports
+    // and nothing more. Passing real core functions through here re-binds them for other test
     // files in a whole-suite run — that was the cause of the contamination this change fixes.
     formatRichStatusLine,
     markStale: realMarkStale,

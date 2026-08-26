@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
-import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir } from './cache.js';
+import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir, sanitizeCooldownUntil } from './cache.js';
+import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
 import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
 describe('cache', () => {
@@ -296,6 +297,17 @@ describe('readCacheResult: distinguishing why a read failed', () => {
   });
 });
 
+/**
+ * Write a cache file with arbitrary field values, bypassing `makeCacheEnvelope`'s types.
+ *
+ * The validation tests below all need to plant a value the type system would refuse, which is
+ * the entire point — that is what a corrupt file on disk looks like to `readCacheResult`.
+ */
+function writeEnvelopeWith(overrides: Record<string, unknown>): void {
+  const envelope = { ...makeCacheEnvelope(makeTestSnapshot()), ...overrides };
+  writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+}
+
 describe('lastErrorClass validation (sdlc/014)', () => {
   let cleanup: () => void;
 
@@ -307,15 +319,10 @@ describe('lastErrorClass validation (sdlc/014)', () => {
     cleanup();
   });
 
-  function writeRaw(lastErrorClass: unknown): void {
-    const envelope = { ...makeCacheEnvelope(makeTestSnapshot()), lastErrorClass };
-    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
-  }
-
   test('an unknown lastErrorClass is nulled, not rejected', () => {
     // The snapshot beside it is fine. Discarding the envelope over a corrupt error-class field
     // would cost a live fetch on every read for a field nothing renders.
-    writeRaw('someClassFromAFutureVersion');
+    writeEnvelopeWith({ lastErrorClass: 'someClassFromAFutureVersion' });
     const result = readCacheResult();
     expect(result.reason).toBe('hit');
     expect(result.envelope).not.toBeNull();
@@ -326,7 +333,7 @@ describe('lastErrorClass validation (sdlc/014)', () => {
   });
 
   test('the cache file survives — this is not corruption recovery', () => {
-    writeRaw('someClassFromAFutureVersion');
+    writeEnvelopeWith({ lastErrorClass: 'someClassFromAFutureVersion' });
     readCacheResult();
     expect(existsSync(getCachePath())).toBe(true);
   });
@@ -335,17 +342,13 @@ describe('lastErrorClass validation (sdlc/014)', () => {
     // Nulling the class must not release a backoff. Otherwise a corrupt field turns into
     // unthrottled retries against an endpoint that just rate-limited us.
     const future = new Date(Date.now() + 60_000).toISOString();
-    const envelope = {
-      ...makeCacheEnvelope(makeTestSnapshot(), future),
-      lastErrorClass: 'notAClass',
-    };
-    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+    writeEnvelopeWith({ cooldownUntil: future, lastErrorClass: 'notAClass' });
     expect(readCacheResult().envelope?.cooldownUntil).toBe(future);
   });
 
   test('a non-string lastErrorClass is nulled too', () => {
     for (const value of [42, {}, ['authInvalid'], true]) {
-      writeRaw(value);
+      writeEnvelopeWith({ lastErrorClass: value });
       expect(readCacheResult().envelope?.lastErrorClass).toBeNull();
     }
   });
@@ -358,7 +361,103 @@ describe('lastErrorClass validation (sdlc/014)', () => {
   });
 
   test('a valid lastErrorClass is preserved untouched', () => {
-    writeRaw('timeout');
+    writeEnvelopeWith({ lastErrorClass: 'timeout' });
     expect(readCacheResult().envelope?.lastErrorClass).toBe('timeout');
+  });
+});
+
+describe('non-object JSON is corruption, not a crash (sdlc/014 security pass)', () => {
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  // Each of these parses fine and then throws TypeError on `parsed.version`, out of
+  // readCacheResult, out of main(), into the top-level catch — leaving the file in place so
+  // every subsequent invocation does it again. Exit 3, forever, until someone deletes the file
+  // by hand. SPEC.md §9 says corruption must delete and refetch, precisely so that cannot
+  // happen.
+  for (const raw of ['null', '4', '"a string"', '[]', '[{"version":2}]', 'true']) {
+    test(`a cache file containing ${raw} is deleted, not thrown on`, () => {
+      writeFileSync(getCachePath(), raw, 'utf-8');
+      const result = readCacheResult();
+      expect(result.envelope).toBeNull();
+      expect(result.reason).toBe('corruptJson');
+      expect(existsSync(getCachePath())).toBe(false);
+    });
+  }
+
+  test('the second read after corruption is a clean miss', () => {
+    // The actual property that matters: no stuck loop.
+    writeFileSync(getCachePath(), 'null', 'utf-8');
+    expect(readCacheResult().reason).toBe('corruptJson');
+    expect(readCacheResult().reason).toBe('miss');
+  });
+});
+
+describe('sanitizeCooldownUntil (sdlc/014 security pass)', () => {
+  const NOW = Date.parse('2026-08-26T12:00:00.000Z');
+
+  test('an unparseable string releases the cooldown rather than wedging it', () => {
+    expect(sanitizeCooldownUntil('not-a-date', NOW)).toBeNull();
+    expect(sanitizeCooldownUntil('', NOW)).toBeNull();
+  });
+
+  test('a non-string is nulled', () => {
+    for (const value of [42, {}, [], true, null, undefined]) {
+      expect(sanitizeCooldownUntil(value, NOW)).toBeNull();
+    }
+  });
+
+  test('a value beyond one full cooldown is clamped to the ceiling', () => {
+    expect(sanitizeCooldownUntil(new Date(8.64e15).toISOString(), NOW))
+      .toBe(new Date(NOW + COOLDOWN_DURATION_MS).toISOString());
+  });
+
+  test('a legitimate cooldown we just wrote passes through untouched', () => {
+    const ours = new Date(NOW + COOLDOWN_DURATION_MS).toISOString();
+    expect(sanitizeCooldownUntil(ours, NOW)).toBe(ours);
+  });
+
+  test('a past cooldown passes through — isInCooldown already handles it', () => {
+    const past = new Date(NOW - 1000).toISOString();
+    expect(sanitizeCooldownUntil(past, NOW)).toBe(past);
+  });
+
+  test('null stays null', () => {
+    expect(sanitizeCooldownUntil(null, NOW)).toBeNull();
+  });
+});
+
+describe('a corrupt cooldownUntil cannot release the throttle (sdlc/014 security pass)', () => {
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  test('REGRESSION: an unparseable cooldownUntil is nulled before isInCooldown sees it', () => {
+    // Unsanitized, `new Date('garbage').getTime()` is NaN, `Date.now() < NaN` is false, and the
+    // 5-minute backoff — the only throttle on token-bearing requests (SPEC.md §9.4) — silently
+    // disappears. One corrupt byte, one authenticated request per prompt render.
+    writeEnvelopeWith({ cooldownUntil: 'garbage' });
+    const envelope = readCacheResult().envelope!;
+    expect(envelope.cooldownUntil).toBeNull();
+    expect(isInCooldown(envelope)).toBe(false);
+  });
+
+  test('a far-future cooldownUntil cannot pin the tool on stale data forever', () => {
+    writeEnvelopeWith({ cooldownUntil: new Date(8.64e15).toISOString() });
+    const envelope = readCacheResult().envelope!;
+    expect(isInCooldown(envelope)).toBe(true);
+    // Still in cooldown — but bounded, and it expires within one backoff rather than in the
+    // year 275760.
+    expect(new Date(envelope.cooldownUntil!).getTime())
+      .toBeLessThanOrEqual(Date.now() + COOLDOWN_DURATION_MS);
+  });
+
+  test('a real cooldown written by enterCooldown survives a round trip', () => {
+    const until = new Date(Date.now() + COOLDOWN_DURATION_MS).toISOString();
+    writeEnvelopeWith({ cooldownUntil: until });
+    const envelope = readCacheResult().envelope!;
+    expect(envelope.cooldownUntil).toBe(until);
+    expect(isInCooldown(envelope)).toBe(true);
   });
 });

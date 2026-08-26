@@ -513,6 +513,32 @@ with a test asserting `tsc` reports **nothing** for it. Three sibling fixtures m
 one must not. Sixteen mutations, sixteen caught, recorded in
 [`014-exhaustive-failure-class/review.md`](./014-exhaustive-failure-class/review.md).
 
+**Stage 5 — the harness that watched nothing.** The plan-to-diff auditor found that the fixture
+harness's own header claimed to prove the shipped guards fail a build. It proves the *form*
+does: every fixture uses a local stand-in union, so deleting the real `_allCovered` from
+`cooldown.ts` left all five assertions green. Three stages, three instances, same disease — and
+the third was in the file written to cure the first two.
+
+The fix was to split the claim (the fixtures prove the form; four text searches observe the
+shipped guards; the mutation table is the evidence they fire) and, separately, to notice that
+the negative control's assertion — *tsc reported nothing for this file* — is **vacuous for a
+file tsc never opened**. It passes identically whether the fixture compiles clean or was
+silently dropped from the project. That is the TS18003 bug again, inside the check written to
+catch the TS18003 bug. `--listFiles`, matched against the directory listing, closes it.
+
+The security pass, run against the same commit, found two things the type work had walked past.
+`cooldownUntil` is read off disk unvalidated, and `isInCooldown` compares against
+`new Date(v).getTime()` — so an unparseable string yields `NaN`, every comparison is false, and
+the 5-minute backoff that is the **only** throttle on token-bearing requests silently
+disappears. One corrupt byte, one authenticated request per prompt render. Separately, a cache
+file containing the literal `null` parses fine and then throws on `parsed.version`, and the file
+is never deleted: exit 3 forever, which is precisely the stuck failure loop SPEC.md §9 exists to
+prevent. Both were pre-existing. Both sat one line from code this loop was already editing, and
+the loop's own comment asserted the opposite of the first one.
+
+Worth naming: **the type-safety work and the trust-boundary work found disjoint sets of bugs.**
+Making the compiler enforce the union did not surface either cache defect, and would not have.
+
 One more thing the mutation pass established, which no amount of reading had: the retry
 condition's two halves are **independently** load-bearing. `!policy.retryable` alone starts
 retrying every 429; `result.status === 429` alone starts retrying 401s. 429 and 5xx are the same

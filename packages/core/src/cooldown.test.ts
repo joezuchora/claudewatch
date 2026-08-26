@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
 import {
   isInCooldown,
   enterCooldown,
@@ -145,7 +147,7 @@ describe('failurePolicy (sdlc/014)', () => {
     }
   });
 
-  test('FAILURE_CLASSES holds all six members, in the union order', () => {
+  test('FAILURE_CLASSES holds all six members exactly once', () => {
     // A count, not a spot check: `satisfies` catches a member here that is not in the union,
     // and the `never` assignment in cooldown.ts catches a union member this array lacks, but
     // neither notices a DUPLICATE — which would make every `for (const fc of ...)` loop above
@@ -193,9 +195,11 @@ describe('the surfaces no longer compare FailureClass strings (sdlc/014)', () =>
   ];
 
   test('no surface branches on a FailureClass literal', () => {
-    const repoRoot = new URL('../../../', import.meta.url).pathname;
     for (const surface of SURFACES) {
-      const source = Bun.spawnSync(['cat', repoRoot + surface]).stdout.toString();
+      // `fileURLToPath`, not `new URL(...).pathname`: the latter stays percent-encoded, so a
+      // checkout path containing a space resolves to nothing, and it yields '/C:/...' on
+      // Windows. Reading directly also drops a `cat` subprocess. (sdlc/014 security pass.)
+      const source = readFileSync(fileURLToPath(new URL(`../../../${surface}`, import.meta.url)), 'utf-8');
       expect(source.length).toBeGreaterThan(0);
       // Comments are allowed to mention the classes — the reasoning for this change does.
       const code = source

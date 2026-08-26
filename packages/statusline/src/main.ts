@@ -342,8 +342,12 @@ export async function main(): Promise<never> {
  *
  * Exhaustive over the three presentations rather than an `=== 'invalid'` ternary, for the same
  * reason `failurePolicy` is exhaustive over FailureClass: a fourth presentation must not be
- * able to silently inherit '⊙ error'. The strings match the credential-resolution paths above,
- * which reach the same states without going through a fetch.
+ * able to silently inherit '⊙ error'.
+ *
+ * Only 'missing' shares its wording with the credential-resolution path above ('⊙ no
+ * credentials', line 268). 'invalid' deliberately does NOT: that path prints '⊙ auth expired'
+ * for a token we could read and judge stale, while this one prints '⊙ auth invalid' for a
+ * token the endpoint rejected. Two different things, and the strings predate this change.
  */
 function errorLineFor(presentation: FailurePolicy['presentation']): string {
   switch (presentation) {

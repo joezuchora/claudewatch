@@ -183,30 +183,17 @@ export async function fetchUsage(
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
 
+    // The `try` covers the network call and NOTHING else.
+    //
+    // It used to wrap the retry decision too, which meant `failurePolicy`'s deliberate `throw`
+    // — the one that exists so a bad value fails loudly — was caught two lines below, relabelled
+    // as a synthetic `serviceUnavailable` network error, retried, and then persisted into the
+    // cache as `lastErrorMessage`. A guard whose failure is indistinguishable from a flaky
+    // network is not a guard. Found by the sdlc/014 security pass; the catch now only sees what
+    // it was written for.
+    let result: FetchResult;
     try {
-      const result = await singleFetch(token, controller.signal);
-      clearTimeout(timeout);
-      fetchedMs += Date.now() - attemptStarted;
-
-      // Don't retry auth errors or rate limits — they won't resolve on retry.
-      //
-      // The two halves cannot merge. `retryable` is a property of the CLASS, and 429 and 5xx
-      // are the same class (`serviceUnavailable`) with opposite answers: a rate limit will not
-      // clear in 2 s, a server error might. Deriving retry from the class alone would start
-      // retrying every 429; deriving it from the status alone would lose `notConfigured`.
-      // (sdlc/014)
-      if (
-        !result.ok &&
-        (!failurePolicy(result.failureClass).retryable || result.status === 429)
-      ) {
-        return report(result);
-      }
-
-      if (result.ok) {
-        return report(result);
-      }
-
-      lastError = result;
+      result = await singleFetch(token, controller.signal);
     } catch (err) {
       clearTimeout(timeout);
       fetchedMs += Date.now() - attemptStarted;
@@ -217,7 +204,32 @@ export async function fetchUsage(
         failureClass: timedOut ? 'timeout' : 'serviceUnavailable',
         message,
       };
+      continue;
     }
+
+    clearTimeout(timeout);
+    fetchedMs += Date.now() - attemptStarted;
+
+    // Don't retry auth errors or rate limits — they won't resolve on retry.
+    //
+    // The two halves cannot merge. `retryable` is a property of the CLASS, and 429 and 5xx are
+    // the same class (`serviceUnavailable`) with opposite answers: a rate limit will not clear
+    // in 2 s, a server error might. So deriving retry from the class alone would start retrying
+    // every 429 — and deriving it from the status alone would start retrying `authInvalid`,
+    // which is a 401 and will never clear. Mutation testing confirmed both directions.
+    // (sdlc/014)
+    if (
+      !result.ok &&
+      (!failurePolicy(result.failureClass).retryable || result.status === 429)
+    ) {
+      return report(result);
+    }
+
+    if (result.ok) {
+      return report(result);
+    }
+
+    lastError = result;
   }
 
   return report(lastError!);

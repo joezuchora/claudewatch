@@ -1,6 +1,7 @@
 import type { CacheEnvelope, FailureClass } from './types.js';
 
-const COOLDOWN_DURATION_MS = 300_000; // 5 minutes — endpoint rate-limits aggressively
+/** 5 minutes — endpoint rate-limits aggressively. SPEC.md §9.4. */
+export const COOLDOWN_DURATION_MS = 300_000;
 
 /**
  * Check whether the cooldown period is still active.
@@ -117,8 +118,10 @@ export function failurePolicy(fc: FailureClass): FailurePolicy {
     case 'timeout':
       return { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
 
-    // Also never constructed as a FailureClass. Matches the default bucket it would have
-    // fallen into, so this row changes nothing — but it is a choice all the same.
+    // `unexpectedFailure` IS constructed — client.ts returns it for any status that is not
+    // 200/401/429/5xx. `malformedResponse` is not constructed anywhere. Both rows match the
+    // default bucket they used to fall into, so neither changes behaviour; the review that
+    // caught this comment claiming both were unreachable is recorded in sdlc/014.
     case 'malformedResponse':
     case 'unexpectedFailure':
       return { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
@@ -142,10 +145,14 @@ export function shouldCooldown(failureClass: FailureClass): boolean {
 /**
  * Whether an unvalidated value is a `FailureClass`.
  *
- * Exists for exactly one caller: `readCacheResult`, which reads `lastErrorClass` off disk. The
- * cast at `JSON.parse(raw) as CacheEnvelope` is the only way a non-member reaches
- * `failurePolicy`, so this is the check that makes that function's `throw` unreachable in
- * practice rather than merely unreachable in theory. (sdlc/014)
+ * Exists for one caller: `readCacheResult`, which reads `lastErrorClass` off disk past a
+ * `JSON.parse(...) as CacheEnvelope` assertion.
+ *
+ * It is defence in depth, not a hole being closed. No consumer passes `lastErrorClass` to
+ * `failurePolicy` today; it is copied into new envelopes and printed by `--debug`, nothing
+ * more. An earlier version of this comment claimed the check made `failurePolicy`'s `throw`
+ * unreachable in practice — the review of sdlc/014 established that the path it describes does
+ * not exist. Checked anyway, so the guard is already there the day someone branches on it.
  */
 export function isFailureClass(value: unknown): value is FailureClass {
   return typeof value === 'string' && (FAILURE_CLASSES as readonly string[]).includes(value);
