@@ -1,5 +1,6 @@
 import { describe, expect, test, mock, beforeEach } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
+import { renderEvent as realRenderEvent, utilizationBucket as realUtilizationBucket } from '@claudewatch/core';
 import type { UsageSnapshot, RuntimeState, ThresholdLevel } from '@claudewatch/core';
 
 // Re-register @claudewatch/core with real classify/evaluate to prevent mock leaks
@@ -22,11 +23,18 @@ function realEvaluate(pct: number, warnPct: number = 70, critPct: number = 90): 
   return 'normal';
 }
 
+// The bridge mock doubles as a spy on telemetry emission. sdlc/003's residual finding is
+// that this mock is process-wide within packages/vscode; here that works in our favour.
+const emittedEvents: Array<Record<string, unknown>> = [];
+
 mock.module('./core-bridge.js', () => ({
   classify: realClassify,
   evaluate: realEvaluate,
   formatTooltip: (snapshot: UsageSnapshot) => `formatted: ${snapshot.display.primaryUtilizationPct}%`,
   makeTestSnapshot,
+  emitProcess: (e: Record<string, unknown>) => { emittedEvents.push(e); },
+  renderEvent: realRenderEvent,
+  utilizationBucket: realUtilizationBucket,
 }));
 
 // --- Mock vscode module ---
@@ -315,5 +323,54 @@ describe('StatusBarManager', () => {
       mgr.dispose();
       expect(mockItem.dispose).toHaveBeenCalled();
     });
+  });
+});
+
+describe('StatusBarManager: telemetry emission', () => {
+  test('a render emits exactly one render event carrying enumerated leaves only', () => {
+    emittedEvents.length = 0;
+    const bar = new StatusBarManager();
+    bar.update(makeTestSnapshot());
+
+    expect(emittedEvents).toHaveLength(1);
+    const e = emittedEvents[0] as { kind: string; source: string; payload: Record<string, unknown> };
+    expect(e.kind).toBe('render');
+    expect(e.source).toBe('product');
+    expect(e.payload.surface).toBe('vscode');
+    expect(e.payload.runtimeState).toBe('Healthy');
+    expect(e.payload.tier).toBe('standard');
+    // A decile, never the raw 42.
+    expect(e.payload.utilizationBucket).toBe(4);
+    expect(JSON.stringify(e.payload)).not.toContain('42');
+  });
+
+  test('every update emits, since update() is the render funnel', () => {
+    emittedEvents.length = 0;
+    const bar = new StatusBarManager();
+    bar.update(makeTestSnapshot());
+    bar.update(makeTestSnapshot());
+    bar.update(makeTestSnapshot());
+    expect(emittedEvents).toHaveLength(3);
+  });
+
+  test('the initializing path emits nothing — there is no snapshot to describe', () => {
+    emittedEvents.length = 0;
+    const bar = new StatusBarManager();
+    bar.update(null, true);
+    bar.update(null, false);
+    expect(emittedEvents).toHaveLength(0);
+  });
+
+  test('a degraded snapshot still emits, with its state', () => {
+    emittedEvents.length = 0;
+    const bar = new StatusBarManager();
+    bar.update(makeTestSnapshot({
+      fiveHour: { utilizationPct: null, resetsAt: null },
+      sevenDay: { utilizationPct: null, resetsAt: null },
+      display: { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null },
+    }));
+    expect(emittedEvents).toHaveLength(1);
+    const e = emittedEvents[0] as { payload: Record<string, unknown> };
+    expect(e.payload.utilizationBucket).toBeNull();
   });
 });

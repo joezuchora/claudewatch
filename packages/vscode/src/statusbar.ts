@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { UsageSnapshot, RuntimeState, ThresholdLevel, LastErrorInfo } from '@claudewatch/core';
-import { classify, evaluate } from './core-bridge.js';
+import { classify, evaluate, emitProcess, renderEvent, utilizationBucket } from './core-bridge.js';
 import { buildTooltip } from './tooltip.js';
 
 export class StatusBarManager {
@@ -52,6 +52,21 @@ export class StatusBarManager {
     const state = classify(snapshot);
     this.applyState(state, snapshot, loading, this.warnPct, this.critPct);
     this.item.tooltip = buildTooltip(state, snapshot, lastError);
+
+    // The single funnel every status-bar render passes through, mirroring the statusline's
+    // output(). doRefresh has twelve update() call sites; emitting at each would repeat the
+    // multi-exit hazard loop 007 hit in client.ts.
+    //
+    // emitProcess reads the process consent that extension.ts pushed in from
+    // recomputeTelemetryGate, so this call site cannot bypass VS Code's global switch — it
+    // has no consent state of its own to get wrong.
+    emitProcess(renderEvent({
+      surface: 'vscode',
+      runtimeState: state,
+      tier: snapshot.tier,
+      utilizationBucket: utilizationBucket(snapshot.display.primaryUtilizationPct),
+      durationMs: null,
+    }));
   }
 
   private applyState(

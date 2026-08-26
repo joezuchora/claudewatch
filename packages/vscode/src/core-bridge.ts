@@ -36,6 +36,7 @@ export const makeErrorSnapshot = core.makeErrorSnapshot;
 export const extractLastError = core.extractLastError;
 export const setTelemetryConfig = core.setTelemetryConfig;
 export const emit = core.emit;
+export const emitProcess = core.emitProcess;
 export const renderEvent = core.renderEvent;
 export const utilizationBucket = core.utilizationBucket;
 
