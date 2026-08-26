@@ -142,7 +142,7 @@ Session-scoped metadata (model name, token counts, cost, context usage) is defer
 | `five_hour.resets_at` | Yes (if window present) | ISO 8601 timestamp with timezone |
 | `seven_day.utilization` | Yes (at least one window) | Number, percentage 0-100 |
 | `seven_day.resets_at` | Yes (if window present) | ISO 8601 timestamp with timezone |
-| `seven_day_opus` | No | Optional separate Opus window; may be null |
+| `seven_day_opus` | No | Separate Opus weekly window; may be absent or null. Tracked as `sevenDayOpus` and eligible to be the primary window (§5.3). |
 | `seven_day_oauth_apps` | No | Ignore in v1 |
 | `iguana_necktie` | No | Unknown Anthropic internal field — intentionally ignored |
 
@@ -266,8 +266,12 @@ interface UsageSnapshot {
     utilizationPct: number | null;
     resetsAt: string | null;            // ISO timestamp, always UTC
   };
+  sevenDayOpus: {                       // always present; null values mean "no Opus window"
+    utilizationPct: number | null;
+    resetsAt: string | null;            // ISO timestamp, always UTC
+  };
   display: {
-    primaryWindow: 'fiveHour' | 'sevenDay' | 'unknown';
+    primaryWindow: 'fiveHour' | 'sevenDay' | 'sevenDayOpus' | 'unknown';
     primaryUtilizationPct: number | null;
     primaryResetsAt: string | null;
   };
@@ -290,9 +294,13 @@ interface UsageSnapshot {
 
 ### 5.3 Primary Display Rule
 
-The primary displayed utilization value is always the more constrained of the five-hour and seven-day usage windows, defined as the higher utilization percentage among valid window values.
+The primary displayed utilization value is always the most constrained rolling window, defined as the highest utilization percentage among valid window values across `fiveHour`, `sevenDay`, and `sevenDayOpus`.
 
-If only one valid window is available, that window becomes primary. If neither window is available, the surface enters Degraded, NotConfigured, AuthInvalid, or HardFailure based on failure classification.
+Ties resolve in the order `fiveHour` > `sevenDay` > `sevenDayOpus`.
+
+If only one valid window is available, that window becomes primary. If no window is available, the surface enters Degraded, NotConfigured, AuthInvalid, or HardFailure based on failure classification.
+
+> **Amended 2026-08-26 (`sdlc/002-opus-window`).** Previously this rule ranged over `fiveHour` and `sevenDay` only, because `seven_day_opus` was parsed and discarded. Including it is a deliberate user-visible change: a user whose Opus window is their most constrained now sees that figure as the headline, where before they were shown a lower and misleading number. Accounts with no Opus window are unaffected. The tie order preserves the previous `fiveHour >= sevenDay` precedence exactly.
 
 ---
 
@@ -1046,7 +1054,7 @@ If all five steps work, you have a working statusline binary. The VS Code extens
 - VS Code Marketplace publishing
 - Onboarding walkthrough
 - Multi-account awareness
-- `seven_day_opus` as a separate tracked window
+- ~~`seven_day_opus` as a separate tracked window~~ ✅ Implemented (`sdlc/002-opus-window`; amends §5.3)
 
 ---
 

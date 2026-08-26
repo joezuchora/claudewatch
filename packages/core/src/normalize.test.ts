@@ -87,15 +87,96 @@ describe('normalize', () => {
     expect(snapshot.fiveHour.utilizationPct).toBe(42);
   });
 
-  test('handles seven_day_opus present', () => {
+  test('normalizes seven_day_opus into sevenDayOpus', () => {
     const raw = {
       five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00Z' },
       seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
-      seven_day_opus: { utilization: 0, resets_at: null },
+      seven_day_opus: { utilization: 63, resets_at: '2026-03-14T07:00:00Z' },
     };
 
     const snapshot = normalize(raw, FETCHED_AT);
     expect(snapshot.source.usageEndpoint).toBe('success');
+    expect(snapshot.sevenDayOpus.utilizationPct).toBe(63);
+    expect(snapshot.sevenDayOpus.resetsAt).toBe('2026-03-14T07:00:00.000Z');
+  });
+
+  test('absent seven_day_opus yields a null window', () => {
+    const raw = {
+      five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.sevenDayOpus).toEqual({ utilizationPct: null, resetsAt: null });
+    expect(snapshot.display.primaryWindow).toBe('fiveHour');
+  });
+
+  test('null seven_day_opus yields a null window', () => {
+    const raw = {
+      five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: null,
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.sevenDayOpus).toEqual({ utilizationPct: null, resetsAt: null });
+  });
+
+  test('malformed opus resets_at warns but keeps the utilization', () => {
+    const raw = {
+      five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: { utilization: 55, resets_at: 'not-a-timestamp' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.sevenDayOpus.utilizationPct).toBe(55);
+    expect(snapshot.sevenDayOpus.resetsAt).toBeNull();
+    expect(snapshot.rawMetadata.normalizationWarnings).toContain(
+      'seven_day_opus.resets_at is not a valid ISO timestamp',
+    );
+  });
+
+  test('opus becomes primary when it is the most constrained window', () => {
+    const raw = {
+      five_hour: { utilization: 10, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 20, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: { utilization: 91, resets_at: '2026-03-14T09:00:00Z' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.display.primaryWindow).toBe('sevenDayOpus');
+    expect(snapshot.display.primaryUtilizationPct).toBe(91);
+    expect(snapshot.display.primaryResetsAt).toBe('2026-03-14T09:00:00.000Z');
+  });
+
+  test('opus is primary when the other windows are absent', () => {
+    const raw = {
+      five_hour: null,
+      seven_day: null,
+      seven_day_opus: { utilization: 12, resets_at: null },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.display.primaryWindow).toBe('sevenDayOpus');
+    expect(snapshot.display.primaryUtilizationPct).toBe(12);
+  });
+
+  test('a three-way tie resolves to fiveHour, preserving pre-Opus precedence', () => {
+    const raw = {
+      five_hour: { utilization: 50, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 50, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: { utilization: 50, resets_at: '2026-03-14T09:00:00Z' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.display.primaryWindow).toBe('fiveHour');
+  });
+
+  test('an opus window at 0 is a real window, not an absent one', () => {
+    const raw = {
+      five_hour: null,
+      seven_day: null,
+      seven_day_opus: { utilization: 0, resets_at: null },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    expect(snapshot.sevenDayOpus.utilizationPct).toBe(0);
+    expect(snapshot.display.primaryWindow).toBe('sevenDayOpus');
+    expect(snapshot.display.primaryUtilizationPct).toBe(0);
   });
 
   test('records warning for invalid resets_at timestamp', () => {

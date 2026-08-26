@@ -79,7 +79,7 @@ describe('security: cache file integrity', () => {
   test('cache envelope version prevents format confusion', () => {
     const snapshot = makeTestSnapshot();
     const envelope = makeCacheEnvelope(snapshot);
-    expect(envelope.version).toBe(1);
+    expect(envelope.version).toBe(2);
   });
 
   test('cache write uses atomic rename pattern', () => {

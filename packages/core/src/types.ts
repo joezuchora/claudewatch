@@ -25,9 +25,10 @@ export interface UsageSnapshot {
   tier: AccountTier;
   fiveHour: UsageWindow;
   sevenDay: UsageWindow;
+  sevenDayOpus: UsageWindow;
   enterprise: EnterpriseUsage | null;
   display: {
-    primaryWindow: 'fiveHour' | 'sevenDay' | 'enterprise' | 'unknown';
+    primaryWindow: 'fiveHour' | 'sevenDay' | 'sevenDayOpus' | 'enterprise' | 'unknown';
     primaryUtilizationPct: number | null;
     primaryResetsAt: string | null;
   };

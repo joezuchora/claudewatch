@@ -83,7 +83,7 @@ describe('contract: successful response with only one window', () => {
 });
 
 describe('contract: response with seven_day_opus present', () => {
-  test('ignores seven_day_opus, normalizes core windows', () => {
+  test('tracks seven_day_opus alongside the core windows', () => {
     const raw = {
       five_hour: { utilization: 6, resets_at: '2026-03-07T17:00:00Z' },
       seven_day: { utilization: 35, resets_at: '2026-03-14T07:00:00Z' },
@@ -93,6 +93,22 @@ describe('contract: response with seven_day_opus present', () => {
     expect(classify(snapshot)).toBe('Healthy');
     expect(snapshot.fiveHour.utilizationPct).toBe(6);
     expect(snapshot.sevenDay.utilizationPct).toBe(35);
+    expect(snapshot.sevenDayOpus.utilizationPct).toBe(0);
+    // 35 is still the most constrained, so primary is unchanged.
+    expect(snapshot.display.primaryWindow).toBe('sevenDay');
+  });
+
+  test('an exhausted Opus window becomes primary end-to-end', () => {
+    const raw = {
+      five_hour: { utilization: 20, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 22, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: { utilization: 95, resets_at: '2026-03-14T07:00:00Z' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    // This is the whole point of the change: before, this user was shown 22%.
+    expect(snapshot.display.primaryWindow).toBe('sevenDayOpus');
+    expect(snapshot.display.primaryUtilizationPct).toBe(95);
+    expect(classify(snapshot)).toBe('Healthy');
   });
 });
 

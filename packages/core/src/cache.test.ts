@@ -37,7 +37,7 @@ describe('cache', () => {
     test('creates valid envelope with defaults', () => {
       const snapshot = makeTestSnapshot();
       const envelope = makeCacheEnvelope(snapshot);
-      expect(envelope.version).toBe(1);
+      expect(envelope.version).toBe(2);
       expect(envelope.snapshot).toBe(snapshot);
       expect(envelope.cooldownUntil).toBeNull();
       expect(envelope.lastErrorClass).toBeNull();
@@ -94,14 +94,32 @@ describe('cache', () => {
     });
   });
 
-  describe('writeCache and readCache round-trip', () => {
+  describe('cache version migration', () => {
+  test('a v1 envelope is discarded rather than rendered', () => {
+    // v1 snapshots predate sevenDayOpus. Reading one would produce a snapshot whose type
+    // claims the field is present while it is undefined — see sdlc/002-opus-window.
+    const stale = {
+      version: 1,
+      snapshot: makeTestSnapshot(),
+      cooldownUntil: null,
+      lastErrorClass: null,
+    };
+    writeFileSync(getCachePath(), JSON.stringify(stale), 'utf-8');
+
+    expect(readCache()).toBeNull();
+    // Deleted, so the next call is a clean miss rather than a repeated corrupt read.
+    expect(existsSync(getCachePath())).toBe(false);
+  });
+});
+
+describe('writeCache and readCache round-trip', () => {
     test('writes and reads back correctly', () => {
       const snapshot = makeTestSnapshot();
       const envelope = makeCacheEnvelope(snapshot);
       writeCache(envelope);
       const read = readCache();
       expect(read).not.toBeNull();
-      expect(read!.version).toBe(1);
+      expect(read!.version).toBe(2);
       expect(read!.snapshot.fiveHour.utilizationPct).toBe(42);
       expect(read!.snapshot.sevenDay.utilizationPct).toBe(18);
     });

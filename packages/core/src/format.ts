@@ -1,4 +1,4 @@
-import type { UsageSnapshot, SessionInfo, EnterpriseUsage } from './types.js';
+import type { UsageSnapshot, SessionInfo, EnterpriseUsage, UsageWindow } from './types.js';
 import { formatLocalTime, formatLocalDateTime } from './time.js';
 
 /**
@@ -128,7 +128,7 @@ export function formatStatusLine(snapshot: UsageSnapshot, width: number = 80): s
     return formatEnterpriseStatusLine(snapshot, snapshot.enterprise, width);
   }
 
-  const { display, fiveHour, sevenDay } = snapshot;
+  const { display, fiveHour, sevenDay, sevenDayOpus } = snapshot;
 
   if (display.primaryUtilizationPct === null) {
     return '⊙ error';
@@ -149,9 +149,32 @@ export function formatStatusLine(snapshot: UsageSnapshot, width: number = 80): s
     : '';
   const primaryPart = primaryBase + primaryReset;
 
-  // Build secondary window with its reset time
-  const secondary = display.primaryWindow === 'fiveHour' ? sevenDay : fiveHour;
-  const secondaryLabel = display.primaryWindow === 'fiveHour' ? '7d' : '5h';
+  // Build secondary window with its reset time.
+  // With three windows the secondary is "the most constrained of the ones that aren't
+  // primary". For a fiveHour/sevenDay primary that reduces to the other of the pair, exactly
+  // as before Opus existed; only a sevenDayOpus primary reaches the new branch.
+  let secondary: UsageWindow;
+  let secondaryLabel: string;
+  if (display.primaryWindow === 'fiveHour') {
+    secondary = sevenDay;
+    secondaryLabel = '7d';
+  } else if (display.primaryWindow === 'sevenDay') {
+    secondary = fiveHour;
+    secondaryLabel = '5h';
+  } else {
+    // Opus is primary — show whichever of the rolling pair is more constrained.
+    const fivePct = fiveHour.utilizationPct;
+    const sevenPct = sevenDay.utilizationPct;
+    const preferFive = fivePct !== null && (sevenPct === null || fivePct >= sevenPct);
+    secondary = preferFive ? fiveHour : sevenDay;
+    secondaryLabel = preferFive ? '5h' : '7d';
+  }
+
+  // The Opus segment appears only when Opus is present and is not already the primary.
+  const opusPart =
+    display.primaryWindow !== 'sevenDayOpus' && sevenDayOpus.utilizationPct !== null
+      ? `opus ${Math.round(sevenDayOpus.utilizationPct)}%`
+      : null;
   let secondaryPart: string | null = null;
   let secondaryBase: string | null = null;
   if (secondary.utilizationPct !== null) {
@@ -160,6 +183,15 @@ export function formatStatusLine(snapshot: UsageSnapshot, width: number = 80): s
       ? ` resets ${formatLocalDateTime(secondary.resetsAt).toLowerCase()}`
       : '';
     secondaryPart = secondaryBase + secondaryReset;
+  }
+
+  // Widest form: primary · secondary · opus. Opus is the first thing dropped when the
+  // terminal is narrow, so every pre-Opus width behaviour below is reached unchanged.
+  if (secondaryPart && opusPart) {
+    const withOpus = `${primaryPart} · ${secondaryPart} · ${opusPart}`;
+    if (withOpus.length <= width) {
+      return withOpus;
+    }
   }
 
   // Try full format: primary resets X · secondary resets Y
@@ -256,7 +288,7 @@ export function formatRichStatusLine(
   }
 
   // --- Line 2: Usage bars ---
-  const { fiveHour, sevenDay, enterprise, tier } = snapshot;
+  const { fiveHour, sevenDay, sevenDayOpus, enterprise, tier } = snapshot;
 
   if (tier === 'enterprise' && enterprise) {
     const pct = enterprise.utilizationPct;
@@ -278,6 +310,11 @@ export function formatRichStatusLine(
     if (sevenDay.utilizationPct !== null) {
       const pct = Math.round(sevenDay.utilizationPct);
       usageParts.push(`weekly: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
+    }
+
+    if (sevenDayOpus.utilizationPct !== null) {
+      const pct = Math.round(sevenDayOpus.utilizationPct);
+      usageParts.push(`opus: ${progressBar(pct)} ${pctColor(pct)}${pct}%${c.reset}`);
     }
 
     if (usageParts.length > 0) {
@@ -347,6 +384,14 @@ export function formatTooltip(snapshot: UsageSnapshot, lastError?: LastErrorInfo
       let line = `Weekly (7d): ${Math.round(snapshot.sevenDay.utilizationPct)}%`;
       if (snapshot.sevenDay.resetsAt) {
         line += ` — resets ${formatLocalDateTime(snapshot.sevenDay.resetsAt)}`;
+      }
+      lines.push(line);
+    }
+
+    if (snapshot.sevenDayOpus.utilizationPct !== null) {
+      let line = `Opus (7d): ${Math.round(snapshot.sevenDayOpus.utilizationPct)}%`;
+      if (snapshot.sevenDayOpus.resetsAt) {
+        line += ` — resets ${formatLocalDateTime(snapshot.sevenDayOpus.resetsAt)}`;
       }
       lines.push(line);
     }

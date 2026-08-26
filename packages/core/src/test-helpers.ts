@@ -21,6 +21,8 @@ export function makeTestSnapshot(overrides?: Partial<UsageSnapshot>): UsageSnaps
     tier: 'standard',
     fiveHour: { utilizationPct: 42, resetsAt: '2026-03-07T17:00:00.000Z' },
     sevenDay: { utilizationPct: 18, resetsAt: '2026-03-14T07:00:00.000Z' },
+    // Defaults to absent: existing callers must keep producing pre-Opus snapshots.
+    sevenDayOpus: { utilizationPct: null, resetsAt: null },
     enterprise: null,
     display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 42, primaryResetsAt: '2026-03-07T17:00:00.000Z' },
     freshness: { isStale: false, staleReason: 'none' },

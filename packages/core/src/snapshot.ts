@@ -38,6 +38,7 @@ export function makeErrorSnapshot(
     tier: 'unknown',
     fiveHour: { utilizationPct: null, resetsAt: null },
     sevenDay: { utilizationPct: null, resetsAt: null },
+    sevenDayOpus: { utilizationPct: null, resetsAt: null },
     enterprise: null,
     display: { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null },
     freshness: {

@@ -29,27 +29,38 @@ function parseWindow(raw: unknown, warnings: string[], name: string): UsageWindo
   return { utilizationPct, resetsAt };
 }
 
-function computePrimaryDisplay(fiveHour: UsageWindow, sevenDay: UsageWindow): UsageSnapshot['display'] {
-  const fiveValid = fiveHour.utilizationPct !== null;
-  const sevenValid = sevenDay.utilizationPct !== null;
+function computePrimaryDisplay(
+  fiveHour: UsageWindow,
+  sevenDay: UsageWindow,
+  sevenDayOpus: UsageWindow,
+): UsageSnapshot['display'] {
+  // Primary is the most constrained window: the highest valid utilization across all three
+  // (SPEC.md §5.3). Ties resolve fiveHour > sevenDay > sevenDayOpus, which preserves the
+  // fiveHour >= sevenDay precedence that predates the Opus window.
+  const candidates: Array<{ key: 'fiveHour' | 'sevenDay' | 'sevenDayOpus'; window: UsageWindow }> = [
+    { key: 'fiveHour', window: fiveHour },
+    { key: 'sevenDay', window: sevenDay },
+    { key: 'sevenDayOpus', window: sevenDayOpus },
+  ];
 
-  if (!fiveValid && !sevenValid) {
+  let best: { key: 'fiveHour' | 'sevenDay' | 'sevenDayOpus'; window: UsageWindow } | null = null;
+  for (const candidate of candidates) {
+    if (candidate.window.utilizationPct === null) continue;
+    // Strict > keeps the earlier candidate on a tie, giving the precedence above.
+    if (best === null || candidate.window.utilizationPct > best.window.utilizationPct!) {
+      best = candidate;
+    }
+  }
+
+  if (best === null) {
     return { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null };
   }
 
-  if (fiveValid && !sevenValid) {
-    return { primaryWindow: 'fiveHour', primaryUtilizationPct: fiveHour.utilizationPct, primaryResetsAt: fiveHour.resetsAt };
-  }
-
-  if (!fiveValid && sevenValid) {
-    return { primaryWindow: 'sevenDay', primaryUtilizationPct: sevenDay.utilizationPct, primaryResetsAt: sevenDay.resetsAt };
-  }
-
-  // Both valid — primary is the higher utilization (more constrained)
-  if (fiveHour.utilizationPct! >= sevenDay.utilizationPct!) {
-    return { primaryWindow: 'fiveHour', primaryUtilizationPct: fiveHour.utilizationPct, primaryResetsAt: fiveHour.resetsAt };
-  }
-  return { primaryWindow: 'sevenDay', primaryUtilizationPct: sevenDay.utilizationPct, primaryResetsAt: sevenDay.resetsAt };
+  return {
+    primaryWindow: best.key,
+    primaryUtilizationPct: best.window.utilizationPct,
+    primaryResetsAt: best.window.resetsAt,
+  };
 }
 
 // An enterprise account is identified by the presence of an `extra_usage` object
@@ -113,6 +124,7 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
 
   const fiveHour = parseWindow(obj.five_hour, warnings, 'five_hour');
   const sevenDay = parseWindow(obj.seven_day, warnings, 'seven_day');
+  const sevenDayOpus = parseWindow(obj.seven_day_opus, warnings, 'seven_day_opus');
 
   // Detect enterprise tier from the presence of extra_usage. This signal is
   // distinct from "both windows are null" — standard accounts omit extra_usage
@@ -129,6 +141,7 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
       tier: 'enterprise',
       fiveHour,
       sevenDay,
+      sevenDayOpus,
       enterprise,
       display: {
         primaryWindow: 'enterprise',
@@ -140,12 +153,18 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
     };
   }
 
-  // Standard path — at least one window must be present
-  if (fiveHour.utilizationPct === null && sevenDay.utilizationPct === null) {
+  // Standard path — at least one window must be present. sevenDayOpus counts: since it is
+  // now a tracked window, a response carrying only an Opus window is valid data, not a
+  // malformed response. Before sdlc/002-opus-window that case was reported as malformed.
+  if (
+    fiveHour.utilizationPct === null &&
+    sevenDay.utilizationPct === null &&
+    sevenDayOpus.utilizationPct === null
+  ) {
     return makeMalformed(now, [...warnings, 'No valid usage windows found']);
   }
 
-  const display = computePrimaryDisplay(fiveHour, sevenDay);
+  const display = computePrimaryDisplay(fiveHour, sevenDay, sevenDayOpus);
 
   return {
     fetchedAt: now,
@@ -154,6 +173,7 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
     tier: 'standard',
     fiveHour,
     sevenDay,
+    sevenDayOpus,
     enterprise: null,
     display,
     freshness: { isStale: false, staleReason: 'none' },
@@ -169,6 +189,7 @@ function makeMalformed(fetchedAt: string, warnings: string[]): UsageSnapshot {
     tier: 'unknown',
     fiveHour: { utilizationPct: null, resetsAt: null },
     sevenDay: { utilizationPct: null, resetsAt: null },
+    sevenDayOpus: { utilizationPct: null, resetsAt: null },
     enterprise: null,
     display: { primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null },
     freshness: { isStale: true, staleReason: 'malformedResponse' },

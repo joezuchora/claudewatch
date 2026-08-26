@@ -116,3 +116,11 @@ describe('buildTooltip', () => {
     }
   });
 });
+
+// Opus tooltip rendering is covered in packages/core/src/format.test.ts, where it can be
+// asserted against the real formatter.
+//
+// It cannot be asserted here: statusbar.test.ts mocks the shared './core-bridge.js' for the
+// whole process, so formatTooltip in this file is a stub returning "formatted: N%". A test
+// here would verify the stub, not the code. Splitting the bridge per consumer would fix it;
+// see sdlc/002-opus-window/review.md.

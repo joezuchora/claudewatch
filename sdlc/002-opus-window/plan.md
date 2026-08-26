@@ -21,6 +21,9 @@ identical from the terminal otherwise.
 
 ```
 packages/core/src/types.ts
+packages/core/src/types.test.ts
+packages/core/src/snapshot.ts
+packages/core/src/security.test.ts
 packages/core/src/normalize.ts
 packages/core/src/cache.ts
 packages/core/src/test-helpers.ts
@@ -39,6 +42,12 @@ sdlc/002-opus-window/review.md
 
 `SPEC.md` is in the fence deliberately: `spec.md` amends §5.3, and an amendment that never
 reaches the governing document is how specs rot. §19.3's backlog entry moves to done.
+
+> **Fence amended during implementation (2026-08-26).** Three files were added, all forced by
+> the compiler or the version bump and all recorded in `review.md`: `snapshot.ts` and
+> `types.test.ts` construct `UsageSnapshot` literals and so must supply the new field, and
+> `security.test.ts` asserts the cache envelope version. The original fence is preserved in
+> git history.
 
 `packages/statusline/src/main.ts` and `packages/vscode/src/statusbar.ts` are **not** in the
 fence. Both consume `display.primaryUtilizationPct`, which changes value but not shape, so

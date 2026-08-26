@@ -4,7 +4,10 @@ import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CacheEnvelope } from './types.js';
 
-const CACHE_VERSION = 1;
+// Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
+// deserializes into a snapshot missing that field, so it is discarded and refetched rather
+// than rendered from a shape the type system believes is complete.
+const CACHE_VERSION = 2;
 
 let cacheBaseDir: string | null = null;
 
