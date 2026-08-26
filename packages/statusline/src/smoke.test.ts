@@ -87,8 +87,14 @@ function runWithStdin(
       if (opts.closeStdin !== false) child.stdin.end();
     }
 
+    // Generous by design. What these cases assert is "exits rather than hanging forever",
+    // and that claim needs no precision — it needs a bound that cannot be reached by a slow
+    // process spawn. The original 5000ms was chosen when this suite was 349 tests; at 480,
+    // with seven real spawns competing with everything else, one run exceeded it and turned
+    // the gate red on a commit CI had passed. The distinction that matters is 20s versus
+    // never, not 5s versus 20s.
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, opts.timeoutMs ?? 5000);
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, opts.timeoutMs ?? 20000);
 
     child.on('exit', (code) => {
       clearTimeout(timer);
@@ -155,12 +161,15 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
   });
 
   test('unwritten, unclosed pipe exits on the deadline rather than hanging', async () => {
-    const r = await runWithStdin('pipe', { closeStdin: false, timeoutMs: 5000 });
+    const r = await runWithStdin('pipe', { closeStdin: false });
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('42%');
-    // Bounded on both sides: it waited for the deadline, and it did not wait forever.
-    expect(r.ms).toBeLessThan(4000);
+    // The claim is that the 250ms deadline bounds the read. r.ms includes process spawn,
+    // which varies with suite load, so this asserts an order of magnitude rather than a
+    // tight figure: comfortably above spawn variance, and far below "forever", which is
+    // what the code did before sdlc/005.
+    expect(r.ms).toBeLessThan(10000);
   });
 
   test('--version short-circuits before any stdin read', async () => {
@@ -172,7 +181,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
       let stdout = '';
       child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
       // Deliberately never close stdin — --version must not care.
-      const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      const timer = setTimeout(() => child.kill('SIGKILL'), 20000);
       child.on('exit', (code) => {
         clearTimeout(timer);
         res({ code, stdout, timedOut: false, ms: Date.now() - started });

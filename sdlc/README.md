@@ -90,6 +90,30 @@ becomes something people route around.
 
 ## Known defect in the gate itself
 
+> **Update 2026-08-26 06:30.** Two things have been ruled out since this was written.
+>
+> **Systematic degradation is not happening.** The suite's wall clock grew from 26 s to 36 s,
+> which looked like the hang creeping in. Per-test cost tells a different story:
+>
+> | tests | test step | ms/test |
+> |---|---|---|
+> | 341 | 26.3 s | 77 |
+> | 443 | 26.2 s | 59 |
+> | 480 | 36.5 s | 76 |
+>
+> Flat. The suite grew from 341 tests to 480; that is the whole increase.
+>
+> **One red run was my own test, not the hang.** `smoke.test.ts` bounded a real process spawn
+> at 5000 ms — a figure chosen when the suite was 349 tests, and raced once at 480 with seven
+> spawns competing. It turned the gate red on a commit CI had passed. The bound is now 20 s,
+> which changes nothing about what the test asserts: *exits rather than hanging forever* needs
+> a bound that a slow spawn cannot reach, not a tight one. Verified 5/5 consecutive clean runs.
+>
+> The original hang has **not recurred in 11 recorded runs.** It remains undiagnosed and
+> genuinely blocked on data — there is nothing to analyse until it happens again with
+> instrumentation in place.
+
+
 `bun run verify` **intermittently hangs**. A typical run is ~35 s (26 s of it the test suite);
 some runs exceed 550 s and have to be killed. Observed repeatedly while building loops 001 and
 002, on an otherwise idle machine with no competing processes.
