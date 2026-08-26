@@ -2,9 +2,30 @@
 
 - **ID:** 014-exhaustive-failure-class
 - **Stage:** 1 — Plan
-- **Status:** draft
+- **Status:** amended after review — see the correction below
 - **Author:** carried from `sdlc/010-timeout-failure-class`, follow-up 2
 - **Date:** 2026-08-26
+
+## Correction, 2026-08-26 (Design stage)
+
+The `spec-reviewer` returned four blocking findings. Two land on this document:
+
+1. **The consumer count is wrong. There are seven, not five.** The spec found a sixth
+   (`statusClassOf`); the reviewer found the seventh, and it is the highest-consequence one:
+   `client.ts:165` decides **whether to retry** from `failureClass === 'authInvalid'`, with
+   "everything else gets retried" as the default bucket. A new auth-adjacent member would
+   silently earn a second credential-bearing request; a new rate-limit-adjacent one would earn
+   exactly the amplification SPEC §9.4 exists to prevent. The prose below that says "four of the
+   five decisions live in surfaces" is therefore built on an undercount.
+
+2. **"The current mapping is correct" is unverifiable for two members.** `notConfigured` and
+   `malformedResponse` are **never constructed** as `FailureClass` values anywhere in the
+   product — `grep` finds them only in `types.ts` and in tests. So for those two there is no
+   "today" to preserve, and any row assigned to them is a *choice*. Saying otherwise would have
+   smuggled a decision in under a compatibility claim.
+
+Left standing rather than edited, because a corrected count that never shows the undercount
+teaches nobody where the reading went wrong.
 
 ## Problem
 

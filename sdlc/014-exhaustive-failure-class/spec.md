@@ -2,30 +2,35 @@
 
 - **ID:** 014-exhaustive-failure-class
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** revised after review
 - **Derived from:** [`intent.md`](./intent.md)
 
-## Summary
+## What the review changed
 
-Every decision made from a `FailureClass` moves behind one exhaustive `switch` in
-`packages/core`, so adding a member fails `bun run typecheck` until each decision is made
-explicitly. No behaviour changes for any of the six current members.
+Four blocking findings. The worst is the one this loop should have been least capable of making.
 
-## The consumers, all six
+| # | Finding | Verified | What changed |
+|---|---|---|---|
+| B1 | **My second compile-time guard does not compile-fail.** `const _exhaustive: _AllCovered[] = []` — an empty array literal is assignable to *every* array type, `never[]` included. I ran it: a missing member gives `TSC EXIT=0`. | Yes, both directions | Replaced with the `never`-assignment form, which I ran and watched fail with `TS2322: Type '"c"' is not assignable to type 'never'`. |
+| B2 | The "compiler catches it" criteria were **one-shot manual acts** — a paste in `review.md`. `intent.md`'s own open question pre-rejected exactly that. | — | A committed fixture harness that runs `tsc` against `.expect-error.ts` files inside `bun test`. |
+| B3 | `notConfigured` and `malformedResponse` are **never constructed** as `FailureClass` values. Two of six rows had no "today" to preserve, and I asserted them as preserved anyway. `notConfigured`'s exit code contradicted SPEC §11.5. | `grep`: only `types.ts` and tests | Rows marked as choices, not preservation. `notConfigured` → exit 2, per §11.5. |
+| B4 | **A seventh consumer, and the most consequential**: `client.ts:165` decides *retryability* from `failureClass`, defaulting to "retry". | Yes | Fourth policy field, with the 429 status check deliberately kept separate. |
 
-The intent lists five. Reading `client.ts` turned up a sixth, with the same shape:
+**That B1 got as far as a committed spec is the finding worth carrying.** A guard that compiles
+is not a guard that works, and I wrote a justification paragraph for that exact hazard two
+paragraphs above the broken guard. Nothing but running it would have caught it.
+
+## The consumers, all seven
 
 | # | Decision | Today | Default bucket |
 |---|---|---|---|
-| 1 | 5-minute cooldown (SPEC §9.4) | `fc === 'serviceUnavailable' \|\| fc === 'timeout'` (`cooldown.ts:49`) | no cooldown |
-| 2 | error snapshot kind | `fc === 'authInvalid' ? 'invalid' : 'unknown'` (`main.ts:228`) | `'unknown'` |
-| 3 | statusline exit code (SPEC §11.5) | `fc === 'authInvalid' ? 2 : 1` (`main.ts:234`) | `1` |
-| 4 | "auth invalid" display + exit 2 | `if (fc === 'authInvalid')` (`main.ts:324`) | generic failure |
-| 5 | VS Code auth handling | `if (result.failureClass === 'authInvalid')` (`extension.ts:217`) | generic error |
-| 6 | telemetry `statusClass` | `fc === 'timeout' ? 'timeout' : 'network'` (`client.ts:114`) | `'network'` |
-
-Six is the number to hold onto: five of them collapse to "is this authInvalid", and four of
-those five live in surfaces, which `CLAUDE.md`'s first architecture rule says they should not.
+| 1 | 5-minute cooldown (SPEC §9.4) | `fc === 'serviceUnavailable' \|\| fc === 'timeout'` (`cooldown.ts:55`) | no cooldown |
+| 2 | **retry** (SPEC §9.3) | `fc === 'authInvalid' \|\| status === 429` (`client.ts:165`) | **retry it** |
+| 3 | error snapshot kind | `fc === 'authInvalid' ? 'invalid' : 'unknown'` (`main.ts:228`) | `'unknown'` |
+| 4 | statusline exit code (SPEC §11.5) | `fc === 'authInvalid' ? 2 : 1` (`main.ts:234`) | `1` |
+| 5 | "auth invalid" display + exit 2 | `if (fc === 'authInvalid')` (`main.ts:324`) | generic failure |
+| 6 | VS Code auth handling | `if (result.failureClass === 'authInvalid')` (`extension.ts:217`) | generic error |
+| 7 | telemetry `statusClass` | `fc === 'timeout' ? 'timeout' : 'network'` (`client.ts:114`) | `'network'` |
 
 ## Behavior
 
@@ -35,127 +40,161 @@ those five live in surfaces, which `CLAUDE.md`'s first architecture rule says th
 export interface FailurePolicy {
   /** Enters the 5-minute backoff. SPEC §9.4. */
   cooldown: boolean;
-  /** Which error snapshot the surfaces render. SPEC §7.2. */
-  presentation: 'authExpired' | 'genericFailure';
-  /** Statusline exit code. SPEC §11.5. */
-  exitCode: 1 | 2;
+  /** Whether a retry is worth attempting. SPEC §9.3. See the note below — not the whole rule. */
+  retryable: boolean;
+  /** Which snapshot the surfaces render — exactly `makeErrorSnapshot`'s parameter. SPEC §7.2. */
+  presentation: 'invalid' | 'missing' | 'unknown';
+  /** SPEC §11.5. Applies on two paths only — see "Where the exit code applies". */
+  statuslineExitCode: 1 | 2 | 3;
 }
-
-export function failurePolicy(fc: FailureClass): FailurePolicy { /* switch */ }
 ```
 
-The mapping is exactly today's behaviour, member by member:
+| member | cooldown | retryable | presentation | exit | preserved? |
+|---|---|---|---|---|---|
+| `notConfigured` | false | false | `missing` | **2** | **choice** — never constructed; §11.5 says 2 = "credentials missing or unreadable" |
+| `authInvalid` | false | **false** | `invalid` | 2 | preserved |
+| `serviceUnavailable` | **true** | true | `unknown` | 1 | preserved |
+| `timeout` | **true** | true | `unknown` | 1 | preserved |
+| `malformedResponse` | false | true | `unknown` | 1 | **choice** — never constructed; matches the default bucket it would have fallen into |
+| `unexpectedFailure` | false | true | `unknown` | 1 | preserved |
 
-| member | cooldown | presentation | exitCode |
-|---|---|---|---|
-| `notConfigured` | false | genericFailure | 1 |
-| `authInvalid` | **false** | **authExpired** | **2** |
-| `serviceUnavailable` | **true** | genericFailure | 1 |
-| `timeout` | **true** | genericFailure | 1 |
-| `malformedResponse` | false | genericFailure | 1 |
-| `unexpectedFailure` | false | genericFailure | 1 |
+Two rows are marked as choices rather than quietly asserted as preserved. `notConfigured`
+deliberately departs from the old default bucket because that bucket contradicted SPEC §11.5;
+`intent.md` fenced the exit-code *contract* out of scope, and this does not change it — it makes
+an unreachable member agree with it.
 
-**Why three fields when two are perfectly correlated today.** `presentation` and `exitCode`
-agree on all six members, so a single `requiresReauth` boolean would carry the same information
-and could not drift. They stay separate because `SPEC.md` specifies them independently — §11.5
-defines exit codes as a contract, §7.2 defines the states — and a future member could legitimately
-want a generic presentation with exit 2, or the reverse. Collapsing them would encode today's
-coincidence as tomorrow's constraint, and the whole point of this change is to make the next
-author state each decision rather than inherit one.
+**`presentation` now uses `makeErrorSnapshot`'s own parameter values.** The first draft invented
+`'authExpired'`, a string neither surface displays — `main.ts:324` prints `⊙ auth invalid`, and
+`⊙ auth expired` belongs to the credential-resolution path, which is not keyed on `FailureClass`
+at all. A field name an implementer could read as intent is a behaviour change waiting to happen.
 
-`cooldown` is genuinely independent already: `timeout` and `serviceUnavailable` cool down while
-presenting generically.
+**`retryable` is not the whole retry rule, deliberately.** 429 maps to `serviceUnavailable` and
+is *not* retried; 5xx maps to `serviceUnavailable` and *is*. Retryability is a function of the
+class **and** the status, so `client.ts` keeps `|| result.status === 429` beside
+`!policy.retryable`, with a comment saying why they cannot merge. Folding the status into the
+class-keyed policy would change behaviour — which is how a "pure refactor" ships a bug.
 
-### Two compile-time guards, not one
+### Where the exit code applies
 
-**1. The `never` fallback.** After the switch:
+`main.ts` has six non-zero `process.exit` sites and only two derive from `FailureClass`
+(`main.ts:234` in the `--debug --refresh` path, and `main.ts:331/341`). **When a renderable
+stale cache exists, `main.ts:297-309` exits 0 regardless of the failure class** — the policy's
+exit code must not be consulted there. Codes 2 from credential resolution (`main.ts:261-278`)
+and 3 from the top-level catch (`main.ts:379`) are not derived from `FailureClass` and are
+untouched. The field is named `statuslineExitCode` and typed `1 | 2 | 3` rather than `1 | 2`, so
+§11.5's third code is not silently foreclosed.
+
+Getting this wrong would break the exit-code contract for anyone scripting the binary, which
+`packages/statusline/CLAUDE.md` calls out explicitly.
+
+### Where the throw lands
+
+The `never` fallback throws rather than returning a default. The first draft called that
+"failing loudly"; the reviewer showed it is not, in one of the two surfaces:
+
+- **Statusline** — lands in `main.ts:375-380`'s top-level catch: prints `⊙ error`, exits 3.
+  Defensible under §11.5, and **a behaviour change worth naming**: the same input previously
+  exited 1 after writing the cache.
+- **VS Code** — lands in `extension.ts:244`'s bare `catch { }`, which renders the stale snapshot
+  with *no* error indication. That is **quieter** than the default bucket it replaces.
+
+Rather than argue about which is right, the fix removes the reachable cause: `readCacheResult`
+validates `lastErrorClass` against `FAILURE_CLASSES` and nulls it on mismatch. Today a
+hand-edited or corrupted cache carrying `lastErrorClass: "garbage"` passes validation — the
+shape check tests `version`, `fetchedAt`, `display` and `freshness`, and never that field. It is
+inert only because nothing branches on it, which this change ends. SPEC §7 treats a corrupt cache
+as an *expected* failure class, not a contract violation, so "only reachable by a cast" was wrong.
+
+That also gives `FAILURE_CLASSES` a job beyond iterating in tests.
+
+### Two compile-time guards, both verified by running them
 
 ```ts
+// 1. In failurePolicy, after the switch:
 const unhandled: never = fc;
 throw new Error(`unhandled FailureClass: ${String(unhandled)}`);
+
+// 2. The member list, kept in sync with the union in BOTH directions:
+export const FAILURE_CLASSES = [...] as const satisfies readonly FailureClass[];
+const _allCovered: never = null as unknown as Exclude<FailureClass, typeof FAILURE_CLASSES[number]>;
 ```
 
-A missing case makes the assignment a type error naming the member. The `throw` — rather than a
-default return — means a value that reaches here at *runtime*, past a cast or from unvalidated
-data, fails loudly instead of quietly receiving the old default bucket. That is testable, which
-the type error is not.
+`satisfies` catches a string in the array that is not in the union while preserving the literal
+type that `typeof FAILURE_CLASSES[number]` needs; the `never` assignment catches a union member
+the array lacks. Both forms were run against `tsc --strict` before being written here.
 
-**2. A member list the compiler keeps in sync.**
-
-```ts
-export const FAILURE_CLASSES = [...] as const;
-type _AllCovered = Exclude<FailureClass, typeof FAILURE_CLASSES[number]>;
-const _exhaustive: _AllCovered[] = [];   // errors if the union gained a member the array lacks
-```
-
-This exists so tests can iterate every member and assert its policy. Without it, a test loop
-over a hand-written array silently stops covering the new member — the same class of defect this
-loop is fixing, one level up.
+`FAILURE_CLASSES` lives in `cooldown.ts` beside `failurePolicy`, not in `types.ts` — that module
+has no value exports today and `cooldown.ts` imports from it with `import type`.
 
 ### Consumers become thin
 
-`shouldCooldown` keeps its signature and delegates, so its many call sites and tests are
-untouched. `main.ts` and `extension.ts` read `failurePolicy(...)` instead of comparing strings.
-`statusClassOf` (#6) keeps its own shape — it is keyed on `status === null` first and answers a
-telemetry question, not a policy one — but gains the same `never` treatment for the status-less
-branch, since a new status-less member silently becoming `'network'` is the identical defect.
+`shouldCooldown` keeps its signature and delegates. `main.ts` and `extension.ts` read the policy
+instead of comparing strings. `statusClassOf` keeps its own shape — it answers a telemetry
+question, not a policy one — but its status-less branch gains the same `never` treatment.
+
+`failurePolicy` is added to `packages/statusline/src/core-deps.ts`, the value-rebinding module
+`sdlc/001` created after 128 false failures. Importing it directly would bypass that discipline.
+
+**The exit code belongs in core** (`intent.md`'s open question, unanswered by the first draft).
+SPEC §8.2 puts business logic in `packages/core` and requires identical behaviour across
+surfaces; §11.5 makes the codes contractual but says nothing about where the *derivation* lives.
+`packages/vscode` will import a type carrying a field it ignores, which is the smaller cost.
 
 ## Data and types
 
-- New in `packages/core/src/types.ts`: `FailurePolicy`, `FAILURE_CLASSES`.
-- New in `packages/core/src/cooldown.ts`: `failurePolicy`. It lives beside `shouldCooldown`,
-  which becomes its first caller.
-- `FailureClass` itself is **unchanged**. No member added, none removed, no rename.
-- No cache format change; `lastErrorClass` still stores the same six strings, so
-  `CACHE_VERSION` is untouched and persisted envelopes stay valid.
+- New in `packages/core/src/cooldown.ts`: `FailurePolicy`, `failurePolicy`, `FAILURE_CLASSES`.
+- `FailureClass` itself is **unchanged** — no member added, removed, or renamed.
+- `readCacheResult` gains one validation. No format change, so `CACHE_VERSION` is untouched and
+  every persisted envelope stays valid; a bad `lastErrorClass` is nulled, not rejected.
 
 ## Edge cases
 
 | Case | Expected behavior |
 |---|---|
-| A value outside the union reaches `failurePolicy` (cast, or parsed data) | Throws, naming the value. Never returns a default policy. |
-| A member is added to `FailureClass` but not to the switch | `tsc --noEmit` fails at the `never` assignment, naming the member. |
-| A member is added to the switch but not to `FAILURE_CLASSES` | `tsc --noEmit` fails at `_exhaustive`. |
-| `shouldCooldown` called with each of the six | Identical to today, asserted member by member. |
-| A status-less failure class other than `timeout` is added | `statusClassOf`'s `never` fails the build rather than defaulting to `'network'`. |
-
-## Backward compatibility
-
-Nothing observable changes. Every current member maps to exactly what it does today, and the
-table above is asserted case by case rather than asserted in aggregate. `shouldCooldown` keeps
-its signature so no call site or existing test changes.
-
-The one visible difference is a *new* failure mode: a value outside the union now throws instead
-of receiving the default bucket. That can only be reached by a cast or by unvalidated data —
-both of which are already contract violations — and failing loudly is the behaviour this repo
-chose everywhere else at a trust boundary.
+| A member added to `FailureClass`, not to the switch | `tsc` fails at the `never` assignment, naming the member |
+| A member added to `FailureClass`, not to `FAILURE_CLASSES` | `tsc` fails at `_allCovered` |
+| A string in `FAILURE_CLASSES` not in the union | `tsc` fails at `satisfies` |
+| A `case` deleted | `tsc` fails at the `never` assignment |
+| A status-less member other than `timeout` added | `statusClassOf`'s `never` fails, rather than defaulting to `'network'` |
+| Cache carries `lastErrorClass: "garbage"` | Nulled by `readCacheResult`; the envelope is still used |
+| A value outside the union reaches `failurePolicy` anyway | Throws. Statusline → exit 3; VS Code → stale render, silently. Both named above. |
+| Renderable stale cache plus any failure | Exit **0**. The policy's exit code is not consulted. |
+| 429 | Not retried, via the status check `client.ts` keeps beside the policy |
+| 5xx | Retried, though it shares `serviceUnavailable` with 429 |
 
 ## Acceptance criteria
 
-- [ ] Adding a seventh member fails `bun run typecheck`, and **the actual error output is pasted
-      in `review.md`** — performed, not reasoned about
-- [ ] Removing any single `case` fails `bun run typecheck` — spot-checked and recorded
-- [ ] All six members' policies asserted individually, iterating `FAILURE_CLASSES`
-- [ ] `shouldCooldown` returns exactly what it returns today for all six — the `sdlc/010`
-      regression guard still passes unmodified
-- [ ] A value outside the union throws rather than returning a policy — tested
-- [ ] `main.ts` and `extension.ts` contain no `=== 'authInvalid'` comparison
-- [ ] `statusClassOf`'s status-less branch is exhaustive — verified by mutation
+- [ ] **A committed fixture harness proves the compiler catches it**: `.expect-error.ts` fixtures
+      (member missing from the switch; member missing from `FAILURE_CLASSES`; a deleted `case`;
+      a status-less member added to `statusClassOf`) each run through `tsc --noEmit` inside
+      `bun test`, asserting non-zero exit and `TS2322`. Runs in CI, not once by hand.
+- [ ] A **hand-written** `Record<FailureClass, FailurePolicy>` expectation table in the test file
+      is compared member-by-member while iterating `FAILURE_CLASSES`, plus
+      `expect(FAILURE_CLASSES).toHaveLength(6)` so a new member fails until the table is edited
+- [ ] `rg "'authInvalid'" packages/statusline/src/main.ts packages/vscode/src/extension.ts`
+      returns zero matches
+- [ ] Behavioural, per surface: statusline exits 2 and prints `⊙ auth invalid` for `authInvalid`
+      with no cache; exits 1 and prints `⊙ error` for the other five
+- [ ] `shouldCooldown` returns exactly today's answer for all six — `sdlc/010`'s regression guard
+      passes **unmodified**
+- [ ] A renderable stale cache still exits 0 for every failure class — tested, since this is the
+      contract the exit-code field most plausibly breaks
+- [ ] 429 is still not retried and 5xx still is — tested, since `retryable` alone would change it
+- [ ] A cache with an invalid `lastErrorClass` is nulled, not rejected — tested
 - [ ] `bun run verify` exits 0
 
 ## Rejected alternatives
 
-- **A single `requiresReauth` boolean.** Smaller, cannot drift — and encodes today's coincidence
-  that presentation and exit code agree. See above.
-- **Separate exhaustive functions per decision.** Each reads more naturally at its call site, but
-  a new member then forces three separate edits in three files, and missing one is exactly the
-  failure mode being fixed. One switch makes the decision set atomic.
-- **A `Record<FailureClass, FailurePolicy>` lookup table.** Also exhaustive, and arguably
-  cleaner. Rejected because a `Record` gives no place to put the runtime throw, and the
-  status-less `statusClassOf` branch needs the `never` form anyway — one idiom is easier to
-  follow than two.
-- **Doing `RuntimeState` and `StaleReason` in the same change.** Same latent defect, same fix,
-  and an unreviewable diff. Out of scope per the intent.
+- **A single `requiresReauth` boolean.** With `notConfigured` at exit 2 and presentation
+  `missing`, the fields are now visibly uncorrelated, so this retires itself.
+- **Separate exhaustive functions per decision.** A new member would need four edits in four
+  files; missing one is the failure being fixed. One switch makes the decision set atomic.
+- **A `Record<FailureClass, FailurePolicy>` lookup.** Also exhaustive, but no place for the
+  runtime throw, and `statusClassOf` needs the `never` form regardless — one idiom beats two.
+- **Folding the 429 check into `retryable`.** Changes behaviour: 429 and 5xx share a class.
+- **A manual "I added a member and watched it fail" note** instead of the fixture harness. That
+  was the first draft's position, and B1 is the demonstration of why it is not enough.
+- **`RuntimeState` and `StaleReason` in the same change.** Same defect, unreviewable diff.
 
 ---
 
