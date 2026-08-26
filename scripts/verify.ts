@@ -17,16 +17,13 @@ import { spawn } from 'child_process';
 import { appendFileSync, mkdirSync, statSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
-import { parseJunitFailures, boundBySize, MAX_LINE_BYTES, type FailedTest } from './junit.js';
-
-/**
- * Deliberately NOT imported from `packages/core`, even though the constant lives there too.
- *
- * A syntax error in core would make this import fail, and then the gate never starts: no step
- * runs, no `verify_run` event is written, and the failure surfaces as a raw Bun stack trace
- * instead of `verify: fail [typecheck]`. Losing the record in exactly the case the record exists
- * for is worse than duplicating a number. `junit.test.ts` asserts the two agree. (sdlc/020)
- */
+// MAX_LINE_BYTES comes from junit.ts, NOT from packages/core, even though the constant lives
+// there too. A syntax error in core would make that import fail and the gate would never start:
+// no step runs, no `verify_run` event is written, and the failure surfaces as a raw Bun stack
+// trace instead of `verify: fail [typecheck]`. Losing the record in exactly the case the record
+// exists for is worse than duplicating a number, and `junit.test.ts` asserts the two agree.
+// (sdlc/020)
+import { readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type TestFailureRecord } from './junit.js';
 
 interface StepResult {
   name: string;
@@ -95,28 +92,6 @@ function runStep(name: string, cmd: string[], junitOutfile?: string): Promise<St
   });
 }
 
-/**
- * Read and parse the junit report, if there is one.
- *
- * A SIGKILLed step leaves NO file: bun writes the report once, at end of run. So a timeout
- * yields `'absent'` and an empty list — this change cannot name the test in a hanging suite, and
- * says so rather than implying otherwise. See sdlc/020's "What this cannot do".
- */
-function readJunit(path: string): TestFailureRecord {
-  if (!existsSync(path)) return { failures: [], total: 0, outfile: 'absent' };
-  let xml: string;
-  try {
-    xml = readFileSync(path, 'utf-8');
-  } catch {
-    return { failures: [], total: 0, outfile: 'absent' };
-  }
-  const failures = parseJunitFailures(xml, process.cwd());
-  if (failures.length === 0 && !xml.includes('<testsuites')) {
-    return { failures: [], total: 0, outfile: 'unparseable' };
-  }
-  return { failures, total: failures.length, outfile: 'present' };
-}
-
 function spoolPath(): string {
   return join(homedir(), '.cache', 'claudewatch', 'metrics-spool.jsonl');
 }
@@ -139,44 +114,47 @@ function record(
     // telemetry.ts calls it the security boundary for product telemetry and this is a dev-loop
     // process metric. SPEC.md §17 carries the amendment that permits repo-relative paths and
     // test identifiers on `source: 'sdlc'` events only.
-    const payload: Record<string, string | number | boolean | null | FailedTest[]> = {
+    const payload: Record<string, unknown> = {
       outcome,
       failedStep,
       stepCount: steps.length,
     };
     for (const s of steps) payload[`${s.name}Ms`] = s.durationMs;
 
-    const build = (kept: FailedTest[]) => {
-      const p = { ...payload };
-      if (testFailures) {
-        p.failedTests = kept;
-        p.failedTestCount = testFailures.total;
-        p.junitOutfile = testFailures.outfile;
-      }
-      return {
-        eventId: EVENT_ID,
-        ts: TS,
-        source: 'sdlc',
-        kind: 'verify_run',
-        ok: outcome === 'pass',
-        durationMs: totalMs,
-        schemaVersion: 1,
-        payload: p,
-      };
-    };
+    const wrap = (p: Record<string, unknown>) => ({
+      eventId: EVENT_ID,
+      ts: TS,
+      source: 'sdlc',
+      kind: 'verify_run',
+      ok: outcome === 'pass',
+      durationMs: totalMs,
+      schemaVersion: 1,
+      payload: p,
+    });
 
     // Bounded by BYTES, not entry count. This spool is the same file product telemetry appends
     // to, so a line over MAX_LINE_BYTES breaks single-write append atomicity and can interleave
-    // into corrupt JSONL. 20 realistic entries measure 5078 bytes, so the case is reachable.
-    const kept = testFailures ? boundBySize(testFailures.failures, build, MAX_LINE_BYTES) : [];
-    const event = build(kept);
+    // into corrupt JSONL. Twenty realistic entries exceed the cap, so the case is reachable.
+    const event = wrap(attachFailures(payload, testFailures, wrap, MAX_LINE_BYTES));
 
     const dir = join(homedir(), '.cache', 'claudewatch');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     try {
       if (statSync(spoolPath()).size >= 5 * 1024 * 1024) return;
     } catch { /* first append */ }
-    appendFileSync(spoolPath(), `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    const line = `${JSON.stringify(event)}\n`;
+
+    // The last guard, mirroring `emit` in packages/core/src/telemetry.ts:179. `boundBySizeTight`
+    // gives up and returns [] once even one entry overflows, and it does NOT re-measure the
+    // zero-entry event — so an oversized base payload would otherwise be appended unbounded.
+    // The base is program-controlled (~250 bytes) so this is unreachable today, which is exactly
+    // why it needs a check rather than an argument: the invariant should hold by construction,
+    // not by arithmetic that a future field could silently invalidate. This spool is shared with
+    // product telemetry, and a line over PIPE_BUF breaks single-write append atomicity.
+    // (sdlc/020 security pass, S6.)
+    if (Buffer.byteLength(line, 'utf-8') > MAX_LINE_BYTES) return;
+
+    appendFileSync(spoolPath(), line, { mode: 0o600 });
   } catch {
     // Recording a metric must never be the reason the gate fails.
   }
@@ -185,21 +163,18 @@ function record(
 const EVENT_ID = crypto.randomUUID();
 const TS = new Date().toISOString();
 
-/** What the junit report yielded for a failing `test` step. Absent when the step passed. */
-interface TestFailureRecord {
-  failures: FailedTest[];
-  total: number;
-  outfile: 'present' | 'absent' | 'unparseable';
-}
-
 const startedAll = Bun.nanoseconds();
 const results: StepResult[] = [];
 let exitCode = 0;
 let failedStep: string | null = null;
 let outcome: 'pass' | 'fail' | 'timeout' = 'pass';
 
-// Outside the repo, so a stray file can never be picked up as a test or committed. 0600 so a
-// survivor after a kill is not world-readable — it lists every test name in the suite.
+// Outside the repo, so a stray file can never be picked up as a test or committed.
+//
+// The 0700 directory is what actually protects the report: BUN creates the file, and creates it
+// 0644 (verified with `stat`). An earlier version of this comment claimed 0600, and a test
+// "confirmed" it by chmodding a file of its own — a green check on something the code never did.
+// `tightenMode` below makes the claim true instead of asserting it. (sdlc/020 audit)
 const junitDir = mkdtempSync(join(tmpdir(), 'claudewatch-verify-'));
 const junitPath = join(junitDir, 'report.xml');
 let testFailures: TestFailureRecord | null = null;
@@ -215,7 +190,10 @@ try {
       // Passthrough. A timeout has no exit code of its own, so use 124 as `timeout(1)` does.
       exitCode = result.outcome === 'timeout' ? 124 : (result.exitCode ?? 1);
 
-      if (step.junit) testFailures = readJunit(junitPath);
+      if (step.junit) {
+        tightenMode(junitPath);
+        testFailures = readJunitReport(junitPath, process.cwd(), p => readFileSync(p, 'utf-8'), existsSync);
+      }
 
       break; // short-circuit, so the first failure is the one reported
     }

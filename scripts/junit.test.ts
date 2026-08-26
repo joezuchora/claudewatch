@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, readFileSync 
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
-import { parseJunitFailures, relativizeFile, boundBySize, MAX_LINE_BYTES, type FailedTest } from './junit.js';
+import { parseJunitFailures, relativizeFile, boundBySize, boundBySizeTight, readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type FailedTest } from './junit.js';
 import { MAX_LINE_BYTES as CORE_MAX_LINE_BYTES } from '../packages/core/src/telemetry.js';
 
 const ROOT = '/home/testuser/claudewatch';
@@ -42,6 +42,20 @@ function buildFullEvent(kept: FailedTest[], total = 400): unknown {
 function buildBareEvent(kept: FailedTest[]): unknown {
   return { payload: { failedTests: kept } };
 }
+
+/**
+ * The event envelope `verify.ts` wraps a payload in. Named `wrapEvent`, not `wrap`, because the
+ * XML fixture helper above already owns `wrap` and shadowing it made both harder to read.
+ */
+function wrapEvent(p: Record<string, unknown>): unknown {
+  return { source: 'sdlc', kind: 'verify_run', payload: p };
+}
+
+/** Injected IO for readJunitReport, so its three states are reachable without a filesystem. */
+const readsContent = (content: string) => () => content;
+const fileExists = (): boolean => true;
+const fileMissing = (): boolean => false;
+const readThrows = (): string => { throw new Error('EACCES'); };
 
 describe('A1 — the fields reach the output', () => {
   test('parses a single failure with all fields', () => {
@@ -272,5 +286,162 @@ describe('A13 — the outfile is safe and does not survive', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('security-pass findings (sdlc/020)', () => {
+  test('S2 — a UNC path in a test NAME is scrubbed, hostname and all', () => {
+    // name/suite/type were unsanitized free text; only `file` was checked. A test titled after a
+    // path would have been recorded verbatim while three documents promised otherwise.
+    const xml = wrap(testcase('name="reads \\\\\\\\fileserver\\\\share\\\\x from disk" file="a.test.ts"'));
+    const got = parseJunitFailures(xml, ROOT);
+    expect(got).toHaveLength(1);
+    expect(got[0]!.name).not.toContain('fileserver');
+    expect(got[0]!.name).toContain('<path>');
+  });
+
+  test('S2 — a home directory in a test name is scrubbed', () => {
+    const xml = wrap(testcase('name="fails for /home/joe/secret-project/x" file="a.test.ts"'));
+    const got = parseJunitFailures(xml, ROOT);
+    expect(got[0]!.name).toBe('fails for <path>');
+  });
+
+  test('S2 — a single-segment reference is NOT scrubbed', () => {
+    // The guard must protect paths, not mangle every readable test name.
+    const xml = wrap(testcase('name="returns 200 for /health" file="a.test.ts"'));
+    expect(parseJunitFailures(xml, ROOT)[0]!.name).toBe('returns 200 for /health');
+  });
+
+  test('S3 — a hostile failure type is replaced, a normal one is kept', () => {
+    const hostile = wrap(testcase('name="t" file="a.test.ts"',
+      '<failure type="/home/joe/.claude/.credentials.json" />'));
+    expect(parseJunitFailures(hostile, ROOT)[0]!.type).toBe('other');
+
+    const normal = wrap(testcase('name="t" file="a.test.ts"', '<failure type="AssertionError" />'));
+    expect(parseJunitFailures(normal, ROOT)[0]!.type).toBe('AssertionError');
+  });
+
+  test('S4 — a root of / or empty nulls the path instead of stripping the slash', () => {
+    // Otherwise `/home/joe/x.test.ts` becomes `home/joe/x.test.ts` — still a username.
+    for (const root of ['/', '']) {
+      expect(relativizeFile('/home/joe/x.test.ts', root)).toBeNull();
+    }
+  });
+
+  test('S4 — a file equal to the root is null, not an empty string', () => {
+    expect(relativizeFile(ROOT, ROOT)).toBeNull();
+  });
+
+  test('S7 — the tightened bound keeps more than the halving alone', () => {
+    const entries: FailedTest[] = Array.from({ length: 400 }, (_, i) => ({
+      file: `a-${i}.test.ts`, name: `t${i}`, suite: null, line: i, type: 'AssertionError',
+    }));
+    const coarse = boundBySize(entries, buildFullEvent);
+    const tight = boundBySizeTight(entries, buildFullEvent);
+    expect(tight.length).toBeGreaterThan(coarse.length);
+    // ...and still fits one atomic append.
+    expect(Buffer.byteLength(`${JSON.stringify(buildFullEvent(tight))}\n`, 'utf-8'))
+      .toBeLessThanOrEqual(MAX_LINE_BYTES);
+    // ...and adding one more would not.
+    const oneMore = entries.slice(0, tight.length + 1);
+    expect(Buffer.byteLength(`${JSON.stringify(buildFullEvent(oneMore))}\n`, 'utf-8'))
+      .toBeGreaterThan(MAX_LINE_BYTES);
+  });
+});
+
+describe('A10/A11 — the payload the gate actually records', () => {
+  const base = { outcome: 'pass', failedStep: null, stepCount: 5, testMs: 7000 };
+
+  test('A10 — a passing run\'s payload is returned byte-identical', () => {
+    // The mutation this must catch: emitting the fields unconditionally. Before sdlc/020's audit
+    // this criterion had NO test touching the code it named.
+    const out = attachFailures(base, null, wrapEvent);
+    expect(Object.keys(out).toSorted()).toEqual(['failedStep', 'outcome', 'stepCount', 'testMs']);
+    expect(out).toEqual(base);
+    expect(JSON.stringify(out)).toBe(JSON.stringify(base));
+  });
+
+  test('A11 — junitOutfile carries through each of the three states', () => {
+    for (const outfile of ['present', 'absent', 'unparseable'] as const) {
+      const out = attachFailures(base, { failures: [], total: 0, outfile }, wrapEvent);
+      expect(out.junitOutfile).toBe(outfile);
+      expect(out.failedTestCount).toBe(0);
+      expect(out.failedTests).toEqual([]);
+    }
+  });
+
+  test('A11 — the true total survives truncation', () => {
+    const failures: FailedTest[] = Array.from({ length: 400 }, (_, i) => ({
+      file: `packages/core/src/a-fairly-long-test-file-name-${i}.test.ts`,
+      name: `a reasonably descriptive failing test name number ${i}`,
+      suite: 'some describe chain', line: i, type: 'AssertionError',
+    }));
+    const out = attachFailures(base, { failures, total: 400, outfile: 'present' }, wrapEvent);
+    expect(out.failedTestCount).toBe(400);
+    expect((out.failedTests as FailedTest[]).length).toBeLessThan(400);
+    expect(Buffer.byteLength(`${JSON.stringify(wrapEvent(out))}\n`, 'utf-8')).toBeLessThanOrEqual(MAX_LINE_BYTES);
+  });
+});
+
+describe('readJunitReport — the three states, against injected IO', () => {
+  test('a missing file is absent, not an error', () => {
+    // The timeout path. Bun writes the report only at end of run, so SIGKILL leaves nothing.
+    expect(readJunitReport('/nope', ROOT, readsContent(''), fileMissing))
+      .toEqual({ failures: [], total: 0, outfile: 'absent' });
+  });
+
+  test('a truncated report is unparseable, NOT a clean parse with zero failures', () => {
+    // The audit's counterexample: this contains `<testsuites`, so an opening-tag check would
+    // have called it 'present' and reported "no failures" for a file that was cut off.
+    const truncated = '<?xml version="1.0"?><testsuites name="bun test"><testcase name="t"';
+    expect(readJunitReport('/x', ROOT, readsContent(truncated), fileExists).outfile).toBe('unparseable');
+  });
+
+  test('a complete report with a failure is present and parsed', () => {
+    const xml = wrap(testcase('name="t" file="a.test.ts" line="3"'));
+    const got = readJunitReport('/x', ROOT, readsContent(xml), fileExists);
+    expect(got.outfile).toBe('present');
+    expect(got.total).toBe(1);
+    expect(got.failures[0]!.name).toBe('t');
+  });
+
+  test('a complete report with NO failures is present with zero — a different fact', () => {
+    const xml = wrap('<testcase name="passed" file="a.test.ts" />');
+    expect(readJunitReport('/x', ROOT, readsContent(xml), fileExists))
+      .toEqual({ failures: [], total: 0, outfile: 'present' });
+  });
+
+  test('a read that throws degrades to absent rather than failing the gate', () => {
+    expect(readJunitReport('/x', ROOT, readThrows, fileExists).outfile).toBe('absent');
+  });
+});
+
+describe('A13 — tightenMode, against a report bun really wrote', () => {
+  test('bun creates it 0644, and tightenMode narrows it to 0600', () => {
+    // The audit found the previous A13 vacuous: it chmodded a file of its OWN to 0600 and then
+    // asserted it was 0600, so it tested fs.writeFileSync and would have passed with verify.ts
+    // deleted. It also hid a real defect — the comment, the test name and the spec all claimed
+    // the report was 0600 when bun writes it 0644 and nothing ever changed that.
+    const dir = mkdtempSync(join(tmpdir(), 'cw-mode-'));
+    try {
+      const report = join(dir, 'report.xml');
+      writeFileSync(join(dir, 'a.test.ts'),
+        "import {test,expect} from 'bun:test';\ntest('t',()=>{expect(1).toBe(1)});\n");
+      spawnSync('bun', ['test', 'a.test.ts', '--reporter=junit', `--reporter-outfile=${report}`],
+        { cwd: dir, stdio: 'ignore' });
+
+      // The premise, asserted rather than assumed. If bun ever starts writing 0600 this should be
+      // revisited deliberately, not silently kept passing.
+      expect(statSync(report).mode & 0o777).toBe(0o644);
+
+      tightenMode(report);
+      expect(statSync(report).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a missing path is a no-op, not a throw', () => {
+    expect(() => tightenMode(join(tmpdir(), 'definitely-not-here-9f3a.xml'))).not.toThrow();
   });
 });

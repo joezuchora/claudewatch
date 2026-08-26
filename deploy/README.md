@@ -98,9 +98,14 @@ ships it, to the service you are hosting. Payloads carry only numbers, booleans 
 from fixed lists: no token, path, hostname, username, or account identifier can appear.
 
 `source: "sdlc"` events, written by the repository's own `verify` gate rather than by the
-product, additionally carry repo-relative source paths and test names — the developer's code,
-not yours. No event of any source carries an absolute path, a home directory, a hostname, or a
+product, additionally carry repo-relative source paths, test names and a failure-type
+identifier — the developer's code, not yours, each scrubbed of path-shaped text first. No event of any source carries an absolute path, a home directory, a hostname, or a
 username. See [`SECURITY.md`](../SECURITY.md) and `SPEC.md` §17.
+
+The agent ships every spooled line to your service verbatim — it performs no redaction of its
+own. Whatever reaches the spool reaches the service, so the sanitization above is the only
+boundary, and on a LAN deployment it travels in plaintext unless you put TLS in front of the
+service.
 
 ## Operating it
 

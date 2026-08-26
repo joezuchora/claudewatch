@@ -545,3 +545,32 @@ retrying every 429; `result.status === 429` alone starts retrying 401s. 429 and 
 `FailureClass` and want opposite answers, so retry is the one decision here that is not a pure
 function of the class — and the "obvious" tidy-up that merges them is a live bug in both
 directions.
+
+## Loop 020 — the audit found a fence item shipped behind a test that only looked like one
+
+The plan-to-diff auditor's verdict was FENCE VIOLATED, and not by an out-of-scope file. Every
+path was on the fence. The violation was **an item shipped unimplemented behind a vacuous test**:
+the junit report was documented as `0600` in a code comment, a test name and the spec, and bun
+actually creates it `0644`. The test that "confirmed" it created a file of its own with
+`mode: 0600` and asserted it was `0600` — it exercised `fs.writeFileSync` and would have passed
+with the whole change deleted.
+
+That is the eighth recorded instance of the same defect, and the first where it **hid a second
+one**. Two more criteria in the same loop had no test touching the code they named at all.
+
+The security pass, run on the same commit, found that only the `file` field was sanitized while
+three documents promised no event carries a path or a username — and then, reviewing my fix,
+found a gap in it: a UNC path `\\server\share\x` embeds a *hostname* and matched neither scrub
+branch. **A fix is not exempt from review because it is a fix.**
+
+Two things this loop confirms about numbers. The spec's motivating figure (a "~550s hang") had
+been impossible since step timeouts landed at 300s, and I had carried it across several
+documents. And a byte count I quoted in code comments and a commit message came from a
+*reviewer's* report and was never recomputed; it was wrong. `sdlc/015`'s lesson generalizes:
+a number inherited from a trusted source is still a number nobody checked.
+
+Finally, a bug I introduced while fixing the audit. The obvious way to test "a passing run's
+payload is unchanged" is to drive the real gate from a test — which makes `bun test` spawn
+`bun run verify`, whose `test` step runs `bun test`. Infinite recursion, found by running it.
+The refactor it forced (pure functions in `junit.ts`, orchestration only in `verify.ts`) is
+better than what I set out to write.

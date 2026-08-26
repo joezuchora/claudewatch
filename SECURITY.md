@@ -53,8 +53,9 @@ not a bug:
   not report on you to anyone else. No payload can contain a token, a path, a hostname, a
   username, or an account identifier, because every field is a number, a boolean, or a value
   from a fixed list. (Since 2026-08-26 the same spool also receives `source: "sdlc"` events from
-  the repository's own `bun run verify` gate, which carry repo-relative source paths and test
-  names — the developer's own code, never yours. The rule above is unchanged for every event the
+  the repository's own `bun run verify` gate, which carry repo-relative source paths, test names
+  and a failure-type identifier — the developer's own code, never yours, and each scrubbed of
+  path-shaped text before it is written. The rule above is unchanged for every event the
   *product* writes, and no event of any source may carry an absolute path, a home directory, a
   hostname, or a username. See `SPEC.md` §17.)
 - **No third-party runtime dependencies** in `packages/core`, which keeps the supply-chain

@@ -860,16 +860,22 @@ When a user explicitly enables it, ClaudeWatch appends metric events to a local 
 
 **Amendment (2026-08-26, sdlc/020) — `source: 'sdlc'` process metrics.** Events written by
 `scripts/verify.ts`, a development script that never runs in a shipped artifact and observes only
-this repository, may additionally carry **repo-relative** file paths, test identifiers, and the
-closed enumeration `junitOutfile`. They are written by the developer's own gate, about the
-repository's own source, and contain nothing about a user or their account.
+this repository, may additionally carry **repo-relative** file paths, test identifiers (a test's
+name and its enclosing describe chain), a `type` constrained to an identifier of at most 64
+characters (anything else is recorded as `other`), and the closed enumeration `junitOutfile`.
+They are written by the developer's own gate, about the repository's own source, and contain
+nothing about a user or their account.
+
+Every one of those free-text fields is scrubbed of path-shaped substrings before it is recorded,
+so the prohibitions below hold even when a test is *named* after a path.
 
 Unchanged for **every** event regardless of source: no token, no absolute path, no home
 directory, no hostname, no username, no account identifier. `verify.ts` and the product append to
 the same spool, so an absolute path in either would leave the machine by the same route.
 
-Unchanged for **product telemetry** (`source: 'statusline' | 'vscode'`): numbers, booleans, and
-members of closed enumerations only. A free-text payload field there remains a blocking review
+Unchanged for **product telemetry** (`source: 'product'` — the only other `MetricSource`; the
+emitting surface is carried in the payload as `surface: 'statusline' | 'vscode'`): numbers,
+booleans, and members of closed enumerations only. A free-text payload field there remains a blocking review
 finding. This amendment does not widen `MetricEvent.payload` in `packages/core`, which stays the
 structural boundary for the events that concern a user.
 

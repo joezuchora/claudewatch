@@ -51,7 +51,8 @@ Run the `security-reviewer` subagent. Authoritative invariants are `SPEC.md §12
   targets checked with `lstat` before write.
 - **Telemetry stays local and opt-in.** The product transmits nothing but requests to the documented usage endpoint. Telemetry is written to a local spool and is off by default with no default destination. Verify against the diff: no new network call in `packages/core`, `packages/statusline` or `packages/vscode`; telemetry still defaults off; and **every payload leaf is a number, a boolean, or a member of a closed enumeration.** A free-text payload field is a blocking finding — the leak vector is the value, not the key.
   **Carve-out (sdlc/020):** `source: 'sdlc'` events from `scripts/verify.ts` may carry
-  repo-relative paths and test identifiers per `SPEC.md` §17's amendment. An **absolute** path, a
+  repo-relative paths, test identifiers and an identifier-constrained failure `type` per
+  `SPEC.md` §17's amendment, each scrubbed of path-shaped text. An **absolute** path, a
   home directory, a hostname or a username remains blocking in any event, from any source.
 
 **Standing items** from `docs/audit-report.md`, open and re-checked whenever the diff comes
