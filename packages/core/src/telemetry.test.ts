@@ -116,7 +116,11 @@ describe('telemetry: payload builders', () => {
       utilizationBucket: utilizationBucket(87), durationMs: 12,
     });
     expect(e.payload.utilizationBucket).toBe(8);
-    expect(JSON.stringify(e)).not.toContain('87');
+    // Assert against the PAYLOAD, not the whole event. The event carries a random UUID
+    // eventId, and a 32-character hex string contains any given 2-char substring about half
+    // the time — so `JSON.stringify(e)).not.toContain('87')` passes or fails by luck. It
+    // passed locally and failed in CI, which is exactly how that class of test behaves.
+    expect(JSON.stringify(e.payload)).not.toContain('87');
   });
 
   test('schema_drift carries a category, never warning text', () => {
