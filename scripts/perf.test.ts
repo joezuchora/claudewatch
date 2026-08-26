@@ -151,14 +151,24 @@ describe('the CLI, run the way the gate runs it', () => {
     for (const k of ['p50', 'p90', 'p95', 'p99', 'max']) expect(typeof j[k]).toBe('number');
   });
 
-  test('the run touches neither the ambient HOME nor the real cache', () => {
-    // Handed a HOME that is empty and must stay empty: if perf ever read or seeded the
-    // inherited HOME instead of its own sandbox, this directory would gain .cache or .claude.
+  test('the run writes no claudewatch state into the ambient HOME', () => {
+    // Handed a HOME perf must ignore: if it ever read or seeded the INHERITED home instead of
+    // its own sandbox, `.claude` or `.cache/claudewatch` would appear here.
+    //
+    // The first version of this asserted the directory stayed ENTIRELY empty, and CI failed:
+    // `bun run` itself creates `$HOME/.bun` when BUN_INSTALL is not redirected elsewhere, which
+    // is true on the runner and not in my container. That assertion was a claim about bun, not
+    // about perf.ts. Third time this session I have asserted something broader than the
+    // property that matters — see sdlc/013/review.md.
     const ambient = mkdtempSync(join(tmpdir(), 'cw-ambient-'));
     try {
       const r = run(['--bin', stub('fast4', 'exit 0'), '--samples', '30'], { HOME: ambient });
       expect(r.code).toBe(0);
-      expect(readdirSync(ambient)).toEqual([]);
+      expect(existsSync(join(ambient, '.claude'))).toBe(false);
+      expect(existsSync(join(ambient, '.cache', 'claudewatch'))).toBe(false);
+      // Anything else that appeared belongs to the toolchain, not to us — named, so a future
+      // reader sees what was tolerated rather than a bare `true`.
+      expect(readdirSync(ambient).filter((e) => e !== '.bun' && e !== '.cache')).toEqual([]);
     } finally {
       rmSync(ambient, { recursive: true, force: true });
     }
