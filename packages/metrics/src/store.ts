@@ -20,6 +20,13 @@ export function defaultDbPath(): string {
   return join(homedir(), '.local', 'share', 'claudewatch-metrics', 'metrics.db');
 }
 
+/**
+ * How long a connection waits for a lock before giving up. Generous: every writer here holds
+ * the database for milliseconds, so a wait this long means something is genuinely wrong rather
+ * than merely concurrent.
+ */
+export const BUSY_TIMEOUT_MS = 5_000;
+
 export class MetricsStore {
   private db: Database;
 
@@ -28,6 +35,18 @@ export class MetricsStore {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     }
     this.db = new Database(path, { create: true });
+
+    // BEFORE any other pragma. Two processes genuinely share this database in the shipped
+    // deployment: `claudewatch-metrics.service` holds it open continuously while the hourly
+    // `sdlc-loop` ships into it and `metrics:detect` reads it. Without a busy timeout SQLite
+    // fails the very first `PRAGMA journal_mode = WAL` with SQLITE_BUSY instead of waiting —
+    // so `metrics:detect` would simply die whenever the service happened to hold a lock.
+    //
+    // Found by CI, not by design review: a docs-only commit went red because the test that
+    // spawns cli-detect against a fixture db raced its own parent connection under load. That
+    // is the same shape as the real deployment, which is why it is a product fix and not a
+    // test fix. (sdlc/013)
+    this.db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     this.db.run('PRAGMA journal_mode = WAL');
     this.db.run('PRAGMA foreign_keys = ON');
     this.migrate();
@@ -56,6 +75,11 @@ export class MetricsStore {
     `);
     this.db.run('CREATE INDEX IF NOT EXISTS idx_events_lookup ON events(source, kind, received_at)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_events_received ON events(received_at)');
+  }
+
+  /** The connection's actual busy timeout, so a test can observe it rather than assume it. */
+  busyTimeoutMs(): number {
+    return this.db.query<{ timeout: number }, []>('PRAGMA busy_timeout').get()?.timeout ?? 0;
   }
 
   schemaVersion(): number {

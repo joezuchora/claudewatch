@@ -2,7 +2,8 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { MetricsStore, SCHEMA_VERSION } from './store.js';
+import { Database } from 'bun:sqlite';
+import { MetricsStore, SCHEMA_VERSION, BUSY_TIMEOUT_MS } from './store.js';
 
 function evt(overrides: Record<string, unknown> = {}) {
   return {
@@ -123,6 +124,64 @@ describe('MetricsStore: durability', () => {
       second.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MetricsStore: two processes, one database (sdlc/013)', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cw-busy-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  test('REGRESSION: a connection WAITS for a held lock instead of dying on SQLITE_BUSY', async () => {
+    // Reproduces the CI failure exactly. Two conditions are BOTH required, and getting one
+    // wrong is why my first attempt at this test passed with the fix removed:
+    //
+    //   1. The database must be in the DEFAULT journal mode, so the WAL transition genuinely
+    //      needs an exclusive lock. Creating it through MetricsStore first sets WAL, after
+    //      which `PRAGMA journal_mode = WAL` is a no-op that never blocks.
+    //   2. Another PROCESS must hold a write lock — the shipped deployment's shape, where
+    //      claudewatch-metrics.service holds the database while the hourly loop ships into it
+    //      and metrics:detect reads it.
+    //
+    // Verified by mutation: without the busy_timeout pragma this throws "database is locked",
+    // which is the error CI produced on a docs-only commit.
+    const path = join(dir, 'metrics.db');
+    const seed = new Database(path, { create: true });
+    seed.run('CREATE TABLE placeholder(x)');   // default journal mode, deliberately not WAL
+    seed.close();
+
+    const holder = Bun.spawn(['bun', '-e', `
+      const { Database } = require('bun:sqlite');
+      const db = new Database(${JSON.stringify(path)});
+      db.run('BEGIN EXCLUSIVE');
+      console.log('locked');
+      setTimeout(() => { db.run('COMMIT'); db.close(); }, 600);
+    `], { stdout: 'pipe', stderr: 'pipe' });
+
+    // Wait until the lock is actually held before racing it.
+    const reader = holder.stdout.getReader();
+    await reader.read();
+    reader.releaseLock();
+
+    // This is the constructor line that threw SQLITE_BUSY in CI.
+    const second = new MetricsStore(path);
+    expect(second.schemaVersion()).toBe(SCHEMA_VERSION);
+    second.close();
+    await holder.exited;
+  }, 30_000);
+
+  test('the busy timeout is set on the connection, not merely intended', () => {
+    // Mutation-visible: deleting the pragma makes this read 0. Asserted through a second
+    // connection's own pragma so the value is observed rather than assumed — busy_timeout is
+    // per-connection, so a store that forgot it would report 0 here.
+    const path = join(dir, 'metrics.db');
+    const store = new MetricsStore(path);
+    try {
+      expect(BUSY_TIMEOUT_MS).toBeGreaterThan(0);
+      expect(store.busyTimeoutMs()).toBe(BUSY_TIMEOUT_MS);
+    } finally {
+      store.close();
     }
   });
 });

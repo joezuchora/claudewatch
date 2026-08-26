@@ -57,8 +57,10 @@ number will be re-estimated one day and the method is what would repeat.
 | 1 | major | **CI red on `e9080dd`, and it was my test, not the budget.** The isolation test asserted the ambient HOME stayed *entirely* empty. `bun run` creates `$HOME/.bun` when `BUN_INSTALL` is not redirected — true on the runner, false here — so it passed locally and failed on CI. The assertion was a claim about bun, not about `perf.ts`. | **Fixed** and narrowed to the property meant: no `.claude`, no `.cache/claudewatch`. Verified it still has teeth by pointing `perf.ts` at the ambient HOME. |
 | 2 | major | **`expect(childEnv(log)).toHaveLength(WARMUP + 30)` could not detect `WARMUP` changing** — the constant moves both sides of the assertion. Same tautology the audit caught in `expect(GENERAL_LIMIT).toBe(1000)` last loop. | **Fixed.** `WARMUP` is pinned to its literal separately, which is what makes the spec's "5 discarded warm-ups" a claim rather than a description. |
 | 3 | major | **CI red again on `da35774`, and again it was ambient state making a test lie.** `THE SHIPPED ARTIFACT` failed in 14.86 ms — far too fast for 35 spawns. `verify` runs `test` **before** `build`, and `dist/` is gitignored, so on a fresh checkout the shipped artifact does not exist when that file runs. It passed locally only because a binary was sitting there from an earlier build. | **Fixed** — a `beforeAll` that builds if absent, exactly as `smoke.test.ts` does. Verified by deleting `dist/claudewatch` and re-running both the file and the whole gate. Note the shape: the *previous* CI failure was also ambient state (`$HOME/.bun` existing on the runner and not here). Two consecutive red runs, both from something present on one machine and not the other. |
-| 4 | minor | The `sleep 5` timeout stub left an orphan process the runner had to reap (`Terminate orphan process: pid (2588) (sleep)`). `Bun.spawnSync`'s timeout kills the shell, not the `sleep` it forked. | Fixed with `exec sleep 5`, so the shell is replaced and the timeout kills the real process. |
-| 5 | minor | A lint **error** (unused `readdirSync`) reached a commit — `verify` catches it, but I pushed before re-running the full gate after that edit. | Fixed; three new warnings of mine fixed too, so the count is back to exactly 12, unchanged by this loop. |
+| 4 | **major** | **A docs-only commit went red, and it was a real product defect.** `MetricsStore` set no SQLite busy timeout, so `PRAGMA journal_mode = WAL` failed instantly with `SQLITE_BUSY` whenever another connection held a lock. The shipped deployment is exactly that shape: `claudewatch-metrics.service` holds the database open continuously while the hourly loop ships into it and `metrics:detect` reads it — so `metrics:detect` would simply die at random on the NUC. Not a test flake; the test merely reproduced production. | **Fixed** — `PRAGMA busy_timeout` before any other pragma, with a regression test that reproduces the CI error exactly. |
+| 5 | minor | **My first attempt at that regression test passed with the fix removed.** It created the database through `MetricsStore`, which already sets WAL — after which `PRAGMA journal_mode = WAL` is a no-op that never blocks. The test looked right and proved nothing. | **Fixed** by isolating the reproduction first, outside the suite: the database must be in the *default* journal mode **and** another process must hold a write lock. Both conditions are now in the test, with the reason, and mutation confirms it fails without the pragma. |
+| 6 | minor | The `sleep 5` timeout stub left an orphan process the runner had to reap (`Terminate orphan process: pid (2588) (sleep)`). `Bun.spawnSync`'s timeout kills the shell, not the `sleep` it forked. | Fixed with `exec sleep 5`, so the shell is replaced and the timeout kills the real process. |
+| 7 | minor | A lint **error** (unused `readdirSync`) reached a commit — `verify` catches it, but I pushed before re-running the full gate after that edit. | Fixed; three new warnings of mine fixed too, so the count is back to exactly 12, unchanged by this loop. |
 
 ### Mutation results, after the fixes
 
@@ -130,6 +132,13 @@ $ echo $?
   iteration next has room. Recorded so it is not mistaken for current.
 
 ## What this loop says about the loop
+
+**Three CI failures this loop, and the third was the valuable one.** The first two were mine and
+ambient (`$HOME/.bun` on the runner; a built binary here). The third went red on a **docs-only
+commit** — code byte-identical to a green run — which is precisely what distinguishes a
+load-dependent race from a regression, and it surfaced a genuine product defect: no SQLite busy
+timeout, in a deployment where three processes share one database. CI found a NUC bug by being
+slower and busier than my container.
 
 **Two consecutive CI failures, both ambient state.** First `$HOME/.bun`, which exists on the
 runner and not here; then a built binary, which existed here and not on a fresh checkout. Both
