@@ -52,7 +52,11 @@ not a bug:
   to a service *you* host. The tool reports on itself to a service its owner runs — it does
   not report on you to anyone else. No payload can contain a token, a path, a hostname, a
   username, or an account identifier, because every field is a number, a boolean, or a value
-  from a fixed list.
+  from a fixed list. (Since 2026-08-26 the same spool also receives `source: "sdlc"` events from
+  the repository's own `bun run verify` gate, which carry repo-relative source paths and test
+  names — the developer's own code, never yours. The rule above is unchanged for every event the
+  *product* writes, and no event of any source may carry an absolute path, a home directory, a
+  hostname, or a username. See `SPEC.md` §17.)
 - **No third-party runtime dependencies** in `packages/core`, which keeps the supply-chain
   surface to Bun and the standard library.
 

@@ -95,8 +95,12 @@ Or per-invocation with `CLAUDEWATCH_TELEMETRY=1`. In VS Code, set
 
 The product writes to a local spool and **never opens a socket** — the agent above is what
 ships it, to the service you are hosting. Payloads carry only numbers, booleans and values
-from fixed lists: no token, path, hostname, username, or account identifier can appear. See
-[`SECURITY.md`](../SECURITY.md).
+from fixed lists: no token, path, hostname, username, or account identifier can appear.
+
+`source: "sdlc"` events, written by the repository's own `verify` gate rather than by the
+product, additionally carry repo-relative source paths and test names — the developer's code,
+not yours. No event of any source carries an absolute path, a home directory, a hostname, or a
+username. See [`SECURITY.md`](../SECURITY.md) and `SPEC.md` §17.
 
 ## Operating it
 
