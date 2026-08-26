@@ -540,9 +540,42 @@ describe('scrubPaths cannot be defeated by what precedes the slash (sdlc/021)', 
     });
   }
 
+  /**
+   * A `.` or `-` immediately before the slash.
+   *
+   * The lookbehind first excluded `[A-Za-z0-9._-]`, and the sdlc/021 security pass found these
+   * two walked straight through — a second, narrower hole inside the fix that had just closed
+   * eleven wider ones. A mutation then showed I had closed it WITHOUT a test, so widening the
+   * class back was silent. These are that test.
+   */
+  const PUNCT_PREFIXED = ['foo-/opt/secrets/key', 'report.-/var/secrets/x', 'v1.2-/srv/internal/x'];
+
+  for (const attempt of PUNCT_PREFIXED) {
+    test(`${JSON.stringify(attempt)} — a . or - before the slash does not smuggle it`, () => {
+      const out = scrubPaths(attempt);
+      expect(out).not.toContain('/opt/secrets');
+      expect(out).not.toContain('/var/secrets');
+      expect(out).not.toContain('/srv/internal');
+      expect(out).toContain('<path>');
+    });
+  }
+
+  test('the home rule catches what the general rule skips, in either case', () => {
+    // These are the cases ONLY the unconditional home rule can reach: an alphanumeric before the
+    // slash makes the general rule step over them. That is what makes the home rule, and its `i`
+    // flag, load-bearing rather than decorative — a first draft of this test used `/users/joe`,
+    // which the general rule catches anyway, so a mutation removing the flag left it green.
+    for (const c of ['x/users/joe/secret', 'x/Users/joe/secret', 'v2/home/joe/secret']) {
+      expect(scrubPaths(c)).not.toContain('joe');
+      expect(scrubPaths(c)).toContain('<path>');
+    }
+    expect(scrubPaths('/var/home/joe/secret')).not.toContain('joe');
+  });
+
   test('and the legible names this rule exists to protect are untouched', () => {
     // The non-vacuous half: a scrubber that replaced everything would pass every assertion above.
-    for (const safe of ['A5/A6/A7 — the switch', 'handles 2026/08/26 input', 'a 3/4 majority', 'reads config a/b/c']) {
+    for (const safe of ['A5/A6/A7 — the switch', 'handles 2026/08/26 input', 'a 3/4 majority',
+      'reads config a/b/c', 'v1.2/a/b', 'a.b/c/d']) {
       expect(scrubPaths(safe)).toBe(safe);
     }
   });

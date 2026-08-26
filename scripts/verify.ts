@@ -197,6 +197,11 @@ let testFailures: TestFailureRecord | null = null;
 try {
   for (const step of STEPS) {
     const result = await runStep(step.name, step.cmd, step.junit ? junitPath : undefined);
+    // Unconditionally, not only when the step failed. Bun writes the report 0644 and it lists
+    // every test name in the suite, so a PASSING run — including one that opted out of recording
+    // entirely — was leaving a world-readable file until the `finally` removed it. Contained by
+    // the 0700 parent, but the narrower mode costs nothing. (sdlc/021 security pass, S8.)
+    if (step.junit) tightenMode(junitPath);
     results.push(result);
 
     if (result.outcome !== 'pass') {
@@ -206,7 +211,6 @@ try {
       exitCode = result.outcome === 'timeout' ? 124 : (result.exitCode ?? 1);
 
       if (step.junit) {
-        tightenMode(junitPath);
         testFailures = readJunitReport(junitPath, process.cwd(), p => readFileSync(p, 'utf-8'), existsSync);
       }
 

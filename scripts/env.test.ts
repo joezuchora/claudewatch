@@ -59,10 +59,18 @@ describe('A1 — unset means off', () => {
 describe('A4 — an unrecognised value is off, and says so', () => {
   test('it disables AND warns, while a valid value is silent', () => {
     const bad = withWarnings();
-    expect(shouldRecordVerifyMetrics({ [VERIFY_METRICS_ENV]: 'enabled' }, bad.warn)).toBe(false);
+    // A value carrying something that must never be logged, to make the point concrete.
+    expect(shouldRecordVerifyMetrics({ [VERIFY_METRICS_ENV]: '/home/joe/secret-token' }, bad.warn)).toBe(false);
     expect(bad.messages).toHaveLength(1);
     expect(bad.messages[0]).toContain(VERIFY_METRICS_ENV);
-    expect(bad.messages[0]).toContain('enabled');
+    // The value is deliberately NOT echoed. Under systemd this line goes to journald, and an
+    // env value is arbitrary unbounded text — the one place in this change something
+    // unsanitized could reach an output channel. An earlier version of this test asserted the
+    // opposite. (sdlc/021 security pass, S6.)
+    expect(bad.messages[0]).not.toContain('/home/joe');
+    expect(bad.messages[0]).not.toContain('secret-token');
+    expect(bad.messages[0]).toContain('unrecognised');
+    expect(bad.messages[0]).toContain('not recording');
 
     const good = withWarnings();
     expect(shouldRecordVerifyMetrics({ [VERIFY_METRICS_ENV]: '1' }, good.warn)).toBe(true);
@@ -143,13 +151,20 @@ function runGate(fixture: { dir: string; home: string }, env: Record<string, str
   // the child inherited it. The test asserting "unset behaves as disabled" was really asserting
   // "=1 behaves as disabled", and it failed the moment the runbook was followed. Found by the
   // gate going red for real — and named by the very event loop 020 added.
+  // An ALLOWLIST, not a spread-and-delete.
+  //
+  // Spreading `...process.env` handed every secret in the developer's shell to five subprocesses,
+  // and — more concretely — leaked CLAUDEWATCH_TELEMETRY and CLAUDEWATCH_VERIFY_TIMEOUT_MS into
+  // the fixture, so a developer with a short timeout set ran a different test than CI did. The
+  // reasoning that justified deleting the switch applies just as well to those. (sdlc/021
+  // security pass, S7.)
   const childEnv: Record<string, string | undefined> = {
-    ...process.env,
+    PATH: process.env.PATH,
+    TMPDIR: process.env.TMPDIR,
     HOME: fixture.home,
     USERPROFILE: fixture.home,
+    ...env,
   };
-  delete childEnv[VERIFY_METRICS_ENV];
-  Object.assign(childEnv, env);
 
   const proc = spawnSync('bun', ['run', VERIFY], {
     cwd: fixture.dir,
@@ -176,7 +191,11 @@ describe('A5/A6/A7 — the switch against the real script', () => {
       expect(existsSync(spool(f.home))).toBe(true);
       const lines = readFileSync(spool(f.home), 'utf-8').trim().split('\n').filter(Boolean);
       expect(lines).toHaveLength(1);
-      const ev = JSON.parse(lines[0]!) as { kind: string; source: string };
+      // Narrowed rather than `as`-asserted — a new instance of the standing item in
+      // docs/audit-report.md, even in test code. (sdlc/021 security pass, S5.)
+      const parsed: unknown = JSON.parse(lines[0]!);
+      expect(typeof parsed === 'object' && parsed !== null).toBe(true);
+      const ev = parsed as Record<string, unknown>;
       expect(ev.kind).toBe('verify_run');
       expect(ev.source).toBe('sdlc');
     } finally {

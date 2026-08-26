@@ -11,13 +11,18 @@ Type=oneshot
 WorkingDirectory=%h/claudewatch
 EnvironmentFile=-%h/.config/claudewatch/metrics.env
 
-# AFTER EnvironmentFile, deliberately: `Environment=` wins over both that file and anything
-# inherited. ExecStart runs `bash -lc`, a LOGIN shell, so without this line an
-# `export CLAUDEWATCH_VERIFY_METRICS=0` in ~/.profile would silently stop the hourly series
-# with no error and no gap marker.
+# AFTER EnvironmentFile, deliberately: `Environment=` beats that file.
+#
+# It does NOT beat ~/.profile. An earlier version of this comment claimed it did. ExecStart runs
+# `bash -lc`, a LOGIN shell, and the profile is sourced AFTER systemd hands over the environment,
+# so `export CLAUDEWATCH_VERIFY_METRICS=0` there would overwrite this line. Verified, after the
+# sdlc/021 plan-to-diff audit called the claim out. The real defence is the inline assignment on
+# ExecStart below, which a shell startup file cannot reach.
+#
+# This line is kept for the EnvironmentFile case and for anyone reading `systemctl show`.
 #
 # `bun run verify` records nothing unless this says otherwise (sdlc/021). The gate's payload
-# now carries repo-relative source paths and test names, so recording is opt-in — and this
+# carries repo-relative source paths and test names, so recording is opt-in — and this
 # unattended loop is the machine whose owner opted in.
 Environment=CLAUDEWATCH_VERIFY_METRICS=1
 
@@ -26,7 +31,10 @@ Environment=CLAUDEWATCH_VERIFY_METRICS=1
 # This is the part that makes monitoring continuous rather than manual: every firing
 # produces a data point — including the firings that hang, since the wrapper bounds each
 # step and records a timeout rather than blocking forever.
-ExecStart=/usr/bin/env bash -lc 'git -C %h/claudewatch fetch --quiet origin && bun run verify; rc=$?; bun run %h/claudewatch/packages/metrics/src/cli-ship.ts || true; exit 0'
+# CLAUDEWATCH_VERIFY_METRICS is set INLINE, not left to Environment= above: a command-scoped
+# assignment wins over whatever ~/.profile did to the login shell. This is the line that actually
+# keeps the hourly series alive.
+ExecStart=/usr/bin/env bash -lc 'git -C %h/claudewatch fetch --quiet origin && CLAUDEWATCH_VERIFY_METRICS=1 bun run verify; rc=$?; bun run %h/claudewatch/packages/metrics/src/cli-ship.ts || true; exit 0'
 
 # Never let a red gate mark the unit failed — a failing verify IS the signal we are
 # collecting, not an infrastructure fault.

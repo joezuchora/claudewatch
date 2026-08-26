@@ -56,7 +56,9 @@ not a bug:
   the repository's own `bun run verify` gate, which carry repo-relative source paths, test names
   and a failure-type identifier — the developer's own code, never yours, and each scrubbed of
   path-shaped text before it is written. Those are **opt-in**: `bun run verify` records nothing
-  unless `CLAUDEWATCH_VERIFY_METRICS` is set, so a clone that changes nothing writes nothing. The rule above is unchanged for every event the
+  unless `CLAUDEWATCH_VERIFY_METRICS` is set to a true value (`1`, `true`, `yes`, `on`), so a
+  clone that changes nothing writes nothing. Any other value — including an unrecognised one,
+  which also prints a warning — records nothing. The rule above is unchanged for every event the
   *product* writes, and no event of any source may carry an absolute path, a home directory, a
   hostname, or a username. See `SPEC.md` §17.)
 - **No third-party runtime dependencies** in `packages/core`, which keeps the supply-chain

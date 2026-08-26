@@ -41,6 +41,11 @@ export function shouldRecordVerifyMetrics(
   if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
   if (v === '0' || v === 'false' || v === 'no' || v === 'off' || v === '') return false;
 
-  warn(`verify: unrecognised ${VERIFY_METRICS_ENV}=${raw}, not recording`);
+  // The VALUE is not echoed. Under the systemd unit this goes to journald, and an environment
+  // value is arbitrary text of arbitrary length — the one place in this change where something
+  // unsanitized could reach an output channel. Naming the accepted tokens is more useful to
+  // whoever typo'd it anyway. (sdlc/021 security pass, S6.)
+  warn(`verify: ${VERIFY_METRICS_ENV} is set to an unrecognised value, not recording. ` +
+    `Accepted: 1, true, yes, on (or 0, false, no, off to disable).`);
   return false;
 }

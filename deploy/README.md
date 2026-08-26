@@ -23,13 +23,32 @@ Then open <http://127.0.0.1:8787/>.
 | `claudewatch-sdlc-loop.timer` | Fetches, runs the instrumented gate, ships the result | hourly at :17 |
 
 The SDLC loop timer is what makes monitoring continuous. Every firing records a `verify_run`
-event whatever the outcome — **including the firings that hang**, because the gate bounds each
+event whatever the outcome — provided the opt-in below is in place — **including the firings that hang**, because the gate bounds each
 step and records a `timeout` rather than blocking forever. That is the data the hang
 investigation needs and could not previously collect.
 
-Recording is **opt-in** and the unit opts in for you: `claudewatch-sdlc-loop.service` sets
-`Environment=CLAUDEWATCH_VERIFY_METRICS=1`. Elsewhere — a clone on a laptop, a contributor's
-fork, CI — `bun run verify` records nothing unless that variable is set. The gate's payload
+Recording is **opt-in** and the unit opts in for you, by setting `CLAUDEWATCH_VERIFY_METRICS=1`
+inline on its `ExecStart` command. (It also sets `Environment=`, but that is only enough to beat
+`metrics.env` — the unit runs a login shell, and a `~/.profile` export would overwrite it. The
+inline assignment is the one that holds.)
+
+**To turn the loop's recording off**, `metrics.env` is not enough and neither is your profile —
+both are deliberately overridden. Use a drop-in:
+
+```bash
+systemctl --user edit claudewatch-sdlc-loop
+# then, in the override:
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/bin/env bash -lc 'git -C %h/claudewatch fetch --quiet origin && bun run verify; bun run %h/claudewatch/packages/metrics/src/cli-ship.ts || true; exit 0'
+```
+
+That is a real cost and it is stated rather than hidden: forcing the variable on for the
+unattended loop means the machine's owner opts out by editing a unit, not by editing a config
+file. The alternative — letting `metrics.env` win — reintroduces the silent-stop failure the
+inline assignment exists to prevent. Neither choice is free; this one at least fails loudly. Elsewhere — a clone on a laptop, a contributor's fork,
+CI — `bun run verify` records nothing unless that variable is set to a true value (`1`, `true`,
+`yes`, `on`); anything else, including an unrecognised value, records nothing. The gate's payload
 carries repo-relative source paths and test names, so it is a description of a repository, and
 the machine's owner decides whether to keep one. See `SPEC.md` §17.
 

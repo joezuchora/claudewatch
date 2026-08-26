@@ -100,8 +100,8 @@ export function scrubPaths(value: string): string {
     .replace(/[A-Za-z]:[\\/][^\s"']*/g, '<path>')
     // Home directories, unconditionally and regardless of what precedes them. §17 names these
     // explicitly, and they are the case where a username actually leaks.
-    .replace(/\/(?:home|Users)\/[^\s"']*/g, '<path>')
-    .replace(/\/root(?:\/[^\s"']*)?/g, '<path>')
+    .replace(/\/(?:home|users)\/[^\s"']*/gi, '<path>')
+    .replace(/\/root(?:\/[^\s"']*)?/gi, '<path>')
     // Then the general absolute-path rule: a slash run that BEGINS a path, i.e. whose leading
     // slash is not preceded by a path-segment character.
     //
@@ -112,8 +112,14 @@ export function scrubPaths(value: string): string {
     // exists to stop being repeated.
     //
     // The lookbehind is what keeps `A5/A6/A7`, `2026/08/26` and `3/4` intact — in those the slash
-    // follows an alphanumeric, so it continues a token rather than starting a path.
-    .replace(/(?<![A-Za-z0-9._-])\/[^\s"'/]+(?:\/[^\s"'/]*)+/g, '<path>');
+    // follows an ALPHANUMERIC, so it continues a token rather than starting a path.
+    //
+    // The class is alphanumerics only. It first also held `.`, `_` and `-`, and the sdlc/021
+    // security pass found that `foo-/opt/secrets/key` and `report.-/var/secrets/x` walked
+    // straight through — a second, narrower hole in the same fix that had just closed eleven
+    // wider ones. Dropping those three characters costs nothing: `a.b/c/d` and `v1.2/a/b` are
+    // still preceded by an alphanumeric at the slash that matters.
+    .replace(/(?<![A-Za-z0-9])\/[^\s"'/]+(?:\/[^\s"'/]*)+/g, '<path>');
 }
 
 /**
