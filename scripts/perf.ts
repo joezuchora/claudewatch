@@ -1,0 +1,204 @@
+#!/usr/bin/env bun
+/**
+ * Measure the compiled statusline against SPEC.md §11.7's cache-hit budget.
+ *
+ * The hard part is not timing — it is not measuring the wrong thing. Three of this loop's
+ * blocking review findings were about the measurement silently degrading into something else,
+ * so each has a mechanical guard rather than a comment:
+ *
+ *   1. If the seeded cache is ever rejected, `main()` falls through to `resolveCredentials()`
+ *      and every sample becomes an authenticated API call — against the user's REAL token, at
+ *      ~200 requests a run. Sample 1 then writes a valid envelope, samples 2..N look like
+ *      normal cache hits, and the script reports a pass. Guarded by an isolated HOME holding a
+ *      fixture credential, plus a cache-hit assertion.
+ *   2. The spool lives under the cache dir, so isolating HOME guarantees an empty spool.
+ *      Telemetry state is therefore pinned in the child env and named in the budget, rather
+ *      than inherited from whatever the operator happens to have configured.
+ *   3. A p95 over 40 samples is the 38th order statistic wearing a percentile's name. Below
+ *      200 samples the p95 verdict is declined, not estimated.
+ *
+ * Exit codes: 0 every evaluated budget holds; 1 a budget was breached; 2 could not measure.
+ * A missing binary must never read as a pass.
+ */
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, existsSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { percentile } from '../packages/metrics/src/anomaly.js';
+
+/** SPEC.md §11.7. p50 is the live tripwire; p95 is a regression ceiling. See sdlc/013. */
+export const BUDGET_P50_MS = 50;
+export const BUDGET_P95_MS = 100;
+/** Below this the p95 verdict is declined. The budget is defined over >= 200 samples. */
+export const P95_MIN_SAMPLES = 200;
+/** Below this nothing is evaluated at all. */
+export const MIN_SAMPLES = 30;
+const WARMUP = 5;
+const SAMPLE_TIMEOUT_MS = 5_000;
+
+const DEFAULT_BIN = join(import.meta.dir, '..', 'packages', 'statusline', 'dist', 'claudewatch');
+
+export interface Verdict {
+  label: string;
+  observedMs: number | null;
+  budgetMs: number;
+  ok: boolean;
+  evaluated: boolean;
+  reason?: string;
+}
+
+/**
+ * Pure, so every pass/fail case is testable without spawning anything. The spawning half is
+ * what makes this script slow; the deciding half is what makes it wrong or right.
+ */
+export function evaluate(
+  sorted: number[],
+  budgets: { p50: number; p95: number },
+): Verdict[] {
+  const n = sorted.length;
+  const p50 = percentile(sorted, 0.5);
+  const p95 = percentile(sorted, 0.95);
+  const p95Evaluated = n >= P95_MIN_SAMPLES;
+  return [
+    { label: 'p50', observedMs: p50, budgetMs: budgets.p50, evaluated: true,
+      ok: p50 !== null && p50 < budgets.p50 },
+    { label: 'p95', observedMs: p95, budgetMs: budgets.p95, evaluated: p95Evaluated,
+      ok: !p95Evaluated || (p95 !== null && p95 < budgets.p95),
+      ...(p95Evaluated ? {} : { reason: `not evaluated (n<${P95_MIN_SAMPLES})` }) },
+  ];
+}
+
+/**
+ * An isolated HOME holding a fixture credential and a fresh v2 cache envelope.
+ * Same shape as packages/statusline/src/smoke.test.ts's helper, deliberately: an earlier draft
+ * of this script invented an env var that did not exist.
+ */
+export function makeSandbox(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cw-perf-'));
+  mkdirSync(join(dir, '.claude'), { recursive: true });
+  mkdirSync(join(dir, '.cache', 'claudewatch'), { recursive: true });
+
+  const creds = join(dir, '.claude', '.credentials.json');
+  writeFileSync(creds, JSON.stringify({
+    claudeAiOauth: {
+      accessToken: 'sk-ant-oat01-PERF-FIXTURE-NOT-REAL',
+      refreshToken: 'r',
+      expiresAt: 4102444800000,
+    },
+  }));
+  chmodSync(creds, 0o600);
+
+  writeFileSync(join(dir, '.cache', 'claudewatch', 'usage.json'), JSON.stringify({
+    version: 2, cooldownUntil: null, lastErrorClass: null,
+    snapshot: {
+      fetchedAt: new Date().toISOString(),
+      source: { usageEndpoint: 'success' }, authState: 'valid', tier: 'standard',
+      fiveHour: { utilizationPct: 42, resetsAt: '2099-01-01T00:00:00.000Z' },
+      sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
+      sevenDayOpus: { utilizationPct: null, resetsAt: null }, enterprise: null,
+      display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 42 },
+      freshness: { isStale: false, staleReason: null, ageSeconds: 0 },
+      rawMetadata: { normalizationWarnings: [] },
+    },
+  }));
+  return dir;
+}
+
+class MeasureError extends Error {}
+
+export function measure(bin: string, samples: number): number[] {
+  if (!existsSync(bin)) {
+    throw new MeasureError(
+      `binary not found: ${bin}\nBuild it first: bun run --filter @claudewatch/statusline build`,
+    );
+  }
+  const home = makeSandbox();
+  const cachePath = join(home, '.cache', 'claudewatch', 'usage.json');
+  const seededMtime = statSync(cachePath).mtimeMs;
+  const env = { ...process.env, HOME: home, CLAUDEWATCH_TELEMETRY: '0' } as Record<string, string>;
+
+  const one = (index: number): number => {
+    const t0 = Bun.nanoseconds();
+    const r = Bun.spawnSync([bin], {
+      stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', env, timeout: SAMPLE_TIMEOUT_MS,
+    });
+    const ms = (Bun.nanoseconds() - t0) / 1e6;
+    if (r.exitCode === null) throw new MeasureError(`sample ${index} timed out after ${SAMPLE_TIMEOUT_MS}ms`);
+    if (r.exitCode !== 0) {
+      throw new MeasureError(
+        `sample ${index} exited ${r.exitCode}. A binary that fails is not a binary that is fast.`,
+      );
+    }
+    return ms;
+  };
+
+  try {
+    for (let i = 0; i < WARMUP; i++) one(-1);
+    const times: number[] = [];
+    for (let i = 0; i < samples; i++) times.push(one(i));
+
+    // Every cache-miss path calls writeCache. If the seed was ever rejected we measured the
+    // fetch path, which is not a slow measurement — it is a wrong one.
+    if (statSync(cachePath).mtimeMs !== seededMtime) {
+      throw new MeasureError(
+        'the seeded cache was rewritten, so these samples are not cache hits. Refusing to report them.',
+      );
+    }
+    return times.sort((a, b) => a - b);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+// --- CLI ---
+
+function flag(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  return i === -1 ? undefined : process.argv[i + 1];
+}
+const has = (name: string): boolean => process.argv.includes(`--${name}`);
+
+if (import.meta.main) {
+  const samples = Number(flag('samples') ?? 200);
+  const bin = flag('bin') ?? DEFAULT_BIN;
+  const budgets = {
+    p50: Number(flag('budget-p50') ?? BUDGET_P50_MS),
+    p95: Number(flag('budget-p95') ?? BUDGET_P95_MS),
+  };
+
+  if (!Number.isFinite(samples) || samples < MIN_SAMPLES) {
+    console.error(`--samples must be at least ${MIN_SAMPLES}; a percentile over fewer is the maximum wearing a percentile's name.`);
+    process.exit(2);
+  }
+
+  let sorted: number[];
+  try {
+    sorted = measure(bin, samples);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(2);
+  }
+
+  const at = (q: number) => percentile(sorted, q)!.toFixed(1);
+  const dist = {
+    samples: sorted.length,
+    p50: Number(at(0.5)), p90: Number(at(0.9)), p95: Number(at(0.95)),
+    p99: Number(at(0.99)), max: Number(sorted[sorted.length - 1]!.toFixed(1)),
+  };
+
+  let verdicts = evaluate(sorted, budgets);
+  if (has('p50-only')) verdicts = verdicts.filter((v) => v.label === 'p50');
+
+  if (has('json')) {
+    console.log(JSON.stringify({ ...dist, verdicts }, null, 2));
+  } else {
+    console.log(
+      `n=${dist.samples}  p50=${dist.p50}  p90=${dist.p90}  p95=${dist.p95}  p99=${dist.p99}  max=${dist.max}`,
+    );
+    for (const v of verdicts) {
+      if (!v.evaluated) { console.log(`  ${v.label}: ${v.reason}`); continue; }
+      console.log(`  ${v.label}: ${v.observedMs!.toFixed(1)}ms against ${v.budgetMs}ms — ${v.ok ? 'ok' : 'BREACH'}`);
+    }
+  }
+
+  process.exit(verdicts.some((v) => v.evaluated && !v.ok) ? 1 : 0);
+}

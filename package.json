@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "test": "bun test",
     "build": "bun run --filter @claudewatch/core build && bun run --filter @claudewatch/statusline build && bun run --filter claudewatch-vscode build",
+    "perf": "bun run scripts/perf.ts",
     "verify": "bun run scripts/verify.ts",
     "install-statusline": "bun run --filter @claudewatch/statusline install-statusline",
     "upgrade-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/upgrade-all.ps1",

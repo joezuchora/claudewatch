@@ -2,9 +2,18 @@
  * Local-spool telemetry emitter.
  *
  * The product NEVER opens a socket for telemetry. It appends one JSON line to a local file
- * and returns; a separate agent the user runs ships it. This is forced by SPEC.md §11.7's
- * 50ms cache-hit budget — measured startup floor is already 25-40ms, leaving ~10-25ms of
- * headroom, which is not enough for DNS + TLS + connect. Measured append cost: 0.003ms.
+ * and returns; a separate agent the user runs ships it.
+ *
+ * Two reasons, and the ORDER matters. First and decisive: a product with no telemetry
+ * destination has none to be misconfigured, redirected, or intercepted — that is the SPEC.md
+ * §12 trust boundary, and it does not depend on any timing number. Second, supporting: it also
+ * fits SPEC.md §11.7's p50 budget, against a measured startup floor of ~41ms and an append cost
+ * of 0.003ms.
+ *
+ * The original note here rested the whole argument on "~10-25ms of headroom" under a 50ms
+ * budget. sdlc/013 restated that budget with a percentile and added a 100ms p95 ceiling, which
+ * would have left a security rationale quietly resting on arithmetic that no longer closes. The
+ * architecture is the argument; the timing is corroboration.
  *
  * SECURITY BOUNDARY. Every payload leaf is a number, a boolean, or a member of a closed
  * enumeration. There are NO free-text fields, because the obvious leak vector here is a
@@ -23,7 +32,7 @@ export const TELEMETRY_SCHEMA_VERSION = 1;
 export const MAX_LINE_BYTES = 4096;
 
 /** Byte cap on the spool. Bytes only — a line-count cap would mean reading up to 5MB on a
- *  path budgeted at 50ms. */
+ *  path budgeted at a 50ms p50 (SPEC.md §11.7), which a stat() satisfies and a read does not. */
 export const MAX_SPOOL_BYTES = 5 * 1024 * 1024;
 
 export type MetricSource = 'product' | 'sdlc';

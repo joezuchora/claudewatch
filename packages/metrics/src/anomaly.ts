@@ -113,7 +113,14 @@ export type DetectResult =
 
 const HOUR_MS = 3_600_000;
 
-function percentile(sorted: number[], p: number): number | null {
+/**
+ * Nearest-rank: `sorted[floor(q * n)]`. Exported so `scripts/perf.ts` shares this exact
+ * definition rather than writing a third copy — linear interpolation would differ by one order
+ * statistic, which is precisely the kind of "two people measuring the same thing disagree" that
+ * sdlc/013 exists to remove. `store.ts` still has its own copy; that duplication predates this
+ * and is recorded in sdlc/013's review rather than fixed here.
+ */
+export function percentile(sorted: number[], p: number): number | null {
   if (sorted.length === 0) return null;
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? null;
 }

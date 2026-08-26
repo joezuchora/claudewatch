@@ -98,4 +98,18 @@ rather than quietly outgrown.
 ## Verification gate
 
 No change is reviewable until `bun run verify` exits 0. The command runs typecheck, lint,
-test, and build. `review.md` records the actual output, not a claim about it.
+test, build, and the p50 half of the performance budget. `review.md` records the actual output,
+not a claim about it.
+
+### The full performance measurement
+
+`verify` checks p50 at n=40. Forty samples supports a median and not a tail, so the p95 half is
+manual — and a budget checked only when someone remembers is the state `sdlc/013` was opened to
+fix. So it is a required step, not an optional one:
+
+> A change touching `packages/statusline/src/main.ts`'s startup path, `packages/core/src/cache.ts`,
+> `packages/core/src/telemetry.ts`'s emit path, or the statusline build flags **must** record the
+> output of `bun run perf` (full n≥200) in its `review.md`.
+
+Paste the distribution, not a verdict. A single number with no distribution beside it is what
+`SPEC.md §11.7` used to be.

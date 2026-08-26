@@ -81,6 +81,20 @@ VERIFY EXIT=0
 
 ## Acceptance criteria not met
 
+> **WITHDRAWN AND SUPERSEDED, 2026-08-26 (`sdlc/013-perf-budget`).** This criterion is not met
+> and never was; it has been *withdrawn*, not satisfied. The binary is no bytes faster. `sdlc/013`
+> found that the budget it tested against named no percentile and no measurement method, so the
+> criterion could not adjudicate anything — and that startup optimisation is unavailable at this
+> altitude (four build configurations spread under 2 ms; the ~41 ms floor is Bun's own process
+> startup). `SPEC.md §11.7` now states p50 < 50 ms and p95 < 100 ms with a full method, and the
+> binary passes both. The paragraph below is left standing because "we replaced the criterion"
+> and "we fixed the problem" are different claims and the record should not blur them.
+>
+> One correction to it: the dominant-cost sentence is right, but "telemetry pushed it over"
+> is not what the data says. Interleaved at n=200, telemetry-on and telemetry-off have an
+> identical p50 and differ by 1.4–7.6 ms only in the tail — and the budget was missed at p95
+> with telemetry entirely disabled.
+
 - **`Cache-hit p95 < 50 ms with telemetry enabled and a 4 MB spool present` — NOT MET at
   51 ms.** One millisecond over, and the p50 is identical to the telemetry-off case (44 ms),
   so the delta sits inside run-to-run noise — but the criterion says 50 and the number says

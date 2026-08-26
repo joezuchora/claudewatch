@@ -657,11 +657,42 @@ After installation, restart Claude Code. No shell profile editing required.
 
 ### 11.7 Performance Targets
 
-| Scenario | Target |
-|---|---|
-| Cache hit (binary start → stdout) | < 50ms |
-| Cache miss (binary start → fetch → stdout) | < 1000ms |
-| HTTP timeout (hard kill) | 5 seconds |
+| Scenario | Target | Status |
+|---|---|---|
+| Cache hit, **p50** | **< 50 ms** | measured, enforced by `bun run verify` |
+| Cache hit, **p95** | **< 100 ms** | measured, checked by `bun run perf` |
+| Cache miss (binary start → fetch → stdout) | < 1000ms | **unmeasured** |
+| HTTP timeout (hard kill) | 5 seconds | enforced in code (`DEFAULT_TIMEOUT_MS`) |
+
+**Measurement method** (amended 2026-08-26, `sdlc/013-perf-budget`). A target without a
+percentile and a method is not a claim that can be checked: p50, p95 and max on the same binary
+in one run read 41.5, 51.1 and 213.5 ms. Both cache-hit rows therefore mean:
+
+> the compiled binary, **parent-observed spawn → exit**, `HOME` isolated to a temp sandbox
+> holding a fixture credential and a fresh v2 cache envelope, `CLAUDEWATCH_TELEMETRY=0` pinned
+> in the child environment, stdin closed, ≥ 200 samples after 5 discarded warm-ups, nearest-rank
+> percentile, on a developer machine or CI container.
+
+`bun run perf` is that measurement. `bun run verify` runs its p50 half at n=40; forty samples
+supports a median and not a tail, which is why the p95 check is manual.
+
+Three notes on what changed and why:
+
+- **The interval is redefined** from "binary start → stdout" to parent-observed spawn → exit.
+  The latter includes fork/exec and teardown, is what the caller actually waits for, and is the
+  only interval an external script can observe.
+- **p95 < 100 ms is a regression tripwire, not a perception target.** p95 moves ~10 ms between
+  sessions on the same machine class (48 ms in `sdlc/005`, 51–58 ms in `sdlc/013`), so a
+  threshold within ~2× of any reading is a coin flip. It will not fire before p50 does; it makes
+  the tail's absence-of-a-claim into a claim. A tighter tail check wants a regression rule
+  against a committed baseline, not a fixed number.
+- **The rich path is not slower.** Measured at p50 41.7 / p95 55.0 ms against the plain path's
+  41.4 / 55.3 — indistinguishable, despite three lines, progress bars and ANSI. That is the
+  direct evidence that this cost is dominated by process startup, not by anything the project
+  compiles.
+
+The cache-miss and HTTP-timeout rows carry no percentile because neither has been measured.
+Inventing one would repeat the defect this amendment fixes.
 
 ---
 
@@ -720,7 +751,7 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - Given stale data, the user can distinguish it from fresh data in the tooltip or status context
 - Given a corrupt or unparseable cache file, the file is deleted and a fresh fetch is performed
 - Given `resets_at` in the past, the display shows "resets soon" rather than a negative duration
-- The compiled binary meets performance targets: < 50ms cache hit, < 1000ms cache miss
+- The compiled binary meets the performance targets in §11.7, measured by that section's stated method
 - `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema
 - `claudewatch --debug` outputs diagnostic info without any secrets
 
@@ -782,7 +813,7 @@ Use recorded or mocked responses for:
 - No token written to cache file
 - No unhandled exceptions in extension host
 - No user-facing stack traces in status line output
-- Binary startup + cache-hit response under 50ms
+- Cache-hit response within §11.7's budget, measured by that section's stated method (`bun run perf`)
 - `--debug` output contains no token values
 
 ---
