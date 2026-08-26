@@ -2,9 +2,38 @@
 
 - **ID:** 013-perf-budget
 - **Stage:** 1 — Plan
-- **Status:** draft
+- **Status:** amended after review — see the correction below
 - **Author:** carried from `sdlc/005-statusline-tty-stdin/review.md`, "Acceptance criteria not met"
 - **Date:** 2026-08-26
+
+## Correction, 2026-08-26 (Design stage)
+
+The `spec-reviewer` returned six blocking findings against the first draft of this pair. Four
+were errors in the text below, left standing rather than edited away:
+
+1. **"Telemetry is not the cause" is inferred from the one statistic insensitive to the
+   effect.** p50 is identical, but telemetry-on is monotonically worse in *every* tail bucket —
+   p90 by 6.0 ms, p95 by 1.4 ms, p99 by 7.6 ms — and the criterion loop 005 failed was a **p95**
+   criterion. `emit()` does a `statSync` plus `appendFileSync` on a 4 MB file, which is exactly
+   a tail-heavy cost. The defensible claim is the *other* one this document already makes: the
+   budget is missed at p95 with telemetry entirely disabled, so telemetry is **not the binding
+   constraint**. It is not free.
+2. **"`SPEC.md §11.7` states one performance target" is false** — it has three rows. The
+   overstatement is unnecessary; the defect stands without it.
+3. **"a 15 ms tail" and "a 15% p95 gap" disagree.** The gap over the old budget is 7.6 ms;
+   15 ms is p95 minus p50.
+4. **"percentile, sample size and method for each target"** contradicts this document's own
+   out-of-scope section, which excludes two of the three rows.
+
+And two errors of mine that were not in the text at all:
+
+5. **The artifacts were written to `packages/statusline/sdlc/013-perf-budget/`.** An earlier
+   `cd packages/statusline` in the measurement work persisted into the next command, so the
+   whole loop landed in the wrong tree and was committed there. Moved.
+6. **`CLAUDEWATCH_CACHE_DIR`, which the spec called an existing mechanism, does not exist.**
+   `setCacheBaseDir` is an in-process setter with no env-var path, so a *spawned* binary cannot
+   use it. The spec asserted a mechanism I had not checked for. `smoke.test.ts` already solves
+   this with a temp `HOME`, which is what the revised spec reuses.
 
 ## Problem
 
