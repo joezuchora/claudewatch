@@ -101,6 +101,10 @@ Not diagnosed. What is known:
   `client.ts`'s `RETRY_DELAY_MS` being slept for real in retry tests, already recorded as a
   loop 001 follow-up.
 - Whether the hang is the same mechanism made worse, or something separate, is unknown.
+- **It does not reproduce in CI.** The first `verify` run on GitHub Actions completed in 36 s
+  end to end, including `bun install` and all three builds. So the hang is either specific to
+  this development environment or rare enough not to have surfaced yet in CI. That narrows it
+  usefully and argues against a defect in the test code itself.
 
 This matters more than its position at the bottom of this document suggests: **an
 intermittently hanging gate is a gate people learn to skip.** It should be the next
