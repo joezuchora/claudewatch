@@ -82,10 +82,34 @@ function normalizeSeparators(p: string): string {
  *
  * An absolute path outside the repo is nulled rather than recorded: it cannot be relativized,
  * and an absolute path carries a home directory and a username, which SPEC.md §17 forbids.
+ *
+ * A path that ESCAPES the root via `..` is also nulled, whether it arrived relative or was
+ * relativized into one. Found by probing this function adversarially rather than by reading it:
+ * `/home/user/claudewatch/../../../etc/passwd` starts with the root, so a prefix check alone
+ * relativizes it to `../../../etc/passwd` and records it. The realistic form of that leak is
+ * `../sibling-project/x.test.ts`, which discloses a PROJECT NAME — explicitly forbidden by §17.
+ * Bun does not emit such paths; the parser still must not be defeatable by one.
  */
+function escapesRoot(relative: string): boolean {
+  let depth = 0;
+  for (const segment of relative.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      depth--;
+      if (depth < 0) return true;
+    } else {
+      depth++;
+    }
+  }
+  return false;
+}
+
 export function relativizeFile(file: string | null, repoRoot: string): string | null {
   if (file === null || file === '') return null;
-  if (!isAbsolutePath(file)) return normalizeSeparators(file);
+  if (!isAbsolutePath(file)) {
+    const rel = normalizeSeparators(file);
+    return escapesRoot(rel) ? null : rel;
+  }
 
   const normFile = normalizeSeparators(file);
   const normRoot = normalizeSeparators(repoRoot).replace(/\/$/, '');
@@ -95,7 +119,10 @@ export function relativizeFile(file: string | null, repoRoot: string): string | 
   const a = isWindows ? normFile.toLowerCase() : normFile;
   const b = isWindows ? normRoot.toLowerCase() : normRoot;
 
-  if (a === b || a.startsWith(`${b}/`)) return normFile.slice(normRoot.length + 1);
+  if (a === b || a.startsWith(`${b}/`)) {
+    const rel = normFile.slice(normRoot.length + 1);
+    return escapesRoot(rel) ? null : rel;
+  }
   return null;
 }
 

@@ -86,6 +86,39 @@ describe('A2 — an absolute in-repo path is relativized', () => {
   });
 });
 
+describe('A5b — a path that escapes the root via .. is dropped (sdlc/020 security probe)', () => {
+  // Found by probing relativizeFile with hostile input, not by reading it. A prefix check alone
+  // accepts `<root>/../../../etc/passwd`, because it DOES start with the root -- and relativizes
+  // it to `../../../etc/passwd`. The realistic form is `../sibling-project/x.test.ts`, which
+  // discloses a project name, explicitly forbidden by SPEC.md §17.
+  const hostile = [
+    '/home/testuser/claudewatch/../../../etc/passwd',
+    '/home/testuser/claudewatch/../other-project/secret.test.ts',
+    '../../../../etc/passwd',
+    '../sibling/x.test.ts',
+  ];
+
+  for (const file of hostile) {
+    test(`${file} is nulled`, () => {
+      expect(relativizeFile(file, ROOT)).toBeNull();
+    });
+  }
+
+  test('a legitimate path containing .. that stays inside is kept', () => {
+    // The guard must reject escape, not the character sequence.
+    expect(relativizeFile('packages/core/../core/src/x.test.ts', ROOT))
+      .toBe('packages/core/../core/src/x.test.ts');
+  });
+
+  test('the entry survives with a null file, rather than vanishing', () => {
+    const xml = wrap(testcase('name="t" file="../../../etc/passwd"'));
+    const got = parseJunitFailures(xml, ROOT);
+    expect(got).toHaveLength(1);
+    expect(got[0]!.name).toBe('t');
+    expect(got[0]!.file).toBeNull();
+  });
+});
+
 describe('A3 — hostname never reaches the output', () => {
   test('two entries are parsed AND the sentinel hostname is absent', () => {
     const xml = wrap(
