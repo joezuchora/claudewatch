@@ -23,6 +23,13 @@ function mockFetch(impl: (...args: unknown[]) => Promise<Response>): void {
   globalThis.fetch = mock(impl) as unknown as typeof fetch;
 }
 
+/**
+ * sdlc/011: every failing-then-retrying case below used to pay the production 2s sleep, which
+ * was most of this file's runtime. Only the waiting changes — each test still asserts the same
+ * failure class, the same status, and the same attempt count it always did.
+ */
+const FAST = { retryDelayMs: 0 } as const;
+
 describe('contract: successful response with both windows', () => {
   const raw = {
     five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00+00:00' },
@@ -176,7 +183,7 @@ describe('contract: 429 response', () => {
 describe('contract: 5xx response', () => {
   test('500 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Internal Server Error', { status: 500 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -185,7 +192,7 @@ describe('contract: 5xx response', () => {
 
   test('502 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Bad Gateway', { status: 502 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -194,7 +201,7 @@ describe('contract: 5xx response', () => {
 
   test('503 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Service Unavailable', { status: 503 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -207,7 +214,7 @@ describe('contract: 5xx response', () => {
       callCount++;
       return new Response('Server Error', { status: 500 });
     });
-    await fetchUsage('test-token');
+    await fetchUsage('test-token', FAST);
     // 1 initial + 1 retry = 2
     expect(callCount).toBe(2);
   });
@@ -219,7 +226,7 @@ describe('contract: malformed JSON response', () => {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     // response.json() will throw on invalid JSON
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -289,7 +296,7 @@ describe('contract: network timeout', () => {
       // Simulate abort
       throw new DOMException('The operation was aborted', 'AbortError');
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -303,7 +310,7 @@ describe('contract: DNS resolution failure', () => {
     mockFetch(async () => {
       throw new TypeError('fetch failed: DNS resolution failed');
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -315,7 +322,7 @@ describe('contract: DNS resolution failure', () => {
 describe('contract: unexpected HTTP status codes', () => {
   test('403 returns unexpectedFailure', async () => {
     mockFetch(async () => new Response('Forbidden', { status: 403 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('unexpectedFailure');
@@ -325,7 +332,7 @@ describe('contract: unexpected HTTP status codes', () => {
 
   test('404 returns unexpectedFailure', async () => {
     mockFetch(async () => new Response('Not Found', { status: 404 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('unexpectedFailure');
@@ -480,7 +487,7 @@ describe('contract: retry behavior', () => {
         seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
       }), { status: 200 });
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
   });
@@ -497,7 +504,7 @@ describe('contract: retry behavior', () => {
         seven_day: { utilization: 5, resets_at: '2026-03-14T07:00:00Z' },
       }), { status: 200 });
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
   });

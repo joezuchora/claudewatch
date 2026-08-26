@@ -906,7 +906,7 @@ Create these source files:
 |---|---|
 | `src/types.ts` | `UsageSnapshot`, all enums, interfaces, `RuntimeState`, `FailureClass`, `CacheEnvelope` |
 | `src/credentials.ts` | Resolve credential file path per platform, parse JSON, extract `accessToken`, check `expiresAt` |
-| `src/client.ts` | `fetchUsage(token: string): Promise<FetchResult>` — single GET with auth headers, 5s timeout, 1 retry for 5xx/network errors |
+| `src/client.ts` | `fetchUsage(token: string, options?: FetchOptions): Promise<FetchResult>` — single GET with auth headers, 5s timeout, 1 retry for 5xx/network errors. `options` carries test-only timing overrides; production callers pass one argument, and an override may only make timing **tighter** — the documented 5s and single retry are enforced ceilings, not defaults (see `sdlc/011-injectable-timing/`). |
 | `src/normalize.ts` | `normalize(raw: unknown, fetchedAt?: string): UsageSnapshot` — validate required fields, compute primary window |
 | `src/state.ts` | `classify(snapshot: UsageSnapshot): RuntimeState` — state machine |
 | `src/thresholds.ts` | `evaluate(pct: number, warn: number, crit: number): 'normal' \| 'warning' \| 'critical'` |

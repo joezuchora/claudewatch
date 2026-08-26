@@ -57,16 +57,32 @@ meaningful — but much smaller — delay, and the spec records why.
 | `retryDelayMs: 0` | **Honoured** — zero delay is a legitimate test request, unlike a zero timeout. |
 | `maxRetries: 0` | Honoured; single attempt, no retry. |
 | Non-numeric values | Fall back to defaults rather than producing `NaN` timers. |
+| `timeoutMs` or `maxRetries` **above** the default | Clamped to the default. **Amended in Stage 5** — see below. |
+| `retryDelayMs` above the default | Clamped, by the same rule. |
+
+### Stage 5 amendment: the defaults are ceilings, not suggestions
+
+As drafted, this spec let an override make timing *looser* as well as tighter. The security
+pass pointed out what that permits: `{ timeoutMs: 600_000 }` holds a request carrying the
+user's bearer token open for ten minutes, past the hard kill SPEC §3.1 and §11.7 state, and
+`{ maxRetries: 1e9 }` turns the retry loop into a flood of authenticated requests. Latent
+rather than live — no production caller passes options — but the parameter is public core API
+via `export * from './client.js'`, so "nobody does it today" is not a property, it is a habit.
+
+An override may therefore only make timing **tighter**. Every override this change exists to
+serve asks for shorter, so the ceiling costs it nothing, and the numbers SPEC §3.1, §11.7 and §9.3
+document become enforced rather than merely default.
 
 ## Acceptance criteria
 
-- [ ] `fetchUsage(token)` with no options behaves exactly as before — existing tests pass unmodified
-- [ ] `retryDelayMs` override is honoured, and `attempts: 2` is still asserted — tested
-- [ ] `timeoutMs` override is honoured, and `failureClass: 'timeout'` still results — tested
-- [ ] `timeoutMs: 0` falls back to the default; `retryDelayMs: 0` does not — tested
-- [ ] Non-numeric input falls back to defaults — tested
-- [ ] **The gate's test step drops materially** — measured before and after, recorded in `review.md`
-- [ ] `bun run verify` exits 0
+- [x] `fetchUsage(token)` with no options behaves exactly as before — every existing assertion is unmodified
+- [x] `retryDelayMs` override is honoured, and `attempts: 2` is still asserted — tested
+- [x] `timeoutMs` override is honoured, and `failureClass: 'timeout'` still results — tested
+- [x] `timeoutMs: 0` falls back to the default; `retryDelayMs: 0` does not — tested
+- [x] Non-numeric input falls back to defaults — tested, including a non-number smuggled past the types
+- [x] An override cannot make timing looser than the default — tested (Stage 5 amendment)
+- [x] **The gate's test step drops materially** — 57.3 s → 3.4 s, both measured on the same machine minutes apart; recorded in `review.md`
+- [x] `bun run verify` exits 0 — 5.5 s, down from 59.5 s
 
 ## Rejected alternatives
 

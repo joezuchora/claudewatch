@@ -90,6 +90,21 @@ becomes something people route around.
 
 ## Known defect in the gate itself
 
+> **Update 2026-08-26 (loop 011) — the baseline this section is written against has moved.**
+>
+> Everything below reasons about a gate whose typical run was 35–60 s, ~90% of it the test
+> step. Loop 011 took the test step to 3.4 s by removing 48 s of `setTimeout` that no test
+> needed. Two consequences worth stating before anyone reads further:
+>
+> 1. **The 550 s hang, if it recurs, is now a ~100× outlier rather than a ~10× one.** That
+>    makes it far easier to see, and it makes the anomaly detector's `durationOutlierMultiple`
+>    of 4 fire on things that are not it. The detector's baseline is rolling, so it will
+>    re-anchor on its own — but the first few post-011 verify runs will look like a step change
+>    to it, because they are one.
+> 2. **Nothing below is retracted.** The hang was never explained, and a faster gate does not
+>    explain it. It remains blocked on data, and the smaller baseline is a better instrument
+>    for catching it, not evidence that it is gone.
+
 > **Update 2026-08-26 06:30.** Two things have been ruled out since this was written.
 >
 > **Systematic degradation is not happening.** The suite's wall clock grew from 26 s to 36 s,
@@ -199,3 +214,37 @@ documentation claimed to support before trusting them. No stage of the loop foun
 loop's contribution was that once found, it could not be quietly absorbed into an unrelated
 change — it got an intent, a spec that had to name the root cause, and a review that recorded
 what was still broken afterwards.
+
+## The gate got 10.8× faster by being made testable, not by being optimised (loop 011)
+
+`bun run verify` took **59.5 s**. It now takes **5.5 s**, and covers 17 more cases than before.
+
+None of that came from making anything faster. 48 of the 57 test-seconds were `setTimeout`
+doing nothing: the production 5 s HTTP timeout and 2 s retry delay were module constants, so
+the only way a test could exercise a retry or an abort was to sit through the real one. Two
+abort tests alone cost 12 s each. The fix was one optional parameter — timing is a property of
+a *call*, not of a process — and then passing fast timings from the tests that were waiting.
+
+The interesting part is the misdiagnosis. This sat on the queue as "the gate is slow," a
+performance item. It was a **testability** problem the whole time, and the cure was a design
+change rather than an optimisation. That reframing is worth remembering: when a suite is slow
+and nothing in it is computing anything, the constants are usually the reason.
+
+Two more things this loop is on the record for:
+
+**The security pass improved the design, not just the safety.** It arrived to check for token
+leaks, found none, and instead noticed the new parameter was unbounded in the wrong direction:
+`{ timeoutMs: 600_000 }` would hold a request carrying the user's bearer token open for ten
+minutes past the documented hard kill, and `{ maxRetries: 1e9 }` would turn the retry loop into
+a flood of authenticated requests. Both latent — no production caller passes options — but the
+parameter is public core API, and "nobody does it today" is a habit, not a property. The
+change became "defaults are **ceilings** you may only tighten," which is a stronger contract
+than the spec asked for and costs nothing, since every override this loop exists to serve asks
+for shorter. Running the pass on a change that looks like a test-speed tweak is what earned it.
+
+**Both wrong citations were caught by the auditor, not by the gate.** `SPEC §11.5` — cited in
+`client.ts` as the source of the 5 s hard kill — is *Exit Codes*; the hard kill is §3.1 and
+§11.7. And the `SPEC.md` amendment landed in §18.3 while the plan and review both claimed §8.3.
+Typecheck, lint, tests and build were all green with a wrong pointer shipped in production
+source. Prose that cross-references a spec is unverifiable by any tool this repo runs, which
+makes it exactly the sort of thing an adversarial reader has to be pointed at deliberately.

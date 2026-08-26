@@ -23,6 +23,14 @@ const spoolLines = (): Array<Record<string, any>> => {
 };
 const kinds = () => spoolLines().map((e) => e.kind);
 
+/**
+ * sdlc/011: fast timings for the cases that would otherwise sit in a real setTimeout. The
+ * assertions are untouched — a retry is still observed, and a timeout still classifies as one.
+ * The 5xx durationMs test below deliberately does NOT use these; see the note there.
+ */
+const FAST = { retryDelayMs: 0 } as const;
+const FAST_TIMEOUT = { timeoutMs: 40, retryDelayMs: 0 } as const;
+
 describe('telemetry call sites', () => {
   let cleanup: () => void;
   beforeEach(() => {
@@ -145,6 +153,9 @@ describe('telemetry call sites', () => {
     });
 
     test('a 5xx retries, and durationMs EXCLUDES the 2s retry sleep', async () => {
+      // Deliberately NOT given FAST (sdlc/011). This test's whole subject is that the reported
+      // duration omits the sleep; with a near-zero delay the assertion would pass no matter
+      // what the code did. It pays the real 2s, and that is the point.
       mockFetch(async () => new Response('boom', { status: 503 }));
       const started = Date.now();
       await fetchUsage('sk-ant-oat01-FAKE');
@@ -163,7 +174,7 @@ describe('telemetry call sites', () => {
 
     test('a network error reports the network class', async () => {
       mockFetch(async () => { throw new Error('connect ECONNREFUSED 10.0.0.1:443'); });
-      await fetchUsage('sk-ant-oat01-FAKE');
+      await fetchUsage('sk-ant-oat01-FAKE', FAST);
       const events = spoolLines().filter((e) => e.kind === 'fetch_result');
       expect(events[0]!.payload.statusClass).toBe('network');
       expect(events[0]!.ok).toBe(false);
@@ -186,21 +197,21 @@ describe('telemetry call sites', () => {
             rej(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })));
         })) as unknown as typeof fetch;
 
-      const result = await fetchUsage('sk-ant-oat01-FAKE');
+      const result = await fetchUsage('sk-ant-oat01-FAKE', FAST_TIMEOUT);
       expect(result.ok).toBe(false);
       // FetchResult is a discriminated union; the success variant has no failureClass.
       if (!result.ok) {
         expect(result.failureClass).toBe('timeout');
         expect(result.status).toBeNull();
       }
-    }, 30_000);
+    });
 
     test('a plain network error still reports serviceUnavailable', async () => {
       globalThis.fetch = mock(async () => {
         throw new Error('connect ECONNREFUSED 10.0.0.1:443');
       }) as unknown as typeof fetch;
 
-      const result = await fetchUsage('sk-ant-oat01-FAKE');
+      const result = await fetchUsage('sk-ant-oat01-FAKE', FAST);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.failureClass).toBe('serviceUnavailable');
     });
@@ -212,9 +223,9 @@ describe('telemetry call sites', () => {
             rej(Object.assign(new Error('aborted'), { name: 'AbortError' })));
         })) as unknown as typeof fetch;
 
-      await fetchUsage('sk-ant-oat01-FAKE');
+      await fetchUsage('sk-ant-oat01-FAKE', FAST_TIMEOUT);
       const events = spoolLines().filter((e) => e.kind === 'fetch_result');
       expect(events[0]!.payload.statusClass).toBe('timeout');
-    }, 30_000);
+    });
   });
 });
