@@ -1,4 +1,4 @@
-# Intent: the statusline must not hang when run interactively
+# Intent: the statusline must not hang on any stdin state
 
 - **ID:** 005-statusline-tty-stdin
 - **Stage:** 1 — Plan
@@ -12,12 +12,18 @@
 
 ## Problem
 
-The compiled statusline binary reads session JSON from stdin unconditionally. When stdin is a
-terminal there is no EOF, so the read never resolves and the process hangs indefinitely — no
-output, no error, no exit.
+The compiled statusline binary blocks forever when stdin is open, silent, and never closed.
 
-`SPEC.md §2.4` specifies the piped invocation Claude Code uses and never names the interactive
-one, so nothing in the spec, the tests, or CI covers it.
+`main.ts:75` guards `process.stdin.isTTY`, but that property is `undefined` — not `true` — for
+a socket or an inherited pipe. The guard does not fire, `readSync` at `main.ts:82` blocks, and
+the process never produces output, never errors, and never exits.
+
+Established by probing the descriptor: without redirection `fd0 -> socket:[3660]`, and the
+read blocks; with `< /dev/null` it returns 0 immediately.
+
+The guard tests one member of the failing set. The set is **any stdin that will not reach
+EOF** — sockets, unwritten pipes, and some supervisor and CI harnesses, of which a terminal is
+merely the case already covered.
 
 ## Who is affected
 
@@ -37,8 +43,8 @@ gap for everything after it.
 
 ## What "done" means
 
-- [ ] Running the compiled binary in a terminal with no piped input prints a status line and
-      exits, within the `SPEC.md §11.7` budget
+- [ ] Running the compiled binary with **any** stdin state — terminal, socket, closed,
+      unwritten pipe — prints a status line and exits rather than hanging
 - [ ] Running it with piped session JSON behaves exactly as it does today — the rich
       session-aware output is unchanged
 - [ ] Running it with stdin closed behaves exactly as it does today
@@ -55,11 +61,12 @@ gap for everything after it.
 
 ## Open questions
 
-- **Should there be an explicit non-interactive flag** (`--no-session`), or is TTY detection
-  sufficient on its own? Resolved in Design. `SPEC.md §11.4`'s flag list is contractual, so
-  adding one is an amendment rather than an implementation detail.
-- **Is a bounded stdin read a better fix than TTY detection**, given a pipe that is opened but
-  never written would hang identically? Resolved in Design.
+- **TTY detection is definitively insufficient** — that is the defect, not the fix. The
+  question is what replaces it: a descriptor-type check (`fstat().isFIFO()`), a bounded read
+  with a deadline, or both. Resolved in Design.
+- **What deadline is safe** given `SPEC.md §11.7` budgets 50 ms to stdout, when a bounded read
+  could add to it? Resolved in Design.
+- **Should `SPEC.md §11.4`'s contractual flag list gain `--no-session`?** Resolved in Design.
 
 ---
 

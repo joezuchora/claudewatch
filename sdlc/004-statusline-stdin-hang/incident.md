@@ -1,8 +1,8 @@
-# Incident: the statusline binary hangs forever when stdin is a terminal
+# Incident: the statusline binary hangs forever on a non-TTY stdin that never reaches EOF
 
 - **ID:** 004-statusline-stdin-hang
 - **Stage:** 6 — Maintain
-- **Status:** open
+- **Status:** root cause corrected 2026-08-26 04:10 UTC — see below
 - **Detected:** 2026-08-26 03:38 UTC — while verifying loop 003's telemetry against the
   compiled binary
 - **Severity:** High for first-run experience. The tool appears completely broken, silently.
@@ -54,26 +54,50 @@ feature shipped.
 
 ## Root cause
 
-`main.ts` reads session JSON from stdin unconditionally on its normal path. When stdin is a
-TTY there is no EOF, so the read never resolves and the process waits indefinitely.
+> **CORRECTED 2026-08-26 04:10 UTC. The first diagnosis in this record was wrong**, and it is
+> left visible below rather than edited away, because how it was wrong is the useful part.
+>
+> **What I originally wrote:** "`main.ts` reads session JSON from stdin unconditionally. When
+> stdin is a TTY there is no EOF, so the read never resolves."
+>
+> **Why that was wrong:** `main.ts:75` already contains `if (process.stdin.isTTY) return null;`.
+> The TTY case is handled and always has been. I saw a hang, reached for the most familiar
+> explanation, and wrote it down without opening the function — which is precisely what this
+> repository's own `incident.md` template warns against two lines from the top: *"Resist
+> writing the cause you already suspect; a wrong early theory is sticky."*
 
-`SPEC.md §2.4` specifies session data arriving as piped stdin JSON, and `§11.7` budgets 50 ms
-from start to stdout. Neither says what happens when stdin is a terminal — the spec assumed
-the Claude Code invocation path and never named the interactive one.
+**The actual mechanism**, established by probing the file descriptor rather than reasoning
+about it:
+
+```
+$ bun run probe.ts          # no redirection
+fd0 -> socket:[3660] | isTTY=undefined     → readSync blocks forever
+
+$ bun run probe.ts < /dev/null
+fd0 -> /dev/null | isTTY=undefined         → readSync returns 0 after 0ms
+```
+
+`process.stdin.isTTY` is `undefined` — **not** `true` — when stdin is a socket. The guard at
+`main.ts:75` therefore does not fire, and `readSync(0, …)` at `main.ts:82` blocks indefinitely
+waiting for bytes on a descriptor that is open, will never be written to, and will never be
+closed.
+
+The guard tests for the one non-EOF case its author thought of. The failing set is larger:
+**any stdin that is open, silent, and never closed.** In practice that means an inherited
+socket, a pipe whose writer never writes, and some supervisor and CI harnesses. A terminal is
+one member of that set, and it happens to be the member already handled.
 
 - **Introduced by:** the session-aware rich statusline (`SPEC.md §2.4`), predating the loop
 - **Stage that should have caught it:** Design, then Test
-- **Why it didn't:** the spec described only the piped invocation, so no acceptance criterion
-  covered a TTY stdin. The test suite mocks `main()`'s dependencies and never spawns the
-  compiled binary, so no test could observe it. `docs/audit-report.md` reports 98.89% line
-  coverage — this path is *covered* and still broken, because coverage measures lines
-  executed, not conditions the program is run under.
+- **Why it didn't:** `SPEC.md §2.4` specifies the piped invocation Claude Code uses and names
+  no other. The guard was written against the one alternative its author imagined rather than
+  against the actual condition — "stdin will not reach EOF" — and no test spawns the compiled
+  binary at all, so nothing could observe the difference.
 
-**The generalizable lesson**, and the reason this belongs in the record: loop 001 found a
-defect CI could not see because it ran each package in a separate process. Loop 003's B1 found
-a defect module tests could not see because the statusline has no config channel. This is the
-third instance of the same shape — **a defect invisible to every test that does not run the
-real artifact the way a user runs it.**
+**Directly relevant to shipped work:** `deploy/systemd/*.service` do not set
+`StandardInput=null` explicitly. systemd's default is `null`, so those units are not affected
+today, but they are one edit away from being so, and the same class of launcher is exactly
+where this bites.
 
 ## Mitigation
 
@@ -84,9 +108,10 @@ there is nothing bleeding. Fixing it properly is the follow-up rather than a hot
 
 | Follow-up | New intent ID | Status |
 |---|---|---|
-| Detect a TTY stdin and skip the session read, so the binary renders and exits | [`005-statusline-tty-stdin`](../005-statusline-tty-stdin/intent.md) | drafted |
+| Bound the stdin read so no descriptor state can hang the binary — TTY detection alone is insufficient | [`005-statusline-tty-stdin`](../005-statusline-tty-stdin/intent.md) | drafted |
 | Add a smoke test that runs the **compiled binary** the way a user does, covering TTY stdin, piped stdin, and closed stdin | folded into 005 | drafted |
 | Consider whether `SPEC.md §11.4`'s flag contract should gain an explicit non-interactive mode | raised in 005's open questions | open |
+| Set `StandardInput=null` explicitly in the systemd units rather than relying on the default | folded into 005 | drafted |
 
 ## What we are not changing
 
