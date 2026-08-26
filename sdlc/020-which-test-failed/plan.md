@@ -29,7 +29,7 @@ annotation moves.
 ### `scripts/junit.ts` (new)
 
 Exports `FailedTest`, `parseJunitFailures(xml, repoRoot)`, `boundBySize(entries, event, maxBytes)`,
-and re-exports nothing from core except the imported `MAX_LINE_BYTES`.
+and declares `MAX_LINE_BYTES` (see the resolved risk below for why it is not imported).
 
 Parsing is a hand-rolled scan, not a regex soup and not a dependency:
 `packages/core` forbids third-party runtime deps and `scripts/` should hold the same line. The
@@ -58,8 +58,8 @@ red on a Markdown-only commit. The fixture goes in `mkdtempSync(join(tmpdir(), �
 
 ### `scripts/verify.ts`
 
-1. Import `MAX_LINE_BYTES` from `../packages/core/src/telemetry.js` and
-   `parseJunitFailures` + `boundBySize` from `./junit.js`.
+1. Import `parseJunitFailures`, `boundBySize` and `MAX_LINE_BYTES` from `./junit.js` only.
+   **`verify.ts` must not import `packages/core`** — see the resolved risk below.
 2. `runStep` gains an optional `outfile` so the `test` step can pass
    `--reporter=junit --reporter-outfile=<path>`; the path is `mkdtempSync` under `tmpdir()`,
    created `0600`, removed in a `finally`.
@@ -90,6 +90,7 @@ events. Without the `REVIEW.md` change the security pass blocks this change by i
 | A10 | `a passing run's payload keys are exactly today's` | emit the fields unconditionally |
 | A11 | `junitOutfile reflects absent / unparseable / present` | hard-code `'present'` |
 | A13 | `outfile is 0600, outside the repo, and removed` | drop the `finally` |
+| — | `MAX_LINE_BYTES equals core's` | change either constant |
 | A12, A14 | measured in review.md, not unit tests | — |
 
 A12 (median `testMs` +<2%) and A14 (console byte-identical) are **measurements**, run once and
@@ -97,12 +98,22 @@ recorded. Stating that here so review.md cannot later present them as passing te
 
 ## Risks
 
-- **Importing core source into `scripts/`** is a new coupling. `verify.ts` runs before `build`,
-  so it must import from `../packages/core/src/telemetry.js` (Bun resolves TS directly), not from
-  the built package. **Verify `verify.ts` still starts when core has a deliberate type error** —
-  if it does not, the gate cannot report its own first-step failure, which is worse than the
-  problem being solved. If that check fails, fall back to declaring the constant in `junit.ts`
-  with a test asserting it equals core's.
+- ~~**Importing core source into `scripts/`**~~ **RESOLVED before implementation — the fallback
+  is taken.** Both cases were run:
+  - A deliberate **type** error in core: the import succeeds (Bun strips types) and
+    `tsc --noEmit` still reports it. Safe.
+  - A deliberate **syntax** error in core: `error: Unexpected end of file`, and the importing
+    script never starts.
+
+  The second case is disqualifying. `verify.ts` importing core means a syntactically broken core
+  kills the gate at startup — no `verify: fail [typecheck]` line, a raw Bun stack trace, and
+  **no `verify_run` event recorded at all**. Losing the record in exactly the situation the
+  record is for is a worse bug than the one this loop fixes.
+
+  So `MAX_LINE_BYTES` is declared in `scripts/junit.ts`, with a test in `junit.test.ts`
+  asserting it equals core's. The duplication is deliberate and bounded: `junit.test.ts` may
+  import core freely, because a broken core makes the *test step* fail, which is correct and
+  visible. The test is what stops this becoming another `sdlc/015` familiar number.
 - **A9 is the criterion that makes the rest non-vacuous**, and it is also the slowest and the one
   that touches the filesystem. If it proves flaky it must be fixed, not deleted.
 - **The `finally` cleanup runs on the normal path only.** If `verify.ts` is itself killed, the
