@@ -89,6 +89,8 @@ The binary reads the file-backed cache, returns formatted output to stdout, and 
 
 ### 2.4 Session Data
 
+Session JSON is read from stdin under a bounded deadline (250 ms, overridable via `CLAUDEWATCH_STDIN_TIMEOUT_MS`). Descriptor type is **not** used to decide whether reading is safe: libuv creates child stdio pipes as UNIX domain sockets, so the session channel and a descriptor that will never be written are indistinguishable by type. A stdin that delivers nothing within the deadline degrades to plain output, which is an already-supported state. Amended 2026-08-26 (`sdlc/005-statusline-tty-stdin`).
+
 Session-scoped metadata (model name, token counts, cost, context usage) is deferred to v2. v1 surfaces only usage-window data from the Anthropic usage endpoint. This decision simplifies the domain model and ensures both surfaces (VS Code and terminal) have identical data available.
 
 ---

@@ -4,6 +4,9 @@ After=network-online.target claudewatch-metrics.service
 Wants=network-online.target
 
 [Service]
+# Explicit, not inherited. systemd defaults to null, but stdin state is exactly what
+# hung the statusline in sdlc/004 and relying on a default for it is how the next one happens.
+StandardInput=null
 Type=oneshot
 WorkingDirectory=%h/claudewatch
 EnvironmentFile=-%h/.config/claudewatch/metrics.env

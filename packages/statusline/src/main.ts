@@ -69,24 +69,47 @@ export function parseSessionInfo(raw: string): SessionInfo | null {
 
 // --- Read session info from stdin (Claude Code pipes JSON) ---
 
-function readStdin(): SessionInfo | null {
+/** Ceiling on the stdin read. */
+function stdinTimeoutMs(): number {
+  const raw = Number(process.env.CLAUDEWATCH_STDIN_TIMEOUT_MS);
+  // 0, negative and unparseable all fall back to the default rather than disabling the
+  // bound. An unbounded read is the defect this function exists to prevent.
+  return Number.isFinite(raw) && raw > 0 ? raw : 250;
+}
+
+/**
+ * Read Claude Code's session JSON from stdin, bounded.
+ *
+ * The descriptor type cannot be used to decide whether reading is safe. libuv creates child
+ * stdio pipes as UNIX domain SOCKETS, so the session channel and the descriptor that hung
+ * are the same kind of thing — an earlier fix gated on `isFIFO()` and silently rejected the
+ * real Claude Code path. `process.stdin.isTTY` is likewise `undefined` rather than `true` for
+ * a socket, which is why the original guard never fired. See sdlc/004 and sdlc/005.
+ *
+ * What actually distinguishes the two cases is time: the session channel delivers
+ * immediately, and a descriptor nobody will ever write to delivers nothing. So the read is
+ * bounded rather than gated, and a timeout degrades to plain output — which is already a
+ * supported state.
+ */
+async function readStdin(): Promise<SessionInfo | null> {
   try {
-    // stdin is piped by Claude Code with session JSON
+    // Cheap and correct where it applies; a terminal never carries session JSON.
     if (process.stdin.isTTY) return null;
-    const chunks: Buffer[] = [];
-    const buf = Buffer.alloc(4096);
-    const fd = process.stdin.fd;
-    try {
-      let bytesRead: number;
-      do {
-        bytesRead = require('fs').readSync(fd, buf, 0, buf.length, null);
-        if (bytesRead > 0) chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
-      } while (bytesRead > 0);
-    } catch {
-      // EOF or read error
-    }
-    if (chunks.length === 0) return null;
-    const raw = Buffer.concat(chunks).toString('utf-8');
+
+    const timeout = new Promise<null>((res) => {
+      const t = setTimeout(() => res(null), stdinTimeoutMs());
+      // Do not hold the process open for the timer we may not need.
+      if (typeof t === 'object' && t !== null && 'unref' in t) {
+        (t as unknown as { unref: () => void }).unref();
+      }
+    });
+
+    const raw = await Promise.race([
+      Bun.stdin.text().catch(() => null),
+      timeout,
+    ]);
+
+    if (raw === null || raw.length === 0) return null;
     return parseSessionInfo(raw);
   } catch {
     return null;
@@ -166,7 +189,7 @@ export async function main(): Promise<never> {
   }
 
   // Read session info from stdin (Claude Code pipes JSON)
-  const session = readStdin();
+  const session = await readStdin();
 
   // Read cache (handles corruption: deletes and returns null)
   let cache = readCache();

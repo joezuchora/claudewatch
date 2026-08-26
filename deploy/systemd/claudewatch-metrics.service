@@ -5,6 +5,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Explicit, not inherited. systemd defaults to null, but stdin state is exactly what
+# hung the statusline in sdlc/004 and relying on a default for it is how the next one happens.
+StandardInput=null
 Type=simple
 # Runs as your own user. Nothing here needs root, and the store lives under $HOME.
 WorkingDirectory=%h/claudewatch
