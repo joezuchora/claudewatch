@@ -115,7 +115,7 @@ $ echo $?
 ```
 
 - [x] `bun run verify` exits 0
-- [ ] CI green on the PR head commit — pending the push
+- [x] CI green on the PR head commit — `929f7e2`, `verify` success in 19 s, after two red runs both caused by ambient state (Pass 1 #1 and #3)
 - [x] Every acceptance criterion in `spec.md` is checked off, except those recorded below
 
 ## Findings deliberately not fixed
