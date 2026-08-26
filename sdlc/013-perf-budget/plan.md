@@ -50,7 +50,10 @@ sdlc/README.md
 - `evaluate()`: pure, exported. Takes the sorted samples and the budgets, returns the verdicts.
   Pure so the pass/fail logic is testable without spawning anything, which is what makes the
   `--samples 40` and impossible-budget criteria cheap to discharge.
-- Percentile is imported from `@claudewatch/metrics`, not written a third time. **Amended in
+- Percentile is imported from the metrics package's `anomaly.ts` by relative path, not written a
+  third time. **Corrected in Stage 5:** the plan said `@claudewatch/metrics`, but the root
+  package declares no workspace dependency and that specifier does not resolve from `scripts/`.
+  Adding one purely to satisfy the prose would be the tail wagging the dog. **Amended in
   Stage 3:** that required adding one `export` keyword to `anomaly.ts`, so it joins the fence.
   `store.ts`'s duplicate copy is left alone — pre-existing, out of scope, recorded in `review.md`
   rather than silently absorbed.
@@ -114,8 +117,11 @@ bun run verify
 
 ## Risks
 
-- **The gate grows ~30%.** Stated in the spec, measured here. If it lands worse than ~2 s the
-  right response is fewer samples, not dropping the check.
+- **The gate grows ~30%.** ~~Stated in the spec, measured here. If it lands worse than ~2 s the
+  right response is fewer samples, not dropping the check.~~ **Wrong, and the tripwire fired.**
+  Measured 5.5 s → 10.1 s, +84%. The ~2 s tripwire was crossed by the total but not by the
+  component the plan was watching — the estimate omitted `perf.test.ts`'s own subprocess cost
+  entirely. Recorded in `review.md` rather than re-estimated.
 - **A loaded CI runner reddens the p50 gate.** 41–43 ms against 50 is 17% of headroom, which is
   the tightest thing this loop adds. If CI proves marginal, the honest fix is a CI-specific
   sample count or budget, recorded — not quietly widening the number the whole loop exists to

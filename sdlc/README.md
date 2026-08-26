@@ -230,7 +230,7 @@ what was still broken afterwards.
 
 ## The gate got 10.8× faster by being made testable, not by being optimised (loop 011)
 
-`bun run verify` took **59.5 s**. It now takes **5.5 s**, and covers 17 more cases than before.
+`bun run verify` took **59.5 s**. It went to **5.5 s** here (and to 10.1 s in `sdlc/013`, which added a measured performance gate), and covers 17 more cases than before.
 
 None of that came from making anything faster. 48 of the 57 test-seconds were `setTimeout`
 doing nothing: the production 5 s HTTP timeout and 2 s retry delay were module constants, so
@@ -302,3 +302,50 @@ A smaller one, recorded because it happened twice in one afternoon: **I twice wr
 asserting a *cap* where the design provides a *floor*.** Both failed immediately and honestly,
 which is the system working — but the repetition says something about how easily a plausible
 property substitutes for the real one.
+
+## The budget nobody could fail, and a defect on a platform nobody here runs (loop 013)
+
+`SPEC.md §11.7` said "Cache hit (binary start → stdout) < 50ms" and named **no percentile and no
+measurement method**. On one run of one binary, p50 / p95 / max read 41.1 / 52.3 / 89.8 ms. Loop
+005 read it as p95 and recorded a miss; reading it as p50 makes it pass with 18% to spare. Both
+readings are defensible against the text, so the text decided nothing — and no script in the repo
+measured it, so every claim about that number had been made by hand once and quoted three times.
+
+Two things this loop is on the record for, neither of which is the script it shipped.
+
+**The design was rejected, and the diagnosis was wrong twice before it was right.** The first
+spec proposed a p95 budget grounded in "100 ms feels instantaneous" — a threshold about a user's
+own action and visible feedback, which the statusline is not, since it renders inside an
+operation the user is already blocked on for seconds. It also justified its multiple with a
+table cohorted **by value rather than by time**: runs sorted into "fast" and "slow" buckets *by
+their duration*, then reported as having low within-bucket spread. Circular. And the whole thing
+was measured against the plain render path, when Claude Code invokes the rich one — which turned
+out to cost 0.3 ms more at p50 and nothing at p95, and *that* is the measurement that settled
+the diagnosis. A cost structure where doing strictly more work is free is dominated by something
+else.
+
+**The security pass found a defect on Windows.** The benchmark isolates the run with a temp
+`HOME`. But `os.homedir()` follows `HOME` on POSIX and **`USERPROFILE` on Windows** — a
+supported build target. On a Windows machine `bun run verify` would have run the compiled binary
+45 times against the developer's real credential file and real cache, and if that cache were
+absent or stale, the first sample would have been a live authenticated fetch with their real
+token. The guard meant to catch exactly this checked an untouched *sandbox* file and would have
+reported pass.
+
+Nothing local could have found it. CI is Linux; so am I. It came from a reviewer asking *is that
+claim true on every supported platform?* — a question, not a technique, and the cheapest one in
+this document.
+
+> **The lesson, stated narrowly:** a sandbox enforced by one environment variable is a sandbox
+> on one platform. And a guard that can only prove "nothing was disturbed" cannot distinguish
+> that from "nothing was looked at." The fix for both was the same: make the check **positive** —
+> require the child to render a seeded sentinel before any measurement is taken, rather than
+> inferring safety from an absence.
+
+One more, recorded because it is now a pattern rather than a slip: **four times this session I
+asserted a broader property than the one I meant** — twice a *cap* where the design gives a
+*floor*, once "the directory stays empty" where the claim was "no state of ours", once
+`WARMUP + n` against the very constant that defines it. All four failed loudly and immediately.
+The common shape is reaching for the assertion easiest to write about the situation in front of
+you, rather than the one that would fail if the code were wrong. Mutation testing caught three of
+the four, and is now the default for any guard whose absence would be silent.

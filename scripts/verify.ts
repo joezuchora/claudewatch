@@ -31,10 +31,13 @@ const STEPS: Array<{ name: string; cmd: string[] }> = [
   { name: 'test', cmd: ['bun', 'test'] },
   { name: 'build', cmd: ['bun', 'run', 'build'] },
   // MUST stay after `build` — it measures the binary that step produces. A future reordering
-  // breaks this in a way typecheck cannot see. p50 only at n=40: forty samples supports a
-  // median comfortably and a p95 not at all, which is the honest reason the tail check stays
-  // manual. See sdlc/013.
-  { name: 'perf', cmd: ['bun', 'run', 'perf', '--samples', '40', '--p50-only'] },
+  // breaks this in a way typecheck cannot see.
+  //
+  // n=40 supports a median comfortably and a tail not at all, so `evaluate` declines the p95
+  // verdict on its own and prints that it declined. No suppression flag: a gate that says
+  // "p95: not evaluated (n<200)" is more honest than one that silently omits the line, and it
+  // exercises the full verdict path rather than a special case. See sdlc/013.
+  { name: 'perf', cmd: ['bun', 'run', 'perf', '--samples', '40'] },
 ];
 
 /** Per-step ceiling. Generous versus a ~35s healthy run, tight enough to bound a hang. */

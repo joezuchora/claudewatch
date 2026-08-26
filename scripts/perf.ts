@@ -23,6 +23,11 @@
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+// A relative reach into the workspace package's src/, not `@claudewatch/metrics`. The root
+// package declares no dependency on the workspace packages and `scripts/verify.ts` sets no
+// precedent for one, so the package specifier does not resolve here. Adding a root dependency
+// purely to satisfy the plan's prose would be the tail wagging the dog; the prose was corrected
+// instead. (plan-to-diff audit, sdlc/013)
 import { percentile } from '../packages/metrics/src/anomaly.js';
 
 /** SPEC.md §11.7. p50 is the live tripwire; p95 is a regression ceiling. See sdlc/013. */
@@ -32,8 +37,19 @@ export const BUDGET_P95_MS = 100;
 export const P95_MIN_SAMPLES = 200;
 /** Below this nothing is evaluated at all. */
 export const MIN_SAMPLES = 30;
-const WARMUP = 5;
-const SAMPLE_TIMEOUT_MS = 5_000;
+export const WARMUP = 5;
+/**
+ * A utilization the seeded envelope renders and nothing else plausibly would. Warm-up 0's
+ * stdout must contain it, which is how the run PROVES it read the sandbox rather than merely
+ * failing to disturb it.
+ */
+export const SENTINEL_PCT = 37;
+/**
+ * Per-sample ceiling. Overridable so the timeout guard can be TESTED rather than reasoned
+ * about — the same affordance `scripts/verify.ts` gives its own step timeout. The audit found
+ * that removing this guard entirely left every test green.
+ */
+const SAMPLE_TIMEOUT_MS = Number(process.env.CLAUDEWATCH_PERF_SAMPLE_TIMEOUT_MS ?? 5_000);
 
 const DEFAULT_BIN = join(import.meta.dir, '..', 'packages', 'statusline', 'dist', 'claudewatch');
 
@@ -74,8 +90,10 @@ export function evaluate(
  */
 export function makeSandbox(): string {
   const dir = mkdtempSync(join(tmpdir(), 'cw-perf-'));
-  mkdirSync(join(dir, '.claude'), { recursive: true });
-  mkdirSync(join(dir, '.cache', 'claudewatch'), { recursive: true });
+  // Modes at creation, not after: writeFileSync-then-chmod leaves a 0644 window, and this
+  // helper is a template someone will copy to a path where that matters.
+  mkdirSync(join(dir, '.claude'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(dir, '.cache', 'claudewatch'), { recursive: true, mode: 0o700 });
 
   const creds = join(dir, '.claude', '.credentials.json');
   writeFileSync(creds, JSON.stringify({
@@ -84,22 +102,22 @@ export function makeSandbox(): string {
       refreshToken: 'r',
       expiresAt: 4102444800000,
     },
-  }));
-  chmodSync(creds, 0o600);
+  }), { mode: 0o600 });
+  chmodSync(creds, 0o600);   // belt and braces: mode is advisory against a permissive umask
 
   writeFileSync(join(dir, '.cache', 'claudewatch', 'usage.json'), JSON.stringify({
     version: 2, cooldownUntil: null, lastErrorClass: null,
     snapshot: {
       fetchedAt: new Date().toISOString(),
       source: { usageEndpoint: 'success' }, authState: 'valid', tier: 'standard',
-      fiveHour: { utilizationPct: 42, resetsAt: '2099-01-01T00:00:00.000Z' },
+      fiveHour: { utilizationPct: SENTINEL_PCT, resetsAt: '2099-01-01T00:00:00.000Z' },
       sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
       sevenDayOpus: { utilizationPct: null, resetsAt: null }, enterprise: null,
-      display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 42 },
+      display: { primaryWindow: 'fiveHour', primaryUtilizationPct: SENTINEL_PCT },
       freshness: { isStale: false, staleReason: null, ageSeconds: 0 },
       rawMetadata: { normalizationWarnings: [] },
     },
-  }));
+  }), { mode: 0o600 });
   return dir;
 }
 
@@ -111,41 +129,77 @@ export function measure(bin: string, samples: number): number[] {
       `binary not found: ${bin}\nBuild it first: bun run --filter @claudewatch/statusline build`,
     );
   }
-  const home = makeSandbox();
-  const cachePath = join(home, '.cache', 'claudewatch', 'usage.json');
-  const seededMtime = statSync(cachePath).mtimeMs;
-  const env = { ...process.env, HOME: home, CLAUDEWATCH_TELEMETRY: '0' } as Record<string, string>;
-
-  const one = (index: number): number => {
-    const t0 = Bun.nanoseconds();
-    const r = Bun.spawnSync([bin], {
-      stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', env, timeout: SAMPLE_TIMEOUT_MS,
-    });
-    const ms = (Bun.nanoseconds() - t0) / 1e6;
-    if (r.exitCode === null) throw new MeasureError(`sample ${index} timed out after ${SAMPLE_TIMEOUT_MS}ms`);
-    if (r.exitCode !== 0) {
-      throw new MeasureError(
-        `sample ${index} exited ${r.exitCode}. A binary that fails is not a binary that is fast.`,
-      );
-    }
-    return ms;
-  };
+  let home: string | null = null;
+  // Registered before the sandbox exists so Ctrl-C during a ~90s n=200 run cannot leak it.
+  const cleanup = () => { if (home) rmSync(home, { recursive: true, force: true }); home = null; };
+  const onSignal = () => { cleanup(); process.exit(130); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
 
   try {
-    for (let i = 0; i < WARMUP; i++) one(-1);
-    const times: number[] = [];
-    for (let i = 0; i < samples; i++) times.push(one(i));
+    home = makeSandbox();
+    const cachePath = join(home, '.cache', 'claudewatch', 'usage.json');
+    const seededMtime = statSync(cachePath).mtimeMs;
 
-    // Every cache-miss path calls writeCache. If the seed was ever rejected we measured the
-    // fetch path, which is not a slow measurement — it is a wrong one.
+    // HOME is not enough. `os.homedir()` follows HOME on POSIX and USERPROFILE on Windows —
+    // a supported build target — so pinning only HOME would run the binary against the
+    // developer's REAL credentials and REAL cache on Windows, and the mtime guard below would
+    // check an untouched sandbox file and report a pass. (security pass, sdlc/013)
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      HOMEDRIVE: '',
+      HOMEPATH: home,
+      CLAUDEWATCH_TELEMETRY: '0',
+    } as Record<string, string>;
+
+    const one = (index: number, capture = false): { ms: number; out: string } => {
+      const t0 = Bun.nanoseconds();
+      const r = Bun.spawnSync([bin], {
+        stdin: 'ignore', stdout: capture ? 'pipe' : 'ignore', stderr: 'ignore',
+        env, timeout: SAMPLE_TIMEOUT_MS,
+      });
+      const ms = (Bun.nanoseconds() - t0) / 1e6;
+      if (r.exitCode === null) throw new MeasureError(`sample ${index} timed out after ${SAMPLE_TIMEOUT_MS}ms`);
+      if (r.exitCode !== 0) {
+        throw new MeasureError(
+          `sample ${index} exited ${r.exitCode}. A binary that fails is not a binary that is fast.`,
+        );
+      }
+      return { ms, out: capture ? new TextDecoder().decode(r.stdout) : '' };
+    };
+
+    // POSITIVE, and BEFORE the timed loop. The mtime check alone is negative and post-hoc: it
+    // proves the sandbox was not disturbed, which is also true when the child ignored the
+    // sandbox entirely — and it fires only after every sample has already run. Requiring the
+    // seeded sentinel in warm-up 0's output proves the child READ this cache, on every
+    // platform, before a single measurement is taken. It is also what makes fixture drift loud:
+    // a future CACHE_VERSION bump breaks here instead of silently becoming N live fetches.
+    const probe = one(-1, true);
+    if (!probe.out.includes(String(SENTINEL_PCT))) {
+      throw new MeasureError(
+        `the binary did not render the seeded cache (expected ${SENTINEL_PCT}% in its output, got ` +
+        `${JSON.stringify(probe.out.trim().slice(0, 120))}). These would not be cache hits.`,
+      );
+    }
+
+    for (let i = 1; i < WARMUP; i++) one(-1);
+    const times: number[] = [];
+    for (let i = 0; i < samples; i++) times.push(one(i).ms);
+
+    // Every cache-miss path calls writeCache. Kept as a second, independent check: the sentinel
+    // proves the first run was a hit, this proves none of the later ones stopped being one.
     if (statSync(cachePath).mtimeMs !== seededMtime) {
       throw new MeasureError(
         'the seeded cache was rewritten, so these samples are not cache hits. Refusing to report them.',
       );
     }
-    return times.sort((a, b) => a - b);
+    return times.toSorted((a, b) => a - b);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    cleanup();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 }
 
@@ -185,8 +239,7 @@ if (import.meta.main) {
     p99: Number(at(0.99)), max: Number(sorted[sorted.length - 1]!.toFixed(1)),
   };
 
-  let verdicts = evaluate(sorted, budgets);
-  if (has('p50-only')) verdicts = verdicts.filter((v) => v.label === 'p50');
+  const verdicts = evaluate(sorted, budgets);
 
   if (has('json')) {
     console.log(JSON.stringify({ ...dist, verdicts }, null, 2));

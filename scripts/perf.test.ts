@@ -1,8 +1,8 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, readdirSync, readFileSync, statSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { evaluate, makeSandbox, BUDGET_P50_MS, BUDGET_P95_MS, P95_MIN_SAMPLES, MIN_SAMPLES } from './perf.js';
+import { evaluate, makeSandbox, BUDGET_P50_MS, BUDGET_P95_MS, P95_MIN_SAMPLES, MIN_SAMPLES, WARMUP, SENTINEL_PCT } from './perf.js';
 
 const REPO = join(import.meta.dir, '..');
 const SCRIPT = join(import.meta.dir, 'perf.ts');
@@ -23,6 +23,15 @@ function stub(name: string, body: string): string {
   return p;
 }
 
+/**
+ * A stub that behaves like a HEALTHY binary: renders the seeded sentinel and exits 0. Needed
+ * now that the cache-hit guard proves the child read the sandbox rather than merely inferring
+ * it from an undisturbed file — a stub that prints nothing is, correctly, rejected.
+ */
+function okStub(name: string): string {
+  return stub(name, `echo "${SENTINEL_PCT}%"`);
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
   const proc = Bun.spawnSync(['bun', 'run', SCRIPT, ...args], {
     cwd: REPO,
@@ -36,8 +45,14 @@ function run(args: string[], env: Record<string, string> = {}) {
   };
 }
 
+/** N identical samples — the distribution does not matter to the deciding half. */
+const flat = (ms: number, n: number) => Array.from({ length: n }, () => ms);
+
+/** One [HOME, CLAUDEWATCH_TELEMETRY] pair per child invocation, as the recording stub logged it. */
+const childEnv = (logPath: string) =>
+  readFileSync(logPath, 'utf-8').trim().split('\n').map((l) => l.split('\t'));
+
 describe('evaluate — the deciding half, which is what makes it right or wrong', () => {
-  const flat = (ms: number, n: number) => Array.from({ length: n }, () => ms);
   const budgets = { p50: BUDGET_P50_MS, p95: BUDGET_P95_MS };
 
   test('under both budgets is ok', () => {
@@ -123,27 +138,28 @@ describe('the CLI, run the way the gate runs it', () => {
     // Every cache-miss path calls writeCache. If the seed is ever rejected, the run silently
     // becomes ~200 authenticated API calls and still reports a pass. This stub reproduces the
     // symptom — a rewritten envelope — without needing to break the real binary.
-    const rewriter = stub('rewriter', 'echo "{}" > "$HOME/.cache/claudewatch/usage.json"');
+    // Guarded: if measure() ever stops pinning HOME, this payload would clobber the
+    // developer's REAL ~/.cache/claudewatch/usage.json and the test would still pass. The guard
+    // makes that regression a loud exit 9 instead of quiet data loss. (security pass)
+    const rewriter = stub('rewriter',
+      [
+        'case "$HOME" in *cw-perf-*) ;; *) exit 9 ;; esac',
+        `echo "${SENTINEL_PCT}%"`,
+        'echo "{}" > "$HOME/.cache/claudewatch/usage.json"',
+      ].join('\n'));
     const r = run(['--bin', rewriter, '--samples', '30']);
     expect(r.code).toBe(2);
     expect(r.err).toContain('not cache hits');
   });
 
   test('an impossible budget exits 1', () => {
-    const r = run(['--bin', stub('fast', 'exit 0'), '--samples', '30', '--budget-p50', '0']);
+    const r = run(['--bin', okStub('fast'), '--samples', '30', '--budget-p50', '0']);
     expect(r.code).toBe(1);
     expect(r.out).toContain('BREACH');
   });
 
-  test('--p50-only suppresses the p95 line entirely', () => {
-    const r = run(['--bin', stub('fast2', 'exit 0'), '--samples', '30', '--p50-only']);
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('p50:');
-    expect(r.out).not.toContain('p95:');
-  });
-
   test('--json carries every percentile and the sample count', () => {
-    const r = run(['--bin', stub('fast3', 'exit 0'), '--samples', '30', '--json']);
+    const r = run(['--bin', okStub('fast3'), '--samples', '30', '--json']);
     expect(r.code).toBe(0);
     const j = JSON.parse(r.out);
     expect(Object.keys(j)).toEqual(expect.arrayContaining(['samples', 'p50', 'p90', 'p95', 'p99', 'max', 'verdicts']));
@@ -151,28 +167,131 @@ describe('the CLI, run the way the gate runs it', () => {
     for (const k of ['p50', 'p90', 'p95', 'p99', 'max']) expect(typeof j[k]).toBe('number');
   });
 
-  test('the run writes no claudewatch state into the ambient HOME', () => {
-    // Handed a HOME perf must ignore: if it ever read or seeded the INHERITED home instead of
-    // its own sandbox, `.claude` or `.cache/claudewatch` would appear here.
-    //
-    // The first version of this asserted the directory stayed ENTIRELY empty, and CI failed:
-    // `bun run` itself creates `$HOME/.bun` when BUN_INSTALL is not redirected elsewhere, which
-    // is true on the runner and not in my container. That assertion was a claim about bun, not
-    // about perf.ts. Third time this session I have asserted something broader than the
-    // property that matters — see sdlc/013/review.md.
-    const ambient = mkdtempSync(join(tmpdir(), 'cw-ambient-'));
+  /**
+   * A stub that records the environment it was handed, one line per invocation.
+   *
+   * The audit found that deleting `HOME: home` from the child env left every test green: the
+   * old test only proved perf did not WRITE into the inherited HOME, which `mkdtempSync` makes
+   * true by construction, and an `exit 0` stub cannot reveal what it was given. Asking the
+   * child is the difference between testing the claim and testing around it.
+   */
+  function recordingStub(name: string, logPath: string): string {
+    return stub(name, [
+      `printf '%s\\t%s\\n' "$HOME" "$CLAUDEWATCH_TELEMETRY" >> ${logPath}`,
+      // Satisfy the sentinel probe, so these tests exercise the env plumbing rather than
+      // tripping the cache-hit guard first.
+      `echo "${SENTINEL_PCT}%"`,
+    ].join('\n'));
+  }
+  test('a binary that does not render the seeded cache is exit 2, before any measuring', () => {
+    // The positive half of the cache-hit guard: silence is not proof. A child that prints
+    // nothing has not been shown to have read the sandbox, whatever it left undisturbed.
+    const r = run(['--bin', stub('silent', 'exit 0'), '--samples', '30']);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('did not render the seeded cache');
+  });
+
+  test('the sandbox is seeded 0600/0700, not chmod-ed afterwards', () => {
+    const home = makeSandbox();
     try {
-      const r = run(['--bin', stub('fast4', 'exit 0'), '--samples', '30'], { HOME: ambient });
+      expect(statSync(join(home, '.claude')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, '.cache', 'claudewatch')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, '.cache', 'claudewatch', 'usage.json')).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('the child is handed the SANDBOX home, not the ambient one', () => {
+    const ambient = mkdtempSync(join(tmpdir(), 'cw-ambient-'));
+    const log = join(dir, 'env-home.log');
+    try {
+      const r = run(['--bin', recordingStub('records-home', log), '--samples', '30'], { HOME: ambient });
       expect(r.code).toBe(0);
+
+      const homes = new Set(childEnv(log).map(([h]) => h));
+      expect(homes.size).toBe(1);                                  // one sandbox for the whole run
+      const [seen] = [...homes];
+      expect(seen).not.toBe(ambient);                              // NOT the inherited HOME
+      expect(seen).toContain('cw-perf-');                          // the sandbox makeSandbox built
+      expect(existsSync(seen!)).toBe(false);                       // and cleaned up afterwards
+
+      // And nothing of ours was written where it was told not to write.
       expect(existsSync(join(ambient, '.claude'))).toBe(false);
       expect(existsSync(join(ambient, '.cache', 'claudewatch'))).toBe(false);
-      // Anything else that appeared belongs to the toolchain, not to us — named, so a future
-      // reader sees what was tolerated rather than a bare `true`.
-      expect(readdirSync(ambient).filter((e) => e !== '.bun' && e !== '.cache')).toEqual([]);
     } finally {
       rmSync(ambient, { recursive: true, force: true });
     }
   });
+
+  test('USERPROFILE is pinned too — HOME alone leaves Windows unprotected', () => {
+    // os.homedir() follows HOME on POSIX and USERPROFILE on Windows, a supported build target.
+    // Pinning only HOME would run the binary against the developer's REAL credentials and cache
+    // there, and the mtime guard would check an untouched sandbox file and report a pass.
+    const log = join(dir, 'env-userprofile.log');
+    const winStub = stub('records-userprofile',
+      `printf '%s\\n' "$USERPROFILE" >> ${log}\necho "${SENTINEL_PCT}%"`);
+    const ambient = mkdtempSync(join(tmpdir(), 'cw-ambient-win-'));
+    try {
+      const r = run(['--bin', winStub, '--samples', '30'], { USERPROFILE: ambient, HOME: ambient });
+      expect(r.code).toBe(0);
+      const seen = new Set(readFileSync(log, 'utf-8').trim().split('\n'));
+      expect(seen.size).toBe(1);
+      const [profile] = [...seen];
+      expect(profile).not.toBe(ambient);
+      expect(profile).toContain('cw-perf-');
+    } finally {
+      rmSync(ambient, { recursive: true, force: true });
+    }
+  });
+
+  test('telemetry is PINNED off in the child, not inherited', () => {
+    // The spool lives under the cache dir, so an isolated HOME already yields an empty spool —
+    // which means an unpinned telemetry setting would change nothing visible and go unnoticed.
+    // The budget names a telemetry state, so the run must impose one.
+    const log = join(dir, 'env-telemetry.log');
+    const r = run(['--bin', recordingStub('records-telemetry', log), '--samples', '30'],
+      { CLAUDEWATCH_TELEMETRY: '1' });
+    expect(r.code).toBe(0);
+    expect(new Set(childEnv(log).map(([, t]) => t))).toEqual(new Set(['0']));
+  });
+
+  test('WARMUP is the count SPEC §11.7 states, not whatever the constant happens to be', () => {
+    // The test below asserts `WARMUP + 30` against the imported constant, so changing WARMUP
+    // moves both sides and the mutation survives — the same tautology the plan-to-diff audit
+    // caught in `expect(GENERAL_LIMIT).toBe(1000)` last loop. Pinning the literal is what makes
+    // the spec's "5 discarded warm-ups" a claim rather than a description.
+    expect(WARMUP).toBe(5);
+  });
+
+  test('warm-up runs happen and are excluded from the reported samples', () => {
+    const log = join(dir, 'env-warmup.log');
+    const r = run(['--bin', recordingStub('records-count', log), '--samples', '30', '--json']);
+    expect(r.code).toBe(0);
+    expect(childEnv(log)).toHaveLength(WARMUP + 30);   // the binary really ran WARMUP extra times
+    expect(JSON.parse(r.out).samples).toBe(30);        // and none of them reached the statistics
+  });
+
+  test('a sample that outlives the per-sample timeout is exit 2, naming the index', () => {
+    const r = run(['--bin', stub('slow', 'sleep 5'), '--samples', '30'],
+      { CLAUDEWATCH_PERF_SAMPLE_TIMEOUT_MS: '100' });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('timed out');
+  });
+
+  test('THE SHIPPED ARTIFACT: the real binary measures clean and makes no network call', () => {
+    // Restored after the audit noted no committed test touched the real binary — this repo's
+    // recurring finding, five instances deep, is that defects hide exactly there.
+    //
+    // It also discharges the zero-network criterion, by construction rather than by inspection:
+    // the sandbox credential is a fixture that would 401 immediately, so any run that reached
+    // the fetch path would exit non-zero and be reported as exit 2. A clean exit 0 across 30
+    // samples IS the evidence that no request left the machine.
+    const r = run(['--samples', '30']);
+    expect({ code: r.code, err: r.err }).toEqual({ code: 0, err: '' });
+    expect(r.out).toMatch(/^n=30 {2}p50=/m);
+    expect(r.out).toContain('p95: not evaluated');
+  }, 30_000);
 
   // A test that runs the REAL binary lived here. Removed: `verify`'s own `perf` step runs
   // `--samples 40 --p50-only` against that exact artifact immediately after `build`, so the

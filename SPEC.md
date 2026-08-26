@@ -662,7 +662,7 @@ After installation, restart Claude Code. No shell profile editing required.
 | Cache hit, **p50** | **< 50 ms** | measured, enforced by `bun run verify` |
 | Cache hit, **p95** | **< 100 ms** | measured, checked by `bun run perf` |
 | Cache miss (binary start → fetch → stdout) | < 1000ms | **unmeasured** |
-| HTTP timeout (hard kill) | 5 seconds | enforced in code (`DEFAULT_TIMEOUT_MS`) |
+| HTTP timeout (hard kill) | 5 seconds | **unmeasured** — `DEFAULT_TIMEOUT_MS` is asserted in `client.test.ts`, but no test measures the hard kill end to end |
 
 **Measurement method** (amended 2026-08-26, `sdlc/013-perf-budget`). A target without a
 percentile and a method is not a claim that can be checked: p50, p95 and max on the same binary

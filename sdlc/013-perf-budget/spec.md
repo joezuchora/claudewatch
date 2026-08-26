@@ -149,13 +149,18 @@ runner is a flaky gate" — while simultaneously arguing the budget was loose en
 flaky. Both cannot be true, and the practical result was a budget enforced by memory, which is
 the state this loop objects to.
 
-Resolved: **`verify` runs `perf --samples 40 --p50-only`**, ~1.7 s against a 5.5 s gate. Forty
-samples supports a p50 comfortably; it does not support a p95, which is the honest reason to gate
-only p50. The full n≥200 run stays manual and its output is recorded in `review.md` for changes
-touching the startup path.
+Resolved: **`verify` runs `perf --samples 40`**. Forty samples supports a p50 comfortably and a
+p95 not at all, so `evaluate` declines the tail verdict itself and prints that it declined — no
+suppression flag, because a gate that says `p95: not evaluated (n<200)` is more honest than one
+that silently omits the line. The full n≥200 run stays manual and its output is recorded in
+`review.md` for changes touching the startup path.
 
-Cost, stated rather than hidden: this adds ~30% to a gate loop 011 spent a whole cycle cutting
-tenfold. The precedent is `smoke.test.ts`, which already spawns the binary seven times inside
+**Cost, corrected in Stage 5.** This spec estimated ~1.7 s and ~30%. Measured: the gate went
+5.5 s → 10.1 s, **+84%**. The estimate was not merely low, it was computed wrongly — it counted
+only the new `verify` step (1.9 s, which the estimate got right) and omitted
+`scripts/perf.test.ts`'s own cost inside `bun test`, where seventeen of its tests spawn the
+script as a subprocess. Both the number and the accounting method were wrong, and the
+plan-to-diff audit is what caught it. The precedent is `smoke.test.ts`, which already spawns the binary seven times inside
 `bun test` under the header "If this file is slow, fix it. **Do not skip it.**" — written after
 three defects reached the repo because no gated check ran the shipped artifact.
 
