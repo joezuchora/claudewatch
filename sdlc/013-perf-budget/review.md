@@ -127,6 +127,11 @@ $ echo $?
   it does not fit without changing it. Its risk is mitigated by the sentinel probe.
 - **The cache-miss and HTTP-timeout budgets remain unmeasured**, and §11.7 now says so rather
   than implying otherwise.
+- **Wiring `metrics:detect` into the hourly systemd timer** stays deferred, and this loop
+  supplies a concrete reason it should have been: before the busy-timeout fix, a detector
+  running on a timer beside the always-on metrics service would have died at random with
+  `SQLITE_BUSY`. The queue item was right to be cautious; it was one defect away from being
+  actively harmful.
 - **PR #16's body is stale** — it describes loops 001–006 and lists as unmet things loops
   007/008/013 have closed. Not corrected here; it is one edit and it belongs to whichever
   iteration next has room. Recorded so it is not mistaken for current.
