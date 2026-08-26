@@ -1,24 +1,72 @@
 # Spec: record the failing tests in `verify_run`
 
-- **Status:** revised — E2 was false; see "What this cannot do"
+- **Status:** revised after Stage 2 review — the first draft had three false empirical claims and
+  seven acceptance criteria a no-op implementation satisfied
 - **Stage:** 2 — Design
 - **Reads:** `sdlc/020-which-test-failed/intent.md`
+- **Review:** `sdlc/020-which-test-failed/review-spec.md`
 
 ## Summary
 
 `scripts/verify.ts` passes `--reporter=junit --reporter-outfile=<temp>` to the `test` step,
-parses the resulting XML when that step fails, and adds a bounded `failedTests` array to the
-`verify_run` payload. Every value in it is sanitized: repo-relative paths only, no hostname, no
-assertion text.
+parses the resulting XML when that step runs and does not pass, and adds a **byte-bounded**
+`failedTests` array to the `verify_run` payload.
+
+This requires an amendment to `SPEC.md` §17. That is the first section below, because without it
+the change cannot pass this repo's own review gate.
+
+## The amendment this change requires
+
+The first draft argued the payload rule "does not apply" to `verify_run`. **That argument was
+wrong**, and the review took it apart:
+
+- The rules are in **§17 Observability and Debugging** (`SPEC.md:857`, `SPEC.md:859`), not §12.
+  All four of the draft's citations pointed at the wrong section.
+- §17's text is not scoped to shipped artifacts. It says *"Forbidden in telemetry: … filesystem
+  paths, hostnames, usernames …"*.
+- The draft's supporting evidence — *"the metrics pipeline types `payload` as
+  `Record<string, unknown>`"* — is the **ingest** type, deliberately permissive because it
+  accepts untrusted input. The **emitter** type is
+  `Record<string, string | number | boolean | null>` at both `telemetry.ts:55` and
+  `verify.ts:92`.
+- Decisively: `verify.ts:82` and `telemetry.ts:93` resolve to **the same file** —
+  `~/.cache/claudewatch/metrics-spool.jsonl` — shipped by the same agent to the same hosted
+  service. A path in a `verify_run` event leaves the machine by exactly the route §17 governs.
+
+So this is a **stated amendment**, handled the way `sdlc/003` handled narrowing the no-telemetry
+guarantee: dated, written down, propagated to every document that makes the promise. Not an
+argument that the rule never applied.
+
+### Amendment text, to be added at `SPEC.md` §17
+
+> **Amendment (2026-08-26, sdlc/020).** Events with `source: 'sdlc'` — process metrics written
+> by `scripts/verify.ts`, which never runs in a shipped artifact and observes only this
+> repository — may additionally carry **repo-relative** file paths and test identifiers, plus
+> the closed enumeration `junitOutfile`.
+>
+> Unchanged for every event regardless of source: no token, no absolute path, no home
+> directory, no hostname, no username, no account identifier.
+>
+> Unchanged for product telemetry (`source: 'statusline' | 'vscode'`): numbers, booleans, and
+> members of closed enumerations only. A free-text payload field there remains a blocking
+> review finding.
+
+`SECURITY.md:53` and `deploy/README.md:98` both promise *"No payload can contain … a path"*.
+Both are about the product and both stay literally true — but a reader who inspects their own
+spool will find repo-relative paths in `source: 'sdlc'` lines. Each gets one clarifying
+sentence distinguishing product events from SDLC process events. `REVIEW.md:52` gets the same
+carve-out, or this change fails its own security pass.
 
 ## Where the code goes
 
-A new module, `scripts/junit.ts`, holding the parse and the sanitization. Not
-`packages/core` — this is dev-loop tooling, not product domain logic, and `packages/core`
-ships. Not inline in `verify.ts` — it needs its own tests, and `verify.ts` is the thing under
-test in `verify.test.ts` already.
+A new module, `scripts/junit.ts`, with `scripts/junit.test.ts` beside it. Not `packages/core` —
+this is dev-loop tooling and core ships. `scripts/perf.ts` + `scripts/perf.test.ts` is the
+existing precedent for a tested module under `scripts/`, and `scripts/` is typechecked since
+`sdlc/018` closed that hole (`tsconfig.json`'s `exclude` is exactly `dist`, `node_modules`,
+`packages/core/src/typefixtures`).
 
-`scripts/` is typechecked and linted since `sdlc/018` closed that hole.
+> The first draft claimed `verify.ts` "is the thing under test in `verify.test.ts` already".
+> **No such file exists.** Two separate arguments rested on it. Neither survives.
 
 ## Behavioral contract
 
@@ -26,116 +74,184 @@ test in `verify.test.ts` already.
 
 ```ts
 export interface FailedTest {
-  file: string | null;   // repo-relative POSIX path, or null (see F3)
-  name: string;          // the testcase's `name` attribute
-  suite: string | null;  // the testcase's `classname`, or null when empty
-  line: number | null;   // the testcase's `line`, or null when absent/unparseable
-  type: string | null;   // the <failure> element's `type`, or null when absent
+  file: string | null;   // repo-relative POSIX path, or null (S3)
+  name: string;          // decoded once (S5a)
+  suite: string | null;  // decoded twice, opaque chain (S5b)
+  line: number | null;
+  type: string | null;   // the <failure> element's `type`
 }
 ```
 
-Returns one entry per `<testcase>` that contains a `<failure>` child, in document order.
+One entry per `<testcase>` containing a `<failure>` child, in document order.
 
-### Sanitization, which is the point of the module
+### Sanitization
 
 | # | Rule | Why |
 |---|---|---|
-| S1 | `hostname` is never read. | SPEC.md §12 forbids hostnames in payloads. It is an attribute on every `<testsuite>`, so "never read" must be a property of the parser, not a filter applied afterwards. |
-| S2 | An absolute `file` under `repoRoot` becomes repo-relative with `/` separators. | `/home/<user>/claudewatch/packages/core/src/x.test.ts` carries a username. |
-| S3 | A `file` **not** under `repoRoot` becomes `null` — the entry is kept, the path is dropped. | A test outside the repo (a temp probe, a linked workspace) has a path we cannot relativize and therefore cannot vouch for. Dropping the path while keeping the name loses the least. |
-| S4 | No `<failure>` text content, `message` attribute, or CDATA is read. | The one field genuinely likely to carry user data. Bun does not currently emit it — S4 is what keeps that true if Bun starts. |
-| S5 | XML entities in `name`/`classname` are decoded (`&amp;` `&lt;` `&gt;` `&quot;` `&apos;`). | `classname` arrives as `isInCooldown &amp;gt; cooldown`. Undecoded names do not match source. |
+| S1 | `hostname` is never read. | §17 forbids hostnames. It appears on **every** nested `<testsuite>`, not just the outer one, so "never read" must be a property of the parser rather than a filter applied after. |
+| S2 | A `file` that is absolute **and** under `repoRoot` becomes repo-relative, with `/` separators. Comparison uses `path.isAbsolute` semantics, and on Windows is separator-normalized and case-insensitive. | See the correction below. |
+| S3 | A `file` that is absolute and **not** under `repoRoot` becomes `null`; the entry is kept. | A test outside the repo has a path we cannot relativize and therefore cannot vouch for. |
+| S4 | No `<failure>` text content, `message` attribute, or CDATA is ever read. | The one field genuinely likely to carry user data. Bun does not currently emit it — S4 is what keeps that true if Bun starts. |
+| S5a | `name` is XML-decoded **once**. | |
+| S5b | `classname` is XML-decoded **twice**. | Bun double-encodes it. See below. |
 
-### `MAX_RECORDED_FAILURES = 20`
+> **Correction to the intent (M3).** The intent asserted `file` is an absolute path carrying a
+> username. **It is not, for tests under the working directory.** Bun 1.3.11 emits
+> `file="packages/core/src/cache.test.ts"` — zero absolute paths across all 623 testcases in
+> this repo, confirmed twice. The draft generalized from a probe fixture placed in `/tmp`,
+> outside cwd, which *does* come out absolute.
+>
+> S2 and S3 therefore keep a property Bun already provides, rather than fixing an observed leak.
+> That is still worth doing — a Bun change would otherwise leak silently — but the spec must not
+> claim a hazard it did not observe, and **A2 must use a fixture that actually contains an
+> absolute path**, or it tests nothing.
 
-`parseJunitFailures` returns everything it finds; **`verify.ts` truncates.** A suite-wide
-breakage (600+ failures) must not write a megabyte into a 5MB-capped spool.
+#### Why S5a and S5b differ
 
-When truncated, the payload also carries `failedTestCount` — the true total. A silently capped
-list reads as "20 tests failed"; `sdlc/013`'s rule is that a bound which drops data says so.
+A `describe('A & B')` containing `describe('inner < deep')` containing `test('name & <tag>')`
+emits:
+
+```xml
+<testcase name="name &amp; &lt;tag&gt;" classname="inner &amp;lt; deep &amp;gt; A &amp;amp; B" />
+```
+
+`name` needs one decode pass; `classname` needs two. A single uniform rule cannot be correct for
+both, and double-decoding `name` would corrupt a test whose source name legitimately contains
+`&lt;`.
+
+`classname` is **not a source literal**. It is Bun's ` > `-joined describe chain, **innermost
+first** — so `A & B` → `inner < deep` yields `inner < deep > A & B`. The first draft's rationale
+("undecoded names do not match source") was wrong: no source string equals the decoded
+classname.
+
+`suite` is stored as the decoded chain and treated as **opaque**. It is deliberately not split
+on ` > `: after decoding, `describe('a > b')` and nested `describe('b'){describe('a')}` produce
+identical values, so the field cannot round-trip. Recorded as a known limitation rather than
+papered over.
+
+### Bounding: bytes, not entries
+
+The first draft capped at 20 entries and justified it against the 5MB spool cap. **Wrong
+bound.** `telemetry.ts:32` is the binding one:
+
+```ts
+/** Hard cap on one serialized line, keeping a single O_APPEND write atomic on POSIX. */
+export const MAX_LINE_BYTES = 4096;
+```
+
+`telemetry.ts:179` enforces it. **`verify.ts` does not** — and writes to the same file. The
+review built a payload from this repo's 20 longest real test names: **5078 bytes**, over the cap.
+An oversized line breaks the `>PIPE_BUF` atomicity invariant on a spool the product appends to
+concurrently, producing interleaved, corrupt JSONL — silent loss of the durable record this
+change exists to protect.
+
+So: **drop entries from the end until the serialized event is ≤ `MAX_LINE_BYTES`.** The constant
+is imported from core, never re-declared — re-deriving a familiar number is `sdlc/015`'s root
+cause. `failedTestCount` always carries the true total, so truncation is reported rather than
+silent.
 
 ## Payload changes
 
-`verify_run.payload` gains, **only when the `test` step did not pass**:
+Present **iff the `test` step ran and its outcome was `fail` or `timeout`**; absent otherwise,
+including when an earlier step failed and `test` never ran (`verify.ts:136` breaks on first
+failure).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `failedTests` | `FailedTest[]` | Up to `MAX_RECORDED_FAILURES` entries. |
-| `failedTestCount` | `number` | Total failures found, before truncation. |
+| `failedTests` | `FailedTest[]` | Byte-bounded. `[]` means "no per-test data recoverable". |
+| `failedTestCount` | `number` | True total before truncation. Always present when `failedTests` is. |
+| `junitOutfile` | `'present' \| 'absent' \| 'unparseable'` | A closed enumeration, §17-clean. |
 
-Absent entirely on a passing run — the existing "missing optional fields are omitted, not
-guessed" rule (SPEC.md §3.3), and it keeps the common case byte-identical.
+`junitOutfile` is what makes the three states distinguishable — it replaces the first draft's
+E2/E3/E8, which prescribed **contradictory payloads for the identical filesystem state**.
+
+### `verify.ts`'s local payload type widens; core's does not
+
+`verify.ts:92` is `Record<string, string | number | boolean | null>`. `FailedTest[]` is not
+assignable to it, so the first draft **would not have compiled** — a hard failure in the gate's
+own runner, on the gate's first step.
+
+Only `verify.ts`'s local annotation widens. `packages/core`'s `MetricEvent.payload`
+(`telemetry.ts:55`) is **untouched**: `telemetry.ts:19-23` calls it the security boundary for
+product telemetry, and widening it would remove the structural barrier for the events that
+actually concern a user. `verify.ts` builds its event as a plain object literal and never
+constructs a `MetricEvent`, so the two are already independent.
 
 ## Edge cases
 
 | # | Case | Behavior |
 |---|---|---|
-| E1 | `test` step passes | No junit parse, no new fields. The XML file is still written by bun; it is deleted. |
-| E2 | `test` step **times out** (SIGKILL at the step ceiling) | **No outfile exists.** Bun writes the junit XML once, at the end of a run; a SIGKILLed process writes nothing. Verified directly: a hanging test killed at 3s left no file. `failedTests` is therefore omitted on a timeout, and the run records `outcome: 'timeout'` exactly as it does today. See "What this cannot do" below — this is a limitation, not a behavior. |
-| E3 | Outfile missing entirely | `failedTests` omitted. Not an error. |
-| E4 | Malformed / truncated XML | `[]`. Never throws. |
-| E5 | A failure with no `file` attribute | Entry kept, `file: null`. |
-| E6 | Nested `<testsuite>` elements | Bun nests one level per `describe`. The parser matches `<testcase>` elements regardless of depth. |
-| E7 | `<testcase>` self-closing (a pass) | Not a failure; skipped. Only elements with a `<failure>` child count. |
-| E8 | Zero failures but a non-zero exit (a crash before any test ran) | `failedTestCount: 0`, `failedTests: []`. Distinguishes "the runner died" from "tests failed" — itself a useful signal. |
+| E1 | `test` passes | No parse, no new fields. Outfile deleted in a `finally`. |
+| E2 | `test` **times out** (SIGKILL) | **No outfile exists** — bun writes the report once, at end of run. `junitOutfile: 'absent'`, `failedTests: []`, `failedTestCount: 0`. See "What this cannot do". |
+| E3 | Outfile missing for any other reason | Identical to E2. One rule, keyed on an observable. |
+| E4 | Malformed or truncated XML | `junitOutfile: 'unparseable'`, `failedTests: []`. Never throws. |
+| E5 | Failure with no `file` attribute | Entry kept, `file: null`. |
+| E6 | Nested `<testsuite>` | One level per `describe`; `<testcase>` matched at any depth. |
+| E7 | Self-closing `<testcase>` (a pass) | Skipped. Only elements with a `<failure>` child count. |
+| E8 | An earlier step failed, `test` never ran | All three fields absent. |
+| E9 | `verify.ts` is itself killed mid-run | Outfile may survive in the OS temp dir. It is created `0600` so a stray file is not world-readable. |
 
 ## Acceptance criteria
 
-Each is mechanically checkable.
+Every criterion pairs a **positive precondition** with its assertion. The first draft's did not,
+and the review showed **seven of twelve passed against a `return []` no-op** — the same
+"green check on an empty set" defect this repo has now recorded seven times, here in the
+acceptance criteria themselves.
 
-| # | Criterion | Check |
-|---|---|---|
-| A1 | A failing test's repo-relative file, name and line reach the payload | Seed a failing fixture, run the parser, assert the entry |
-| A2 | **No absolute path reaches the payload** | Assert no returned `file` contains `repoRoot`, starts with `/`, or matches `homedir()` |
-| A3 | **No hostname reaches the payload** | Assert the serialized payload does not contain the `hostname` attribute value present in the input XML |
-| A4 | **No assertion text reaches the payload** | Feed XML whose `<failure>` has both a `message` attribute and text content; assert neither appears anywhere in the output |
-| A5 | A path outside the repo root is dropped, not relativized | `file: null`, entry retained |
-| A6 | Truncation is reported, not silent | 25 failures ⇒ `failedTests.length === 20` and `failedTestCount === 25` |
-| A7 | Malformed XML yields `[]` and does not throw | Truncated, empty, and non-XML inputs |
-| A8 | Console output is unchanged by the reporter flags | Compare `bun test` stdout with and without them |
-| A9 | A passing run's payload is byte-identical to today's | No new keys on `outcome: 'pass'` |
-| A10 | The gate's own exit code is unaffected | A parse that throws internally must not change the step's outcome |
-| A11 | Entities in names are decoded | `&amp;gt;` ⇒ `>` |
-| A12 | The temp outfile does not survive the run | It is written under the OS temp dir, not the repo, and removed |
-
-## Why not each alternative
-
-- **Scrape the console output.** The format is not a contract and changes between Bun versions.
-  The junit reporter is a declared output format with a schema.
-- **Hash the test name to a number.** This was the design the queue implied. It preserves the
-  closed-enumeration rule absolutely — but that rule does not apply here, and a hash is
-  unresolvable without shipping a lookup table that goes stale the moment a test is renamed.
-  Rejected as complexity bought for a constraint that is not real.
-- **Record only the file, not the name.** Cheaper, and would have identified none of the four
-  timing failures — they were four different tests, and two were in the same file.
+| # | Criterion |
+|---|---|
+| A1 | A fixture with 1 failure yields `length === 1`, and `file`/`name`/`line`/`type` all match expected values exactly |
+| A2 | Given `file="/home/testuser/claudewatch/packages/core/src/x.test.ts"` and `repoRoot="/home/testuser/claudewatch"`: `length === 1` **and** `file === 'packages/core/src/x.test.ts'` **and** no returned value contains `testuser` |
+| A3 | Given a fixture whose `hostname="HOSTNAME-SENTINEL-9f3a"`: `length === 2` **and** the serialized payload does not contain `HOSTNAME-SENTINEL-9f3a` |
+| A4 | Given a `<failure>` with both a `message` attribute and text content, each containing `LEAK-SENTINEL-4c71`: `length === 1` **and** the sentinel appears nowhere in the output |
+| A5 | An absolute `file` outside `repoRoot` yields `length === 1` **and** `file === null` |
+| A6 | 400 synthetic failures yield `failedTestCount === 400` **and** `failedTests.length < 400` **and** the serialized event ≤ `MAX_LINE_BYTES` |
+| A7 | Malformed XML yields `[]`, **and** a well-formed sibling fixture in the same test yields non-empty — so the parser is not simply always empty |
+| A8 | `name` decodes once and `classname` twice, asserted against the exact expected strings for a 3-level nested fixture |
+| A9 | **A real failing test run end-to-end produces a non-empty `failedTests` naming that test.** The criterion the no-op cannot satisfy |
+| A10 | A passing run's payload has exactly today's keys — asserted against an explicit key list, not "no new keys" |
+| A11 | `junitOutfile` is `'absent'` when the file is missing, `'unparseable'` when malformed, `'present'` when parsed |
+| A12 | Median `testMs` over 10 runs increases by **< 2%** versus the same 10 runs without the reporter flags |
+| A13 | The outfile is created mode `0600`, lives outside the repo, and does not survive a run — pass or fail |
+| A14 | Console output is byte-identical with and without the reporter flags, after normalizing timing jitter |
 
 ## What this cannot do, stated before it is built
 
-**A hanging test step yields nothing.** The intent said the timeout case was "the case the
-change most exists for". That was written before the case was tested, and it is false: bun
-emits the junit file at the end of a run, so SIGKILL at the step ceiling leaves no file. The
-intermittent ~550s hang — the thing that motivated queueing this item — is **not** made
-reconstructable by this change.
+**A hanging test step yields nothing.** Bun emits the junit file once, at end of run; SIGKILL
+leaves no file. Verified independently twice.
 
-What this change does cover is the case that has actually recurred four times: a test that
-*fails* on the first run of an iteration. Those runs complete, so they produce a file.
+**And the motivating number was stale.** The intent cited "the intermittent ~550s hang".
+`verify.ts:49` sets `STEP_TIMEOUT_MS = 300_000` — a 550s step has been impossible since step
+timeouts landed. That is a `sdlc/015` repeat: a number carried across documents because it
+looked familiar, never re-derived.
 
-Recovering the hang case needs a different mechanism (capturing the child's stdout rather than
-inheriting it, or a per-test heartbeat), which is a separate design with its own cost to the
-console output a human reads. It is not folded in here. `sdlc/017` and the hang item stay open.
+What this change *does* cover is what has actually recurred four times: tests that **fail** on
+the first run of an iteration. Those runs complete and produce a file. It also covers the
+self-inflicted CI failure earlier today, where a subagent's probe fixture was committed and
+three tests failed in CI but not locally.
 
-This paragraph exists because the alternative was shipping a change whose stated purpose it
-does not serve, and discovering that the next time the gate hangs.
+Recovering the hang case needs a different mechanism — SIGTERM with a grace period before
+SIGKILL (unverified: Bun may not flush on SIGTERM), capturing the child's stdout instead of
+inheriting it, or a per-test heartbeat. Each has its own cost to the console output a human
+reads. **Not folded in here.** The hang item stays open.
+
+## Why not each alternative
+
+- **Scrape console output.** Not a contract; changes between Bun versions.
+- **Hash test names to numbers.** Preserves the closed-enumeration rule absolutely — but needs a
+  lookup table that goes stale the moment a test is renamed, and the amendment above is the
+  honest way to buy what the hash was buying dishonestly.
+- **Record only the file.** Would have identified none of the four timing failures — four
+  different tests, two in the same file.
 
 ## Risks
 
-- **`--reporter=junit` is a Bun feature that could change.** If the flag disappears, the test
-  step fails outright rather than degrading. Mitigation: A8 pins the console behavior, and
-  `verify.test.ts` runs the real step. A version bump breaking this is a red gate, not a silent
-  data loss — which is the right failure direction.
-- **Writing the outfile costs time on every run, including passing ones.** The `test` step is
-  ~7.5s of a ~13s gate; an XML write of a few hundred KB should be immaterial, but this is
-  exactly the assumption `sdlc/013` says to measure rather than assert. **Measure before and
-  after, and record the number in review.md.**
-- **E2's truncated-XML path is the one that matters most and is hardest to trigger on demand.**
-  It must be tested with a hand-truncated fixture rather than by hoping for a real timeout.
+- **`--reporter=junit` could change or disappear.** Then the test step fails outright rather
+  than degrading — a red gate, not silent data loss, which is the right direction. A14 pins the
+  console behavior.
+- **Importing `MAX_LINE_BYTES` from core into `scripts/`** makes the gate's runner depend on
+  core's source parsing. Bun imports TS directly so no build is needed, but this is a new
+  coupling and the plan must confirm `verify.ts` still starts when core has a type error.
+- **A12 is the one criterion measured rather than asserted**, and it now has a number. Prior
+  measurement at n=3 showed no detectable cost (7395ms with, 7591ms without — wrong sign for an
+  added cost), and the full report is 157,557 bytes.

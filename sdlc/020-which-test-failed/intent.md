@@ -14,6 +14,10 @@
 > nothing to parse — verified, not assumed. This change covers tests that *fail*, which is the
 > four recurring cases below; it does not cover tests that *hang*. The hang stays open and
 > still needs data.
+>
+> **And the number was stale.** "~550s" predates step timeouts; `verify.ts:49` has set
+> `STEP_TIMEOUT_MS = 300_000` since, so a 550s step is impossible. I carried that figure across
+> several documents without re-deriving it — the `sdlc/015` failure mode exactly.
 
 There have been **four consecutive first-run-of-iteration gate failures** (13:26, 14:22, 15:20,
 17:18), each a different tight-timing assertion, all on the first workload after ~50 minutes of
@@ -40,15 +44,27 @@ This item was queued with the note: *"Payload rule: closed enumerations or numbe
 raw test name needs design."* That is **wrong for this event kind**, and checking it made the
 change simpler.
 
-The closed-enumeration rule is a **product telemetry** invariant (SPEC.md §12), enforced
+The closed-enumeration rule is a **product telemetry** invariant (SPEC.md §17), enforced
 structurally in `packages/core/src/telemetry.ts` for events emitted from shipped artifacts.
 `verify_run` is not one of those. It is written directly by `scripts/verify.ts`, a dev script,
 and the metrics pipeline types `payload` as `Record<string, unknown>` with no allowlist. The
 `record()` comment in `verify.ts` already says why: *SDLC process metrics contain no user data
 and never run in a shipped artifact.*
 
-So a test name — a literal in this repo's own source, identical for every checkout — is not the
-hazard the rule exists to stop. It is not user data at all.
+**That argument does not survive review either.** Two things break it:
+
+- The evidence cited is the **ingest** type, which is permissive on purpose because it accepts
+  untrusted input. The **emitter** type is `Record<string, string | number | boolean | null>` at
+  both `telemetry.ts:55` and `verify.ts:92` — an allowlist that does exist, and that the first
+  draft's design would have failed to compile against.
+- `verify.ts:82` and `telemetry.ts:93` resolve to the **same spool file**, shipped by the same
+  agent to the same service. A path in a `verify_run` event leaves the machine by exactly the
+  route §17 governs.
+
+The *conclusion* — that a repo-relative test name is not the hazard the rule exists to stop —
+still holds. But it is a case for **amending §17 with a stated carve-out**, not for claiming the
+rule never applied. The spec now carries that amendment. Without it this change could not pass
+its own review gate: `REVIEW.md:52` makes a free-text payload field a blocking finding.
 
 ## The hazard that IS real, and is not the one the queue named
 
@@ -58,9 +74,12 @@ hazard the rule exists to stop. It is not user data at all.
    assertion diff omitted entirely. The thing most likely to contain user data — a diff of an
    actual value, which in this repo routinely includes `homedir()` — never enters the file.
    Verified with a deliberately failing test asserting on `homedir()`.
-2. **`file` is an ABSOLUTE path.** `/home/<user>/claudewatch/packages/...`. That carries a
-   username, which SPEC.md §12 forbids in any payload. It must be relativized to the repo root,
-   and dropped outright if it does not lie under it.
+2. ~~**`file` is an ABSOLUTE path.**~~ **False, and corrected in the spec.** Bun 1.3.11 emits
+   `file="packages/core/src/cache.test.ts"` for any test under the working directory — zero
+   absolute paths across all 623 testcases here. This claim came from a probe fixture placed in
+   `/tmp`, outside cwd, which *does* come out absolute; I generalized from a badly-chosen probe.
+   Relativization survives as defence in depth against a future Bun change, not as a fix for an
+   observed leak.
 3. **`hostname` is an attribute on every `<testsuite>`.** Also forbidden. It must not be
    carried through.
 
