@@ -15,7 +15,8 @@
     "upgrade-all:linux": "bash ./scripts/upgrade-all.sh",
     "verify:plain": "bun run typecheck && bun run lint && bun run test && bun run build",
     "metrics:serve": "bun run --filter @claudewatch/metrics serve",
-    "metrics:ship": "bun run --filter @claudewatch/metrics ship"
+    "metrics:ship": "bun run --filter @claudewatch/metrics ship",
+    "metrics:detect": "bun run --filter @claudewatch/metrics detect"
   },
   "devDependencies": {
     "bun-types": "^1.3.10",

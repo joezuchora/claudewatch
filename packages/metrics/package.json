@@ -10,7 +10,8 @@
   "scripts": {
     "serve": "bun run src/cli-serve.ts",
     "ship": "bun run src/cli-ship.ts",
-    "build": "bun build src/cli-serve.ts --target node --outdir dist"
+    "build": "bun build src/cli-serve.ts --target node --outdir dist",
+    "detect": "bun run src/cli-detect.ts"
   },
   "dependencies": {
     "@claudewatch/core": "workspace:*"
