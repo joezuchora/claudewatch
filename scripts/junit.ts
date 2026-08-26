@@ -98,11 +98,22 @@ export function scrubPaths(value: string): string {
     // neither of the other two branches — found by the sdlc/020 security pass.
     .replace(/\\\\[^\s"']+/g, '<path>')
     .replace(/[A-Za-z]:[\\/][^\s"']*/g, '<path>')
-    // The leading slash must start a token — begin-of-string, whitespace, or a quote. Without
-    // that boundary, a describe name like `A5/A6/A7` matches at `/A6/A7` and is recorded as
-    // `A5<path>`, which is worse than useless: the whole point of naming the failing test is to
-    // send a reader to the right place. Found when this loop's own gate went red. (sdlc/021)
-    .replace(/(^|[\s"'])(\/[^\s"'/]+(?:\/[^\s"'/]*)+)/g, '$1<path>');
+    // Home directories, unconditionally and regardless of what precedes them. §17 names these
+    // explicitly, and they are the case where a username actually leaks.
+    .replace(/\/(?:home|Users)\/[^\s"']*/g, '<path>')
+    .replace(/\/root(?:\/[^\s"']*)?/g, '<path>')
+    // Then the general absolute-path rule: a slash run that BEGINS a path, i.e. whose leading
+    // slash is not preceded by a path-segment character.
+    //
+    // The first attempt at this required whitespace or a quote before the slash. That was far too
+    // permissive — probing it found ELEVEN ways through, including `(/home/joe/x)`,
+    // `` `/home/joe/x` `` and `[/home/joe/x]`, all of which are plausible test names. Loosening a
+    // sanitizer to fix a cosmetic problem, and making it defeatable, is the mistake this comment
+    // exists to stop being repeated.
+    //
+    // The lookbehind is what keeps `A5/A6/A7`, `2026/08/26` and `3/4` intact — in those the slash
+    // follows an alphanumeric, so it continues a token rather than starting a path.
+    .replace(/(?<![A-Za-z0-9._-])\/[^\s"'/]+(?:\/[^\s"'/]*)+/g, '<path>');
 }
 
 /**

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, readFileSync 
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
-import { parseJunitFailures, relativizeFile, boundBySize, boundBySizeTight, readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type FailedTest } from './junit.js';
+import { parseJunitFailures, relativizeFile, scrubPaths, boundBySize, boundBySizeTight, readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type FailedTest } from './junit.js';
 import { MAX_LINE_BYTES as CORE_MAX_LINE_BYTES } from '../packages/core/src/telemetry.js';
 
 const ROOT = '/home/testuser/claudewatch';
@@ -473,6 +473,77 @@ describe('scrubPaths does not mangle names that merely contain slashes (sdlc/021
     ]) {
       const xml = wrap(testcase(`name="${name}" file="a.test.ts"`));
       expect(parseJunitFailures(xml, ROOT)[0]!.name).toBe(expected);
+    }
+  });
+});
+
+describe('scrubPaths cannot be defeated by what precedes the slash (sdlc/021)', () => {
+  /**
+   * The first attempt at un-mangling `A5/A6/A7` required whitespace or a quote before the leading
+   * slash. Probing it found ELEVEN ways through — a sanitizer made defeatable in order to fix a
+   * cosmetic problem. These are that probe, frozen.
+   */
+  const SMUGGLE = [
+    '(/home/joe/secret/a.ts)',
+    '[/home/joe/secret/a.ts]',
+    '{/home/joe/secret/a.ts}',
+    '`/home/joe/secret/a.ts`',
+    '=/home/joe/secret/a.ts',
+    ':/home/joe/secret/a.ts',
+    ',/home/joe/secret/a.ts',
+    '</home/joe/secret/a.ts>',
+    '-/home/joe/secret/a.ts',
+    '*/home/joe/secret/a.ts',
+    'x/home/joe/secret/a.ts',
+    'file:///home/joe/secret/a.ts',
+    '\t/home/joe/secret/a.ts',
+    '/Users/joe/secret/a.ts',
+    '/root/.ssh/id_rsa',
+  ];
+
+  for (const attempt of SMUGGLE) {
+    test(`${JSON.stringify(attempt)} does not reach the payload`, () => {
+      const out = scrubPaths(attempt);
+      expect(out).not.toContain('/home/joe');
+      expect(out).not.toContain('/Users/joe');
+      expect(out).not.toContain('/root/');
+      expect(out).toContain('<path>');
+    });
+  }
+
+  /**
+   * The same vectors against a NON-home absolute path.
+   *
+   * Every case above uses `/home/joe`, which the unconditional home-directory rule catches
+   * first — so reverting the general boundary left them all green, and a mutation proved it.
+   * The tests looked comprehensive while exercising one rule twice and the other never. These
+   * reach the general rule, which is what protects `/opt`, `/var`, `/srv` and everything else.
+   */
+  const NON_HOME = [
+    '(/opt/private/thing.ts)',
+    '[/var/secrets/key]',
+    '`/srv/internal/data`',
+    '=/etc/shadow',
+    ':/opt/private/thing.ts',
+    '</opt/private/thing.ts>',
+    'file:///opt/private/thing.ts',
+  ];
+
+  for (const attempt of NON_HOME) {
+    test(`${JSON.stringify(attempt)} — the general rule, not the home-dir rule`, () => {
+      const out = scrubPaths(attempt);
+      expect(out).not.toContain('/opt/private');
+      expect(out).not.toContain('/var/secrets');
+      expect(out).not.toContain('/srv/internal');
+      expect(out).not.toContain('/etc/shadow');
+      expect(out).toContain('<path>');
+    });
+  }
+
+  test('and the legible names this rule exists to protect are untouched', () => {
+    // The non-vacuous half: a scrubber that replaced everything would pass every assertion above.
+    for (const safe of ['A5/A6/A7 — the switch', 'handles 2026/08/26 input', 'a 3/4 majority', 'reads config a/b/c']) {
+      expect(scrubPaths(safe)).toBe(safe);
     }
   });
 });
