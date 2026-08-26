@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { isInCooldown, enterCooldown, clearCooldown, shouldCooldown } from './cooldown.js';
-import { makeTestSnapshot, makeTestEnvelope } from './test-helpers.js';
-import type { CacheEnvelope } from './types.js';
+import { makeTestEnvelope } from './test-helpers.js';
 
 describe('cooldown', () => {
   describe('isInCooldown', () => {

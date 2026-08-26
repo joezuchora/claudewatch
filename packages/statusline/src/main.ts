@@ -21,7 +21,7 @@ import {
   type CacheEnvelope,
   type SessionInfo,
   type FailureClass,
-} from '@claudewatch/core';
+} from './core-deps.js';
 
 const VERSION = '0.1.0';
 

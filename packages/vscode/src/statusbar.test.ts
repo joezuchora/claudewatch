@@ -22,7 +22,7 @@ function realEvaluate(pct: number, warnPct: number = 70, critPct: number = 90): 
   return 'normal';
 }
 
-mock.module('@claudewatch/core', () => ({
+mock.module('./core-bridge.js', () => ({
   classify: realClassify,
   evaluate: realEvaluate,
   formatTooltip: (snapshot: UsageSnapshot) => `formatted: ${snapshot.display.primaryUtilizationPct}%`,

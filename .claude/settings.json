@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun run tsc --noEmit --pretty 2>&1 | head -20"
+            "command": "bun run typecheck --pretty 2>&1 | head -20"
           }
         ]
       }

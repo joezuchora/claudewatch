@@ -14,8 +14,8 @@ import {
   markStale,
   makeErrorSnapshot,
   extractLastError,
-} from '@claudewatch/core';
-import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from '@claudewatch/core';
+} from './core-bridge.js';
+import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from './core-bridge.js';
 import { StatusBarManager } from './statusbar.js';
 import { openDashboard } from './commands.js';
 
@@ -183,7 +183,7 @@ async function doRefresh(manual: boolean): Promise<void> {
       writeCache(envelope);
       statusBar?.update(snapshot, false, fetchError);
     }
-  } catch (err) {
+  } catch {
     // Unexpected runtime error — don't crash the extension
     const cached = readCache();
     statusBar?.update(cached?.snapshot ?? null, false);

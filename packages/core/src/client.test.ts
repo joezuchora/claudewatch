@@ -1,4 +1,4 @@
-import { describe, expect, test, mock, beforeEach, afterEach } from 'bun:test';
+import { describe, expect, test, mock, afterEach } from 'bun:test';
 import { fetchUsage } from './client.js';
 
 // Save original fetch

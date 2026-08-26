@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "ignorePatterns": ["dist", "node_modules", "*.vsix"],
+  "rules": {
+    "no-await-in-loop": "off",
+    "no-underscore-dangle": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts"],
+      "rules": {
+        "no-new": "off"
+      }
+    }
+  ]
+}

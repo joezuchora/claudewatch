@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, mock, spyOn } from 'bun:test';
 import { makeTestSnapshot, makeTestEnvelope } from '@claudewatch/core/test-helpers';
-import { evaluate, classify as realClassify, formatTooltip, formatPct, formatFreshness, formatRichStatusLine, markStale as realMarkStale, makeErrorSnapshot as realMakeErrorSnapshot } from '@claudewatch/core';
+import { classify as realClassify, formatRichStatusLine, markStale as realMarkStale, makeErrorSnapshot as realMakeErrorSnapshot } from '@claudewatch/core';
 import type { UsageSnapshot, CacheEnvelope, CredentialResult, FetchResult, FailureClass } from '@claudewatch/core';
 
 // --- Exit sentinel ---
@@ -31,7 +31,7 @@ let mockNormalize: ReturnType<typeof mock>;
 let mockClassify: ReturnType<typeof mock>;
 let mockFormatStatusLine: ReturnType<typeof mock>;
 
-mock.module('@claudewatch/core', () => {
+mock.module('./core-deps.js', () => {
   mockReadCache = mock(() => null);
   mockWriteCache = mock(() => {});
   mockIsCacheFresh = mock(() => false);
@@ -64,16 +64,12 @@ mock.module('@claudewatch/core', () => {
     normalize: (...args: unknown[]) => mockNormalize(...args),
     classify: (...args: unknown[]) => mockClassify(...args),
     formatStatusLine: (...args: unknown[]) => mockFormatStatusLine(...args),
-    // Pass through real functions to prevent mock leaking into other test files
-    evaluate,
-    formatTooltip,
-    formatPct,
-    formatFreshness,
+    // The mock replaces ./deps.js, so it must provide exactly what deps.ts exports and
+    // nothing more. Passing real core functions through here re-binds them for other test
+    // files in a whole-suite run — that was the cause of the contamination this change fixes.
     formatRichStatusLine,
     markStale: realMarkStale,
     makeErrorSnapshot: realMakeErrorSnapshot,
-    makeTestSnapshot,
-    makeTestEnvelope,
   };
 });
 

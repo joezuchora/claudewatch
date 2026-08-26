@@ -1,14 +1,22 @@
 {
   "name": "claudewatch",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "test": "bun test",
+    "build": "bun run --filter @claudewatch/core build && bun run --filter @claudewatch/statusline build && bun run --filter claudewatch-vscode build",
+    "verify": "bun run typecheck && bun run lint && bun run test && bun run build",
     "install-statusline": "bun run --filter @claudewatch/statusline install-statusline",
     "upgrade-all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/upgrade-all.ps1",
     "upgrade-all:linux": "bash ./scripts/upgrade-all.sh"
   },
   "devDependencies": {
     "bun-types": "^1.3.10",
+    "oxlint": "^1.80.0",
     "typescript": "^5.7.0"
   }
 }

@@ -64,15 +64,27 @@ Package-specific rules live in each package's own `CLAUDE.md`.
 
 ## Pre-Commit Verification Pipeline
 
-Before committing any changes, run the full pipeline and fix any issues:
+Before committing, run the gate and fix anything it reports:
 
-1. `bun run typecheck` — fix all type errors
-2. `bun run lint` — fix all lint issues
-3. `bun test` — ensure all tests pass
-4. `bun run build` — verify the build succeeds
-5. If this is a VS Code extension change, verify the output is CommonJS-compatible by checking the bundle for `require`/`module.exports` patterns
-6. Only after all steps pass, create the commit. If any step fails, fix the issue and re-run the full pipeline.
-7. Show a summary of what was fixed.
+```bash
+bun run verify
+```
+
+That runs `typecheck` -> `lint` -> `test` -> `build`, stopping at the first failure. Each step
+is also available on its own (`bun run typecheck`, `bun run lint`, `bun run test`,
+`bun run build`) when you want to iterate on one.
+
+CI runs this exact command, so a green `verify` locally means a green CI.
+
+Two things it does not check for you:
+
+1. **VS Code bundle format.** For extension changes, confirm the built bundle is still
+   CommonJS by grepping it for `require` / `module.exports`. An ESM bundle builds fine and
+   then fails at activation.
+2. **Whether the change matches its plan.** That is the plan-to-diff audit in Stage 5.
+
+Only commit once `verify` exits 0. If it fails, fix and re-run the whole thing — a partial
+pass is a fail.
 
 ## Git Workflow
 

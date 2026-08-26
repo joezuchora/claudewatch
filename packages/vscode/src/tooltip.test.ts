@@ -1,4 +1,4 @@
-import { describe, expect, test, mock, beforeEach } from 'bun:test';
+import { describe, expect, test, mock } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
 import type { RuntimeState, UsageSnapshot } from '@claudewatch/core';
 

@@ -2,13 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import type {
   UsageSnapshot,
   CacheEnvelope,
-  RawUsageResponse,
-  CredentialFile,
   RuntimeState,
   FailureClass,
   ThresholdLevel,
-  AuthState,
-  FetchResult,
 } from './types.js';
 
 describe('types', () => {

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { UsageSnapshot, RuntimeState, ThresholdLevel, LastErrorInfo } from '@claudewatch/core';
-import { classify, evaluate } from '@claudewatch/core';
+import { classify, evaluate } from './core-bridge.js';
 import { buildTooltip } from './tooltip.js';
 
 export class StatusBarManager {
