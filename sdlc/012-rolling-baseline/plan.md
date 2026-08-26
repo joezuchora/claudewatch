@@ -54,6 +54,16 @@ sdlc/README.md
 ## Changes
 
 ### `packages/metrics/src/anomaly.ts`
+- **Amended in Stage 5** (security finding S1): `evidence.outcome` and the drift
+  `fingerprint`/`evidence.category` are closed to a fixed set instead of `String(...)` of an
+  unvalidated payload leaf. `payload` arrives from the ingest endpoint without leaf validation,
+  and `evidenceTable` writes evidence verbatim into an `incident.md` a human reads and acts on;
+  `category` also persists into `suppressions.json`, which gates future detection. This diff
+  *increases* that leaf's reachability, since the whole point is to guarantee those events
+  arrive.
+- **Amended in Stage 5** (audit finding D1): the anomaly `summary` now names the threshold that
+  fired as well as the ratio, since the two disagree when the floor binds — and it is asserted,
+  which the audit noted it was not.
 - `BOUNDS` gains `verifyBaselineWindow: 50` and `minOutlierMs: 120_000`, each with the
   derivation in a comment — 50 because a p95 needs a sample and a count is stable under changes
   in run frequency; 120 000 because the slowest legitimate run observed is 67 537 ms.
@@ -67,11 +77,21 @@ sdlc/README.md
   `evidence` keeps `baselineP95Ms` and gains `thresholdMs` and `windowSize`.
 
 ### `packages/metrics/src/detector-input.ts` — new
-- `collectDetectorInput(store)`: one kind-scoped query for `verify_run` bounded at
-  `verifyBaselineWindow + 1`, plus the existing general query for the other three detectors,
-  concatenated and deduplicated on `eventId`.
+- `collectDetectorInput(store, now)`: one kind-scoped query for `verify_run` bounded at
+  `verifyBaselineWindow + 1`, plus the existing general query, concatenated and deduplicated on
+  `eventId`.
 - This is the actual fix. It exists as its own module for one reason: at `cli-detect.ts`'s top
   level the composition runs on import and no test can reach it.
+- **Amended in Stage 5** (security finding S7): kind-scoped queries for `schema_drift` (8-day
+  lookback, matching what `detectDriftSpike` compares against) and `fetch_result` (24 h,
+  matching its window) as well. Those two detectors starve under exactly the flood this loop's
+  own first test constructs, and fixing only the duration baseline would have left half the
+  same defect in place. Documenting a known blind spot in a monitoring component, in a loop
+  whose entire subject is that blind spot, was not defensible. The detectors themselves are
+  still untouched — only what reaches them.
+- `GENERAL_LIMIT` is module-private, not exported. It was briefly exported and its only test
+  asserted the constant against itself; the plan-to-diff audit called that out and both are
+  gone.
 
 ### `packages/metrics/src/cli-detect.ts`
 - Calls `collectDetectorInput(store)` instead of `store.query({ limit: 1000 })`.
@@ -94,6 +114,10 @@ sdlc/README.md
 | Baseline reported when latest is null | `a null latest duration still reports the baseline` | `anomaly.test.ts` |
 | `cli-detect` prints the baseline line | `formatBaseline renders the stated format` + one spawn of the real CLI against a fixture db | `anomaly.test.ts`, `detector-input.test.ts` |
 | Ordering | `the window respects (receivedAt, ts), not insertion order` | `anomaly.test.ts` |
+| Crafted payload leaves cannot reach an incident record or a fingerprint (S1) | `a crafted outcome cannot reach an incident record verbatim`, `a crafted drift category cannot reach the fingerprint`, plus both legitimate-value counterparts | `anomaly.test.ts` |
+| The summary names the threshold, not just the ratio (D1) | `the summary names the threshold that fired, not just the ratio` | `anomaly.test.ts` |
+| Drift and fetch events survive the same flood (S7) | `THE OTHER HALF: drift events survive the same flood`, `...fetch_result events survive...` | `detector-input.test.ts` |
+| The kind-scoped lookback is bounded | `the kind-scoped lookback is bounded, so it does not rescue ancient events` | `detector-input.test.ts` |
 | `bun run verify` exits 0 | the gate | — |
 
 Two notes on the existing suite, both worth stating rather than discovering later:
@@ -101,6 +125,11 @@ Two notes on the existing suite, both worth stating rather than discovering late
 - The current duration tests use a uniform 30 s baseline, and 4 × 30 s = 120 s **is exactly**
   `minOutlierMs`. They therefore pass unchanged — by coincidence, not by coverage, and they
   exercise the floor not at all. Every floor test below is new.
+- **Not every test here discriminates against the old code, and the plan should have said so.**
+  The audit found 4 of 7 in `detector-input.test.ts` passing unchanged against the pre-change
+  composition. Two were rewritten to flood the store so they do discriminate; one tautology was
+  deleted; the dedup test cannot discriminate by construction — it guards a hazard this change
+  *introduces* — and now says so in its own comment.
 - One spawn of the real `cli-detect` is included deliberately. Loop 005 and loop 009 both shipped
   a defect that unit tests could not see because the defect was in how the real artifact was
   invoked — which is precisely the shape of the defect this loop is fixing. A single ~300 ms

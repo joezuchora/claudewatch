@@ -416,3 +416,68 @@ describe('detect: the baseline is reported, not just used (sdlc/012)', () => {
       .toBe('baseline: p95 8268ms over 19 runs (window 50), threshold 120000ms');
   });
 });
+
+describe('detect: values crossing the ingest trust boundary (sdlc/012 security pass)', () => {
+  const hostile = 'x |\n| `rm -rf /` | see [here](http://evil.example) ';
+
+  test('a crafted outcome cannot reach an incident record verbatim', () => {
+    // `payload` arrives from the ingest endpoint and is not leaf-validated, and `evidenceTable`
+    // writes evidence straight into a markdown file a human then reads and acts on.
+    const runs = [...baselineRuns(25, 6_000), ev({
+      kind: 'verify_run', durationMs: 550_000, receivedAt: hoursAgo(0),
+      payload: { outcome: hostile },
+    })];
+    const r = detect(runs, T0);
+    expect(r.status).toBe('anomalies');
+    if (r.status === 'anomalies') {
+      expect(r.anomalies[0]!.evidence.outcome).toBe('unknown');
+      expect(JSON.stringify(r.anomalies[0]!.evidence)).not.toContain('rm -rf');
+    }
+  });
+
+  test('a legitimate outcome still passes through', () => {
+    const runs = [...baselineRuns(25, 6_000), ev({
+      kind: 'verify_run', durationMs: 550_000, receivedAt: hoursAgo(0),
+      payload: { outcome: 'timeout' },
+    })];
+    const r = detect(runs, T0);
+    if (r.status === 'anomalies') expect(r.anomalies[0]!.evidence.outcome).toBe('timeout');
+  });
+
+  test('a crafted drift category cannot reach the fingerprint', () => {
+    // Worse than evidence: fingerprints are persisted to suppressions.json, so an unbounded
+    // value here writes attacker-chosen text into machine state that gates future detection.
+    const drift = Array.from({ length: 3 }, () =>
+      ev({ kind: 'schema_drift', receivedAt: hoursAgo(1), payload: { category: hostile } }));
+    const r = detect([...baselineRuns(25, 6_000), ...drift], T0);
+    expect(r.status).toBe('anomalies');
+    if (r.status === 'anomalies') {
+      const spike = r.anomalies.find((a) => a.kind === 'schema_drift_spike')!;
+      expect(spike.fingerprint).toBe('schema_drift_spike:unknown');
+      expect(spike.evidence.category).toBe('unknown');
+    }
+  });
+
+  test('a legitimate drift category still reaches the fingerprint', () => {
+    const drift = Array.from({ length: 3 }, () =>
+      ev({ kind: 'schema_drift', receivedAt: hoursAgo(1), payload: { category: 'unknownField' } }));
+    const r = detect([...baselineRuns(25, 6_000), ...drift], T0);
+    if (r.status === 'anomalies') {
+      const spike = r.anomalies.find((a) => a.kind === 'schema_drift_spike')!;
+      expect(spike.fingerprint).toBe('schema_drift_spike:unknownField');
+    }
+  });
+
+  test('the summary names the threshold that fired, not just the ratio', () => {
+    // The two can disagree when the floor binds, and the summary is the line a human reads
+    // first. Asserted because the plan-to-diff audit noted the rewritten wording was unplanned
+    // and unchecked.
+    const r = detect([...baselineRuns(25, 6_000), ev({
+      kind: 'verify_run', durationMs: 550_000, receivedAt: hoursAgo(0), payload: { outcome: 'timeout' },
+    })], T0);
+    if (r.status === 'anomalies') {
+      expect(r.anomalies[0]!.summary)
+        .toBe('A verify run took 550.0s against a baseline p95 of 6.0s over 25 runs — 91.7x, past a 120s threshold.');
+    }
+  });
+});

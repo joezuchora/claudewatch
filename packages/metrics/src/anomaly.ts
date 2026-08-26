@@ -124,6 +124,28 @@ function within(e: StoredEvent, now: number, hours: number): boolean {
   return Number.isFinite(t) && now - t <= hours * HOUR_MS;
 }
 
+/**
+ * Closed enumerations for the two payload leaves that reach an incident record.
+ *
+ * `payload` arrives from the ingest endpoint and `normalizeIncoming` accepts any object without
+ * checking its leaves, so these are unvalidated free text from a trust boundary. `evidenceTable`
+ * writes evidence verbatim into an `incident.md` under `sdlc/`, and `category` also lands in a
+ * fingerprint and from there in `suppressions.json` — a crafted event could otherwise write
+ * attacker-chosen prose into a repo file that a human then reads and acts on.
+ *
+ * The same reasoning as SPEC.md §12's telemetry rule, applied in the opposite direction: on the
+ * way OUT of the product every payload leaf is a number or a member of a closed set, so on the
+ * way back IN nothing else should be believed either. (security pass, sdlc/012)
+ */
+const OUTCOMES = ['pass', 'fail', 'timeout'] as const;
+const DRIFT_CATEGORIES = ['unknownWindow', 'unknownField', 'typeMismatch', 'missingField'] as const;
+
+function closedValue<T extends string>(value: unknown, allowed: readonly T[]): T | 'unknown' {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : 'unknown';
+}
+
 /** Coarse bucket, so the same condition an hour later produces the same fingerprint. */
 function magnitudeBucket(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return 'na';
@@ -191,7 +213,7 @@ function detectDurationOutlier(
         multiple: Number(multiple.toFixed(2)),
         baselineSamples: durations.length,
         windowSize: BOUNDS.verifyBaselineWindow,
-        outcome: String(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail')),
+        outcome: closedValue(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail'), OUTCOMES),
       },
     },
     baseline,
@@ -229,14 +251,14 @@ function detectDriftSpike(events: StoredEvent[], now: number): Anomaly | null {
 
   return {
     kind: 'schema_drift_spike',
-    fingerprint: `schema_drift_spike:${String(recent[0]?.payload.category ?? 'unknown')}`,
+    fingerprint: `schema_drift_spike:${closedValue(recent[0]?.payload.category, DRIFT_CATEGORIES)}`,
     severity: 'high',
     summary:
       `${recent.length} schema_drift events in 24h with none in the prior 7 days. ` +
       `The usage endpoint's shape may have changed.`,
     evidence: {
       recentCount: recent.length,
-      category: String(recent[0]?.payload.category ?? 'unknown'),
+      category: closedValue(recent[0]?.payload.category, DRIFT_CATEGORIES),
       priorWeekCount: baseline.length,
     },
   };

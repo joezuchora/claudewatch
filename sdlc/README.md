@@ -105,6 +105,15 @@ becomes something people route around.
 >    p95 of 67.5 s for the full 90-day retention, putting the trip wire at ~270 s. The
 >    instrument did not get sharper; it got *blunter relative to the thing it now watches*, and
 >    a 100 s hang would pass unnoticed. Filed as `012-rolling-baseline`.
+>
+>    **Superseded by loop 012, and two of the sentences above are wrong.** Left standing because
+>    this is the second correction to the same bullet and the sequence is the finding. "For the
+>    full 90-day retention" is off by two orders of magnitude — five slow runs stop occupying
+>    the p95 index at ~101 runs. And `runs.slice(0, -1)` was never "every retained run": the
+>    detector's input was `store.query({ limit: 1000 })` with no kind filter, so the baseline
+>    was already windowed by however many verify runs fell inside the last 1000 events of *any*
+>    kind. The real defect was the accidental window, not the absent one. See
+>    `sdlc/012-rolling-baseline/`.
 > 2. **Nothing below is retracted.** The hang was never explained, and a faster gate does not
 >    explain it. It remains blocked on data, and the smaller baseline is a better instrument
 >    for catching it, not evidence that it is gone.
@@ -252,3 +261,44 @@ for shorter. Running the pass on a change that looks like a test-speed tweak is 
 Typecheck, lint, tests and build were all green with a wrong pointer shipped in production
 source. Prose that cross-references a spec is unverifiable by any tool this repo runs, which
 makes it exactly the sort of thing an adversarial reader has to be pointed at deliberately.
+
+## Two adversarial reviews, and what they were each worth (loop 012)
+
+Loop 012 is the first change where the review subagents did not merely find defects in the code
+— they rejected the *design*, and then caught the resulting implementation overstating itself.
+Both are worth recording, because the loop's value is usually argued from the artifacts and this
+is the round where it was argued from outcomes.
+
+**The spec-reviewer rejected the design outright, on arithmetic.** The first draft proposed
+replacing p95-of-history with median-of-a-window at an 8× multiple, and justified the multiple
+with a table showing within-regime spread of 1.43×. The table was **cohorted by value, not by
+time**: I had sorted runs into "fast" and "slow" buckets *by their duration*, then reported that
+within-bucket spread was small. Circular. Cohorted honestly by `ts`, the spread is 10.02×,
+because a passing 59.5 s run sits in the middle of the fast era — one of my own before/after
+measurements on a stashed tree. The proposed threshold would have fired on it. The reviewer also
+showed the proposal was *blunter* than the code it replaced at steady state (48 s vs 33 s), a
+comparison the draft never made because it only ever evaluated today's sample size.
+
+Then, checking those findings, the actual defect turned up one line up the call chain: the
+detector's input was `store.query({ limit: 1000 })` with **no kind filter**. The baseline was
+never "all history" — it was however many verify runs fell inside the last 1000 events of any
+kind, which shrinks as the product ships more telemetry. Nothing in `anomaly.ts` could show
+that, which is why three careful readings of `anomaly.ts` did not find it.
+
+**The plan-to-diff auditor then caught the commit message.** It said "every new test was checked
+by mutation", which was true of `anomaly.test.ts` and false of `detector-input.test.ts` — 4 of
+its 7 tests passed unchanged against the old code. One was a pure tautology asserting a constant
+against itself. That claim was the kind that is very easy to make and very hard to notice, since
+the tests were real tests and they did pass.
+
+The lesson worth keeping is narrower than "review is good":
+
+> **A number you derived is not evidence until someone tries to reproduce it from the raw
+> data.** Both the 1.43× and the "90-day" figure were arithmetic I performed on data I had, and
+> both were wrong in the direction that made my proposal look better. Neither survived a reader
+> who recomputed them.
+
+A smaller one, recorded because it happened twice in one afternoon: **I twice wrote a test
+asserting a *cap* where the design provides a *floor*.** Both failed immediately and honestly,
+which is the system working — but the repetition says something about how easily a plausible
+property substitutes for the real one.

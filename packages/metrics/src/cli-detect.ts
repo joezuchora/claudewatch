@@ -169,8 +169,8 @@ cause.
 // --- run ---
 
 const store = new MetricsStore(process.env.CLAUDEWATCH_METRICS_DB ?? defaultDbPath());
-const events = collectDetectorInput(store);
 const now = Date.now();
+const events = collectDetectorInput(store, now);
 const result = detect(events, now, readSuppressions());
 
 if (result.status === 'insufficient-data') {
