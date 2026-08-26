@@ -9,7 +9,15 @@
     "outDir": "dist",
     "declaration": true,
     "sourceMap": true,
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ],
+    "lib": [
+      "ES2023"
+    ]
   },
-  "exclude": ["scripts", "dist", "node_modules"]
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }

@@ -396,3 +396,32 @@ gate durations and what `sdlc/013`'s spec named before deciding not to build it.
 That follow-up is deliberately **not** being built yet. Designing a baseline rule against three
 measurements would repeat the original error at one remove; the report-only line now prints a
 distribution on every run, so the data to design it properly is accumulating on its own.
+
+
+## The gate never typechecked itself (loop 018)
+
+`tsconfig.json` excluded `scripts`. `bun run typecheck` is `tsc --noEmit`. So **nothing in
+`scripts/` had ever been typechecked** — including `verify.ts`, which *is* the gate, and
+everything `sdlc/013` built there.
+
+Found by accident, reading `tsconfig.json` for an unrelated plan. Demonstrated rather than
+inferred: a deliberate `const x: number = "string"` in `scripts/perf.ts` passed clean.
+
+Three real errors surfaced the moment the exclusion came off, all one root cause — and the
+irony is exact. `sdlc/013` changed a `.sort()` to `.toSorted()` **to silence a lint warning**,
+and `toSorted` needs `lib: ES2023` against a `target: ES2022`. A type error, introduced to keep
+a warning count flat, in a directory the type checker could not see. Two implicit `any`s came
+with it, in a repo whose `CLAUDE.md` forbids `any`.
+
+The mechanism worth remembering is why nobody noticed: **`bun test` *does* discover
+`scripts/perf.test.ts`**, so runtime failures surfaced normally and the directory felt covered.
+Test coverage and type coverage came apart silently, and having one made the absence of the
+other invisible.
+
+> An instrument is not usually asked to measure itself. `sdlc/001` moved the gate into an
+> excluded directory and judged the result by whether it *ran* four steps — not by whether those
+> four steps covered the gate.
+
+I had also reported "typecheck ok" after every `perf.ts` edit that afternoon. Those reports were
+true and worthless: the check was clean because it was empty. A green check on an empty set is
+indistinguishable from a green check on a covered one, unless you plant a failure and watch.
