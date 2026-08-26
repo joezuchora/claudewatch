@@ -30,6 +30,7 @@ sdlc/011-injectable-timing/spec.md
 sdlc/011-injectable-timing/plan.md
 sdlc/011-injectable-timing/review.md
 sdlc/README.md
+sdlc/012-rolling-baseline/intent.md
 ```
 
 **Amended during Stage 5.** `sdlc/011-injectable-timing/spec.md` was added because the security
@@ -76,6 +77,12 @@ excursion, per the template's own instruction.
   through to `lastError` and retry too, and so does a body that fails `response.json()`.) Assertions are untouched: the 5xx tests still
   assert `serviceUnavailable`, `retries 5xx up to MAX_RETRIES` still asserts `callCount === 2`,
   and both "succeeds on second attempt" tests still assert the retry actually happened.
+
+### `sdlc/012-rolling-baseline/intent.md`
+- The Maintain→Plan edge. Running the detector against the post-011 store surfaced a defect in
+  the detector caused by this change: its baseline is all-time, so a 10× speedup desensitises
+  it for a full retention period. Filed as a new intent rather than fixed here — widening this
+  PR to chase it would be exactly the scope creep the fence exists to prevent.
 
 ### `sdlc/README.md`
 - The running retrospective, appended to by every loop. Also carries a dated note on the

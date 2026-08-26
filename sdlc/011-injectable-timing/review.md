@@ -22,6 +22,11 @@ by quoting a figure from an earlier run.
 | `call-sites.test.ts` | 30.04 s | 2.21 s |
 | `client.test.ts` | 4.04 s | 0.15 s |
 | Tests | 512 | 529 |
+| CI run, end to end | 72 s (run 57) | **19 s** (run 58) |
+
+The CI figures are the same measurement from a machine I do not control, on a clean checkout
+including install and all three builds — which is the check that the saving is real and not an
+artifact of a warm local cache.
 
 The gate is **10.8× faster** and covers 17 more cases than it did before. `call-sites.test.ts`
 keeps 2 s of its old cost on purpose: the test asserting that `durationMs` *excludes* the retry
@@ -135,7 +140,7 @@ $ echo $?
 ```
 
 - [x] `bun run verify` exits 0
-- [ ] CI green on the PR head commit — pending the push; updated below once the run reports
+- [x] CI green on the PR head commit — `ea6554b`, run 58, all checks success
 - [x] Every acceptance criterion in `spec.md` is checked off
 
 ## Findings deliberately not fixed
@@ -158,6 +163,36 @@ $ echo $?
   Recorded rather than waved away because this repo's own recurring finding (`sdlc/README.md`)
   is that defects hide in the gap between "the composition implies it" and "the real thing was
   run." If a timeout regression ever ships, this paragraph is the first place to look.
+
+## What the pipeline said afterwards
+
+The loop's own monitoring was run against the result, since a metrics pipeline nobody consults
+is decoration:
+
+```
+$ CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787 bun run --filter @claudewatch/metrics ship
+shipped 4 events from 1 file(s); retained 0, dropped 0, skipped 0 unparseable line(s)
+
+$ curl -s http://127.0.0.1:8787/v1/stats
+{"totalEvents":20,"verify":{"runs":20,"passRate":0.9,"p50DurationMs":5959,
+ "p95DurationMs":67537,"maxDurationMs":67537,"timeouts":0}}
+
+$ bun run --filter @claudewatch/metrics detect
+healthy: 20 verify runs evaluated, no bounds breached.
+```
+
+This is the detector's **first real verdict** — every prior run reported `insufficient data`,
+because the 20-run floor took longer to reach than the loop that built it. It reached the floor
+now precisely because the gate got cheap enough to run repeatedly, which is a pleasing way for
+one loop to unblock another.
+
+And it immediately produced a finding, from the numbers rather than from reading the code:
+**p50 is 5 959 ms while p95 is 67 537 ms.** That spread is the step change this loop caused,
+still sitting inside the detector's baseline — and `detectDurationOutlier` builds its baseline
+from *all* retained history (`runs.slice(0, -1)`), not a rolling window. The outlier threshold
+is therefore pinned at 4 × 67.5 s ≈ 270 s and will stay there for the 90-day retention period.
+A 100 s hang — a 17× regression against the gate's actual behaviour — would pass unnoticed.
+Filed as `sdlc/012-rolling-baseline/intent.md`.
 
 ## What this loop says about the loop
 

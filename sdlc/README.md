@@ -96,11 +96,15 @@ becomes something people route around.
 > step. Loop 011 took the test step to 3.4 s by removing 48 s of `setTimeout` that no test
 > needed. Two consequences worth stating before anyone reads further:
 >
-> 1. **The 550 s hang, if it recurs, is now a ~100× outlier rather than a ~10× one.** That
->    makes it far easier to see, and it makes the anomaly detector's `durationOutlierMultiple`
->    of 4 fire on things that are not it. The detector's baseline is rolling, so it will
->    re-anchor on its own — but the first few post-011 verify runs will look like a step change
->    to it, because they are one.
+> 1. **The 550 s hang, if it recurs, is a far larger outlier against the new normal.** The
+>    second half of what this bullet originally said was wrong on both counts, and running the
+>    detector rather than reasoning about it is what showed that. It does **not** fire on a
+>    gate that got faster — the rule is one-sided, comparing only the *latest* run against the
+>    baseline p95. And the baseline is **not** rolling: `detectDurationOutlier` builds it from
+>    `runs.slice(0, -1)`, every retained run. So the threshold stays anchored to the pre-011
+>    p95 of 67.5 s for the full 90-day retention, putting the trip wire at ~270 s. The
+>    instrument did not get sharper; it got *blunter relative to the thing it now watches*, and
+>    a 100 s hang would pass unnoticed. Filed as `012-rolling-baseline`.
 > 2. **Nothing below is retracted.** The hang was never explained, and a faster gate does not
 >    explain it. It remains blocked on data, and the smaller baseline is a better instrument
 >    for catching it, not evidence that it is gone.
