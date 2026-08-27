@@ -153,10 +153,37 @@ function closedValue<T extends string>(value: unknown, allowed: readonly T[]): T
     : 'unknown';
 }
 
-/** Coarse bucket, so the same condition an hour later produces the same fingerprint. */
-function magnitudeBucket(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return 'na';
-  return String(Math.floor(Math.log10(value)));
+/**
+ * How far past its own threshold a run went, as a coarse ratio.
+ *
+ * Replaces `magnitudeBucket`, which was `Math.floor(Math.log10(ms))` and — across the range this
+ * detector can actually reach — a **constant**. `minOutlierMs` is 120_000 and a run cannot exceed
+ * one 300s step timeout plus the fast steps before it (`verify.ts` breaks on the first failure),
+ * so every anomaly it could raise carried the fingerprint `verify_duration_outlier:5`. The first
+ * duration anomaly of any size therefore suppressed every later one for 24 hours. (sdlc/022)
+ *
+ * The ratio is against `thresholdMs` — the value `detectDurationOutlier` already computed to
+ * decide this was an anomaly at all — and NOT against any absolute duration.
+ *
+ * That distinction is the whole design. An earlier draft used absolute bands at 120s/240s/300s
+ * keyed to `minOutlierMs` and `STEP_TIMEOUT_MS`. Two things were wrong with it. It classified a
+ * TOTAL run duration with constants that bound a SINGLE step, so five passing steps at 62s each
+ * would have been labelled a step timeout with nothing killed. And the real trigger is
+ * `max(p95 * 4, minOutlierMs)`, which MOVES: at the slowest legitimate run on record (67.5s) the
+ * floor is 270s and the draft's lowest band would have been empty — the fingerprint collapsing
+ * back to a constant under exactly the slow conditions it was built for. A ratio cannot be
+ * emptied by a moving baseline, because the baseline is its denominator.
+ */
+export function durationRatioBand(durationMs: number, thresholdMs: number): string {
+  if (!Number.isFinite(durationMs) || !Number.isFinite(thresholdMs) || thresholdMs <= 0) {
+    return 'na';
+  }
+  const r = durationMs / thresholdMs;
+  // `r < 1` is unreachable — the caller has already compared against the threshold — and maps
+  // here so the function is total rather than having an implicit gap.
+  if (r < 2) return '1x';
+  if (r < 4) return '2x';
+  return '4x';
 }
 
 /**
@@ -201,10 +228,21 @@ function detectDurationOutlier(
   if (latest.durationMs <= thresholdMs) return { anomaly: null, baseline };
 
   const multiple = latest.durationMs / p95;
+  // Computed once and used in both the fingerprint and the evidence, so the two cannot disagree.
+  const outcome = closedValue(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail'), OUTCOMES);
   return {
     anomaly: {
       kind: 'verify_duration_outlier',
-      fingerprint: `verify_duration_outlier:${magnitudeBucket(latest.durationMs)}`,
+      // `outcome` comes first because it carries more of the discrimination than the band does.
+      // A run killed at the step ceiling and a run that merely passed slowly can have almost the
+      // same total, and a band alone gives them one fingerprint — a dead gate and a green gate,
+      // indistinguishable. `outcome` is a fact recorded by verify.ts, not an inference from a sum.
+      //
+      // `failedStep` is deliberately NOT included. It would separate a typecheck hang from a test
+      // hang, but a hang that wanders between steps would then file one incident per step, which
+      // is what sdlc/009's suppression exists to prevent. Decided, not overlooked. (sdlc/022)
+      fingerprint:
+        `verify_duration_outlier:${outcome}:${durationRatioBand(latest.durationMs, thresholdMs)}`,
       severity: 'high',
       summary:
         `A verify run took ${(latest.durationMs / 1000).toFixed(1)}s against a baseline p95 of ` +
@@ -220,7 +258,7 @@ function detectDurationOutlier(
         multiple: Number(multiple.toFixed(2)),
         baselineSamples: durations.length,
         windowSize: BOUNDS.verifyBaselineWindow,
-        outcome: closedValue(latest.payload.outcome ?? (latest.ok ? 'pass' : 'fail'), OUTCOMES),
+        outcome,
       },
     },
     baseline,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { detect, BOUNDS, formatBaseline, type Suppression } from './anomaly.js';
+import { durationRatioBand, detect, BOUNDS, formatBaseline, type Suppression } from './anomaly.js';
 import type { StoredEvent } from './types.js';
 
 const T0 = Date.parse('2026-08-26T08:00:00.000Z');
@@ -479,5 +479,137 @@ describe('detect: values crossing the ingest trust boundary (sdlc/012 security p
       expect(r.anomalies[0]!.summary)
         .toBe('A verify run took 550.0s against a baseline p95 of 6.0s over 25 runs — 91.7x, past a 120s threshold.');
     }
+  });
+});
+
+// --- sdlc/022: the duration fingerprint ---
+
+/** A run of the given duration and outcome, on top of a 25-run baseline at ~30s (threshold 120s). */
+function latest(durationMs: number, outcome: 'pass' | 'fail' | 'timeout'): StoredEvent[] {
+  return [...baselineRuns(25), ev({
+    kind: 'verify_run', durationMs, ok: outcome === 'pass', receivedAt: hoursAgo(0),
+    payload: { outcome },
+  })];
+}
+
+function fingerprintOf(events: StoredEvent[]): string {
+  const r = detect(events, T0);
+  expect(r.status).toBe('anomalies');
+  return r.status === 'anomalies' ? r.anomalies[0]!.fingerprint : '';
+}
+
+describe('A1/A2 — durationRatioBand', () => {
+  test('A1 — each band, and na for unusable input', () => {
+    expect(durationRatioBand(150_000, 120_000)).toBe('1x');
+    expect(durationRatioBand(300_000, 120_000)).toBe('2x');
+    expect(durationRatioBand(600_000, 120_000)).toBe('4x');
+
+    for (const [d, t] of [[NaN, 120_000], [120_000, NaN], [Infinity, 120_000], [120_000, 0], [120_000, -1]]) {
+      expect(durationRatioBand(d!, t!)).toBe('na');
+    }
+  });
+
+  test('A2 — boundaries land in the upper band', () => {
+    expect(durationRatioBand(240_000, 120_000)).toBe('2x');   // exactly 2x
+    expect(durationRatioBand(480_000, 120_000)).toBe('4x');   // exactly 4x
+    expect(durationRatioBand(239_999, 120_000)).toBe('1x');
+    expect(durationRatioBand(479_999, 120_000)).toBe('2x');
+  });
+
+  test('A3 — the band is RELATIVE, not absolute', () => {
+    // The property the replaced design could not have: the same ratio gives the same band at any
+    // scale. An absolute band keyed to a fixed floor would call these different.
+    expect(durationRatioBand(300_000, 150_000)).toBe('2x');
+    expect(durationRatioBand(3_000_000, 1_500_000)).toBe('2x');
+    expect(durationRatioBand(30_000, 15_000)).toBe('2x');
+  });
+});
+
+describe('A9 — every band stays reachable when the baseline moves', () => {
+  test('at the slowest legitimate run on record, all three bands are still reachable', () => {
+    // THE criterion that would have caught the replaced design. The trigger is
+    // max(p95 * durationOutlierMultiple, minOutlierMs), which MOVES: at p95 = 67.5s it is 270s,
+    // and the draft's lowest absolute band [120s, 240s) was entirely below it — empty, with the
+    // fingerprint collapsing back toward a constant under exactly the slow conditions it was for.
+    //
+    // Computed the way detectDurationOutlier computes it, not restated as 270_000.
+    const p95 = 67_500;
+    const threshold = Math.max(p95 * BOUNDS.durationOutlierMultiple, BOUNDS.minOutlierMs);
+    expect(threshold).toBe(270_000);
+
+    const bands = new Set([
+      durationRatioBand(threshold * 1.5, threshold),
+      durationRatioBand(threshold * 3, threshold),
+      durationRatioBand(threshold * 5, threshold),
+    ]);
+    expect(bands).toEqual(new Set(['1x', '2x', '4x']));
+  });
+
+  test('and at a fast baseline too — the bands do not depend on the floor at all', () => {
+    for (const threshold of [120_000, 270_000, 1_000_000]) {
+      const bands = new Set([
+        durationRatioBand(threshold * 1.5, threshold),
+        durationRatioBand(threshold * 3, threshold),
+        durationRatioBand(threshold * 5, threshold),
+      ]);
+      expect(bands.size).toBe(3);
+    }
+  });
+});
+
+describe('A4/A5/A8/A10 — the fingerprint through detect', () => {
+  test('A4 — a blip and a hang get DIFFERENT fingerprints', () => {
+    // The motivating case. Under magnitudeBucket both were `verify_duration_outlier:5`, so the
+    // blip's 24h suppression swallowed the hang entirely.
+    const blip = fingerprintOf(latest(150_000, 'pass'));
+    const hangFp = fingerprintOf(latest(900_000, 'timeout'));
+    expect(blip).not.toBe(hangFp);
+
+    // ...and the old scheme is shown to collide, in the same test, so this cannot pass against it.
+    const oldBucket = (v: number) => String(Math.floor(Math.log10(v)));
+    expect(oldBucket(150_000)).toBe(oldBucket(900_000));
+  });
+
+  test('A5 — two runs in the same band and outcome SHARE a fingerprint', () => {
+    // The suppression property that must survive. Non-vacuous only beside A4/A10.
+    expect(fingerprintOf(latest(310_000, 'timeout'))).toBe(fingerprintOf(latest(320_000, 'timeout')));
+  });
+
+  test('A8 — a killed run and a slow-but-green run of similar duration DIFFER', () => {
+    // The collision `outcome` exists to break: a band alone gives a dead gate and a green gate
+    // one fingerprint.
+    expect(fingerprintOf(latest(310_000, 'timeout'))).not.toBe(fingerprintOf(latest(310_000, 'pass')));
+  });
+
+  test('A10 — different where it matters, same where it should be', () => {
+    // Fails against magnitudeBucket, against an unwired band function, and against a constant.
+    expect(fingerprintOf(latest(150_000, 'timeout'))).not.toBe(fingerprintOf(latest(550_000, 'timeout')));
+    expect(fingerprintOf(latest(310_000, 'timeout'))).toBe(fingerprintOf(latest(320_000, 'timeout')));
+  });
+
+  test('the fingerprint is a bounded string of closed-set parts', () => {
+    expect(fingerprintOf(latest(550_000, 'timeout'))).toBe('verify_duration_outlier:timeout:4x');
+    expect(fingerprintOf(latest(150_000, 'pass'))).toBe('verify_duration_outlier:pass:1x');
+  });
+});
+
+describe('A6/A7 — suppression across different and same conditions', () => {
+  test('A6 — a blip\'s suppression does NOT suppress a later hang', () => {
+    const blipFp = fingerprintOf(latest(150_000, 'pass'));
+    const r = detect(latest(900_000, 'timeout'), T0, [{ fingerprint: blipFp, raisedAt: hoursAgo(1) }]);
+    expect(r.status).toBe('anomalies');
+    expect(r.status === 'anomalies' ? r.suppressed : []).toEqual([]);
+  });
+
+  test('A7 — a MATCHING fingerprint still suppresses', () => {
+    // A6's non-vacuous pair: without this, an isSuppressed that never matched would pass A6.
+    const hangFp = fingerprintOf(latest(900_000, 'timeout'));
+    const r = detect(latest(900_000, 'timeout'), T0, [{ fingerprint: hangFp, raisedAt: hoursAgo(1) }]);
+    // When every anomaly is suppressed the status is 'healthy', with `suppressed` populated —
+    // reported rather than silently dropped. A first version of this test asserted 'anomalies'
+    // and read an empty list through a false ternary, which is a test bug that looks like a code
+    // bug. The existing suppression test three describes up has the right shape.
+    expect(r.status).toBe('healthy');
+    expect(r.status === 'healthy' ? r.suppressed.map(a => a.fingerprint) : []).toContain(hangFp);
   });
 });
