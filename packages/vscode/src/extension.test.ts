@@ -5,43 +5,74 @@
  * the way a user does — through `activate` and the registered `claudewatch.refresh` command — so
  * what is under test is what ships. (sdlc/027 Q1, settled by running it.)
  *
- * NETWORK SAFETY, by construction and not by stub. `HOME` points at a temp dir holding an ALREADY
- * EXPIRED credential. If the bridge mock below ever loses `mock.module`'s process-wide
- * last-writer-wins race, `extension.ts` gets the REAL `resolveCredentials` — which then returns
- * `invalid` from the expired fixture and exits before `fetchUsage`. The throwing `fetchUsage`
- * stub is the SECOND layer. sdlc/024 is what happens when the stub is the only layer.
+ * NETWORK SAFETY — two layers, and the first one is NOT an isolated HOME.
+ *
+ * The first version of this file set `process.env.HOME` to a temp dir with an expired credential
+ * and claimed the network was unreachable "by construction". **That layer did not exist.** On bun,
+ * `os.homedir()` is fixed at process start and does not re-read HOME, so `getCredentialPath()`
+ * still resolved to the developer's real `~/.claude/.credentials.json`. Measured:
+ *
+ *     homedir() before: /root
+ *     process.env.HOME = /tmp/fake   ->   homedir() after: /root
+ *     getCredentialPath(): /root/.claude/.credentials.json
+ *
+ * The pattern was lifted from sdlc/024's `seedSandboxHome`, where setting HOME works because it
+ * goes into a CHILD PROCESS's spawn env. In-process it does nothing. Worse than a missing guard:
+ * the docstring asserted the guarantee, so the next reader would have built on it. Found by the
+ * sdlc/027 security pass.
+ *
+ * What actually holds egress shut:
+ *
+ *   1. `globalThis.fetch` is replaced with a thrower for the whole file. `client.ts:75` calls the
+ *      global, so this blocks a live request no matter which module lost `mock.module`'s
+ *      process-wide race — which is the failure mode sdlc/024 paid for.
+ *   2. The `./extension-bridge.js` mock's `fetchUsage` throws unless a case opts in.
+ *
+ * TELEMETRY: `setCacheBaseDir` points the spool at a temp dir, because unlike HOME it DOES take
+ * effect in-process (measured). Without it this file's real `StatusBarManager` calls real
+ * `emitProcess`, and core's `processConfig` is whatever an earlier test file left — the security
+ * pass produced 14+ render lines in the real `~/.cache/claudewatch/metrics-spool.jsonl` that way.
  *
  * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): `activate`'s
  * config-change handlers, the polling timer's scheduling, and `commands.ts`. There is a
  * `test.todo` per gap so `bun test` prints them.
  */
 import { describe, expect, test, mock, beforeAll, afterAll, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { join } from 'path';
-import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
+import { makeTestSnapshot, setupTestCacheDir } from '@claudewatch/core/test-helpers';
+import { getCacheDir } from '@claudewatch/core';
 import type { UsageSnapshot } from '@claudewatch/core';
 
-// --- network safety: an isolated HOME with an expired credential ---
+// --- layer 1: no egress, whatever else goes wrong ---
 
-let home: string;
-const realHome = process.env.HOME;
+const realFetch = globalThis.fetch;
+let cacheCleanup: (() => void) | null = null;
+
 beforeAll(() => {
-  home = mkdtempSync(join(tmpdir(), 'cw-ext-'));
-  mkdirSync(join(home, '.claude'), { recursive: true, mode: 0o700 });
-  writeFileSync(join(home, '.claude', '.credentials.json'), JSON.stringify({
-    claudeAiOauth: {
-      accessToken: 'sk-ant-oat01-EXTENSION-TEST-NOT-REAL',
-      refreshToken: 'r',
-      expiresAt: Date.now() - 86_400_000,   // already expired: no miss can become a live request
-    },
-  }), { mode: 0o600 });
-  process.env.HOME = home;
-  process.env.USERPROFILE = home;           // os.homedir() follows this on Windows (sdlc/013)
+  globalThis.fetch = (() => {
+    throw new Error('extension.test.ts: a live fetch was attempted. No test here may reach the network.');
+  }) as unknown as typeof fetch;
+  const t = setupTestCacheDir();
+  cacheCleanup = t.cleanup;
 });
+
 afterAll(() => {
-  process.env.HOME = realHome;
-  if (home) rmSync(home, { recursive: true, force: true });
+  globalThis.fetch = realFetch;
+  cacheCleanup?.();
+});
+
+describe('the safety layers themselves', () => {
+  test('the spool is redirected away from the real cache dir', () => {
+    // The assertion that would have caught the inert-HOME defect had it been written against the
+    // thing that matters rather than against the env var.
+    expect(getCacheDir()).not.toBe(join(homedir(), '.cache', 'claudewatch'));
+    expect(getCacheDir().startsWith(tmpdir())).toBe(true);
+  });
+
+  test('global fetch throws', () => {
+    expect(() => (globalThis.fetch as unknown as () => void)()).toThrow(/live fetch was attempted/);
+  });
 });
 
 // --- the vscode stub ---

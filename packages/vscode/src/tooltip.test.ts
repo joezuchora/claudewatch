@@ -43,6 +43,10 @@ mock.module('vscode', () => ({
     })),
   },
   workspace: {
+    // extension.ts:115 calls this unguarded. The security pass found the SUPERSET claim above was
+    // not true without it — the comment asserted a property the code did not have, which is the
+    // exact shape it exists to prevent. (sdlc/027)
+    onDidChangeConfiguration: (): { dispose(): void } => ({ dispose(): void {} }),
     getConfiguration: mock(() => ({
       get: <T>(_key: string, defaultValue: T): T => defaultValue,
     })),

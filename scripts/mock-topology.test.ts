@@ -230,6 +230,17 @@ describe('discovery', () => {
       .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
   });
 
+  test('a string containing // or /* does not hide a real mock', () => {
+    // False negatives found by the sdlc/027 security pass. The `a//b` shape measured [] before the
+    // stripper was anchored to line-leading comments; a guard that MISSES a mock is worse than one
+    // that reports a phantom.
+    expect(findMocks([f('a/x.test.ts', "const p = 'a//b'; mock.module('./real.js', () => ({}));")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+    expect(findMocks([f('a/y.test.ts',
+      "const g = '**/*.test.ts';\nmock.module('./real.js', () => ({}));\nconst h = '*/';")]))
+      .toEqual([{ testPath: 'a/y.test.ts', specifier: './real.js' }]);
+  });
+
   test('prose mentioning mock.module in a comment is not a mock', () => {
     // `a/x.test.ts`, not `a/x.ts`. As `a/x.ts` this passed because findMocks bails on
     // isTestFile before the regex is consulted — green for a reason unrelated to its name.

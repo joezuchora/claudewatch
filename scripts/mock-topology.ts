@@ -111,8 +111,14 @@ export function findMocks(files: readonly SourceFile[]): Array<{ testPath: strin
  */
 export function normalizeForScan(text: string): string {
   return text
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments, including docstrings
-    .replace(/(?<!:)\/\/[^\n]*/g, ' ')        // line comments, but not the // in a URL
+    // LINE-LEADING comments only. A greedy `/\*[\s\S]*?\*\//g` eats everything between a string
+    // containing `/*` (a glob like '**/*.test.ts') and the next `*/` anywhere in the file, and an
+    // unanchored `//` eats the rest of a line after a string like 'a//b' — both silently dropping a
+    // real mock.module call, which is a FALSE NEGATIVE in a guard whose whole job is not to miss
+    // one. Found by the sdlc/027 security pass; the `a//b` shape was measured returning [].
+    // Every comment in this repo is line-leading, so anchoring costs nothing.
+    .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ' ')
+    .replace(/^[ \t]*\/\/[^\n]*/gm, ' ')
     .replace(/\{[^{}]*\}/g, (m) => m.replace(/\s+/g, ' ')); // collapse wrapped brace groups
 }
 
