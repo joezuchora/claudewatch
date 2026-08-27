@@ -108,6 +108,15 @@ export interface SandboxSeed {
   credentialsPath: string;
   /** The utilization the seeded envelope renders. Assert on THIS, never on a literal. */
   utilizationPct: number;
+  /**
+   * The child environment that actually isolates a spawn. Spread this — pinning HOME alone is
+   * NOT enough: `os.homedir()` follows USERPROFILE on Windows, a supported target (SPEC.md
+   * §13.1), so a HOME-only spawn runs against the developer's REAL credentials and REAL cache
+   * there. scripts/perf.ts learned that in sdlc/013 and smoke.test.ts did not, which is the
+   * same drift this helper exists to end — so the env travels WITH the sandbox rather than
+   * being re-derived by each caller. (sdlc/024 security pass)
+   */
+  env: Record<string, string>;
 }
 
 /**
@@ -126,8 +135,17 @@ export interface SandboxSeed {
  *
  *  - **`fetchedAt` is a hazard, not a free parameter.** Seeding a stale one puts the binary on
  *    main.ts:249-255, which WRITES the cache — which would trip scripts/perf.ts's mtime guard
- *    and report the samples as non-cache-hits. Staleness is recomputed from `fetchedAt` at
- *    render; the seeded `freshness` block is decorative and only its presence is checked.
+ *    and report the samples as non-cache-hits.
+ *  - **The `freshness` block is NOT decorative.** An earlier draft of this comment said it was,
+ *    on the grounds that `readCacheResult` checks only its presence. That is true of the READER
+ *    and false of everything downstream: `freshness.isStale` has nine production readers
+ *    (format.ts:82,138,402,429 — which append a literal " stale" to the rendered line —
+ *    state.ts:29,40, main.ts:249, extension.ts:172). Seeding `isStale: true` would leave every
+ *    smoke assertion green, because they match "42%" and a stale line still contains it, while
+ *    silently exercising the stale render path. `seedSandboxHome` therefore keeps
+ *    `makeTestSnapshot`'s `isStale: false`, and test-helpers.test.ts asserts it. This is the
+ *    second time in one loop that "nothing reads this field" turned out false — the same claim
+ *    about `staleReason` was corrected in the spec two sections before this one was written.
  *  - **The default seed expires in 600 seconds**, `isCacheFresh`'s default TTL. A suite that
  *    seeds once and spawns for longer than that will start missing the cache.
  *
@@ -142,8 +160,17 @@ export function seedSandboxHome(opts: {
   envelope?: Partial<CacheEnvelope>;
   seedCache?: boolean;
   fetchedAt?: string;
+  /** Override the deliberately-expired default. Only a case that WANTS a live fetch needs it. */
+  expiresAt?: number;
 }): SandboxSeed {
-  const utilizationPct = opts.utilizationPct ?? 42;
+  // This is the only code in the repo that writes a file named `.credentials.json`. A prefix
+  // carrying a separator or `..` would place one outside tmpdir().
+  if (/[/\\]|\.\./.test(opts.prefix)) {
+    throw new Error(`seedSandboxHome: prefix must be a bare name, got ${JSON.stringify(opts.prefix)}`);
+  }
+
+  let utilizationPct = opts.utilizationPct ?? 42;
+  let snapshot: UsageSnapshot | undefined;
   const home = mkdtempSync(join(tmpdir(), opts.prefix));
 
   // Modes at creation, not after: a writeFileSync-then-chmod leaves a 0644 window, and this
@@ -159,7 +186,15 @@ export function seedSandboxHome(opts: {
     claudeAiOauth: {
       accessToken: opts.accessToken,
       refreshToken: 'r',
-      expiresAt: 4102444800000,
+      // ALREADY EXPIRED, deliberately. The previous copies used a year-2100 timestamp, which
+      // made `resolveCredentials` return `valid` — so any path that missed the cache
+      // (seedCache: false, an expired 600s TTL, a CACHE_VERSION bump, --refresh) fell through
+      // to a LIVE authenticated GET carrying this token. I hit that path by hand while scoping
+      // sdlc/024. An expired credential exits 2 at main.ts:273 before `fetchUsage` is reached,
+      // which makes the sandbox network-inert BY CONSTRUCTION rather than by every caller
+      // remembering to seed a valid cache. The fresh-cache branch at main.ts:240 runs before
+      // credentials are resolved at :261, so cache-hit cases are unaffected.
+      expiresAt: opts.expiresAt ?? Date.now() - 86_400_000,
     },
   };
   writeFileSync(credentialsPath, JSON.stringify(creds), { mode: 0o600 });
@@ -169,7 +204,7 @@ export function seedSandboxHome(opts: {
     // Overrides are written as an INLINE literal on purpose: excess-property checking is
     // skipped when the argument is a pre-declared variable, so hoisting this to a `const` would
     // let a stray field through — which is one of the three defects this helper exists to stop.
-    const snapshot = opts.snapshot ?? makeTestSnapshot({
+    snapshot = opts.snapshot ?? makeTestSnapshot({
       fetchedAt: opts.fetchedAt ?? new Date().toISOString(),
       fiveHour: { utilizationPct, resetsAt: '2099-01-01T00:00:00.000Z' },
       sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
@@ -179,6 +214,10 @@ export function seedSandboxHome(opts: {
         primaryResetsAt: '2099-01-01T00:00:00.000Z',
       },
     });
+    // Derived from the snapshot actually seeded, not echoed back from the input: a caller who
+    // passes `snapshot` would otherwise get `utilizationPct` reporting 42 regardless, which
+    // would make the field's own docstring ("assert on THIS") a lie.
+    utilizationPct = snapshot.display.primaryUtilizationPct ?? utilizationPct;
     writeFileSync(
       cachePath,
       JSON.stringify(makeTestEnvelope({ snapshot, ...opts.envelope })),
@@ -186,5 +225,13 @@ export function seedSandboxHome(opts: {
     );
   }
 
-  return { home, cachePath, credentialsPath, utilizationPct };
+  const env: Record<string, string> = {
+    HOME: home,
+    USERPROFILE: home,   // os.homedir() follows this on Windows
+    HOMEDRIVE: '',
+    HOMEPATH: home,
+    CLAUDEWATCH_TELEMETRY: '0',
+  };
+
+  return { home, cachePath, credentialsPath, utilizationPct, env };
 }

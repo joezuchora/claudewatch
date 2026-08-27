@@ -128,14 +128,11 @@ export function measure(bin: string, samples: number): number[] {
     // a supported build target — so pinning only HOME would run the binary against the
     // developer's REAL credentials and REAL cache on Windows, and the mtime guard below would
     // check an untouched sandbox file and report a pass. (security pass, sdlc/013)
-    const env = {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      HOMEDRIVE: '',
-      HOMEPATH: home,
-      CLAUDEWATCH_TELEMETRY: '0',
-    } as Record<string, string>;
+    //
+    // That pinning now lives on the seed itself rather than here: smoke.test.ts had this exact
+    // gap while this file did not, which is the drift sdlc/024 exists to end. The env travels
+    // with the sandbox so a caller cannot forget it.
+    const env = { ...process.env, ...seed.env } as Record<string, string>;
 
     const one = (index: number, capture = false): { ms: number; out: string } => {
       const t0 = Bun.nanoseconds();

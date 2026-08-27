@@ -48,7 +48,7 @@ function runWithStdin(
   return new Promise((resolvePromise) => {
     const started = Date.now();
     const child = spawn(BIN, [], {
-      env: { ...process.env, HOME: seed.home, CLAUDEWATCH_TELEMETRY: '0' },
+      env: { ...process.env, ...seed.env },
       stdio: [stdio, 'pipe', 'ignore'],
     });
 
@@ -159,7 +159,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await new Promise<RunResult>((res) => {
       const started = Date.now();
       const child = spawn(BIN, ['--version'], {
-        env: { ...process.env, HOME: seed.home }, stdio: ['pipe', 'pipe', 'ignore'],
+        env: { ...process.env, ...seed.env }, stdio: ['pipe', 'pipe', 'ignore'],
       });
       let stdout = '';
       child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });

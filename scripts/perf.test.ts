@@ -202,7 +202,7 @@ describe('the CLI, run the way the gate runs it', () => {
       expect(homes.size).toBe(1);                                  // one sandbox for the whole run
       const [seen] = [...homes];
       expect(seen).not.toBe(ambient);                              // NOT the inherited HOME
-      expect(seen).toContain('cw-perf-');                          // the sandbox makeSandbox built
+      expect(seen).toContain('cw-perf-');                          // the sandbox seedSandboxHome built
       expect(existsSync(seen!)).toBe(false);                       // and cleaned up afterwards
 
       // And nothing of ours was written where it was told not to write.

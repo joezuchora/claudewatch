@@ -11,8 +11,15 @@
 Four moves, in this order, because each makes the next safe:
 
 1. **`makeTestEnvelope` delegates to `makeCacheEnvelope`.** One line. It fixes the `version: 1`
-   trap and the missing `lastHttpStatus`/`lastErrorMessage`, and it is what lets the new seeder
-   write a correct envelope without knowing anything about versions.
+   trap, and it is what lets the new seeder write a correct envelope without knowing anything
+   about versions.
+
+   *Corrected at Stage 5 (audit C-4):* this originally also claimed the delegation fixes "the
+   missing `lastHttpStatus`/`lastErrorMessage`". `makeTestEnvelope` was never missing them —
+   `7a0e0a8:test-helpers.ts:68-69` has both. The two fields were missing from the **hand-rolled
+   seeds** in `smoke.test.ts` and `perf.ts`, which now get them by routing through this
+   function. Conflating the helper with its copies is precisely the confusion this loop is
+   about, committed in the plan for the loop.
 2. **Add `seedSandboxHome` beside it**, building its snapshot through the typed
    `makeTestSnapshot`. This is the guard: `tsc` now sees the fixture.
 3. **Point all three consumers at it** and delete their local copies.
@@ -103,9 +110,15 @@ the child.
 | Criterion | Where | What would make it fail |
 |---|---|---|
 | A2 round trip | `test-helpers.test.ts` | `makeTestEnvelope` emitting any version the reader rejects |
+| freshness | `test-helpers.test.ts` | a seeded snapshot that is stale (added at Stage 5, audit C-1) |
+| fetchedAt default | `test-helpers.test.ts` | a default outside the 600s TTL (added at Stage 5, audit C-2) |
+| `utilizationPct` truthful | `test-helpers.test.ts` | echoing the argument instead of the seeded snapshot (Stage 5, C-5) |
+| credential expired | `test-helpers.test.ts` | a fixture credential that resolves `valid` (security #1) |
+| env pinning | `test-helpers.test.ts` | a seed pinning HOME alone (security #2) |
+| prefix traversal | `test-helpers.test.ts` | a prefix escaping tmpdir (security #3) |
 | A2 precondition | same test | `{ version: 0 }` **not** yielding `versionMismatch` + deletion |
 | A4 honours input | `test-helpers.test.ts` | a seeder that ignores `utilizationPct` (seeded 77, no default is 77) |
-| A6 modes on disk | `test-helpers.test.ts` | mode set after creation, or not at all |
+| A6 modes on disk | `test-helpers.test.ts` | the mode being wrong on disk — **not** the mode being set late; see Verification §3, and audit finding C-3 |
 | A3 schema guard | manual mutation, recorded | `perf.ts` absorbing a new required field silently |
 | A5 no bare `42%` | `grep` | a literal reappearing |
 | A1 no local fixtures | `grep` | a consumer regrowing its own |
