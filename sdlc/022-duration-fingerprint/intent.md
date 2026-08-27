@@ -19,11 +19,15 @@ reach:
 | 300s — a single step hitting `STEP_TIMEOUT_MS` | 5 |
 | 900s | 5 |
 | 999s | 5 |
-| 1000s+ — needs several steps each near-timeout | 6 |
+| 1000s+ | 6 — but see below: **unreachable** |
 
-`minOutlierMs` is 120,000 and `STEP_TIMEOUT_MS` is 300,000, so a realistic hang is one timed-out
-step plus four normal ones — around 320s. **Every anomaly the detector can raise in practice
-carries the fingerprint `verify_duration_outlier:5`.**
+`minOutlierMs` is 120,000 and `STEP_TIMEOUT_MS` is 300,000. `scripts/verify.ts:217` breaks on the
+first failing step, so **at most one step can time out in a run** — the ceiling is one 300s
+timeout plus the fast steps before it, about 325s. Bucket 6 needs 1000s and is therefore
+structurally unreachable.
+
+**Every anomaly the detector can raise carries the fingerprint `verify_duration_outlier:5`.**
+Not "usually" — always, within the range the system can produce.
 
 So the bucket is not coarse. It is, across the reachable range, **a constant**.
 
