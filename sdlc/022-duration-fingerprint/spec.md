@@ -1,130 +1,148 @@
 # Spec: a duration fingerprint that discriminates
 
-- **Status:** draft — one band removed as structurally unreachable, found by reading verify.ts's control flow rather than assuming it
+- **Status:** revised — the first draft's band table was anchored to the wrong constants and
+  asserted causes the number cannot show
 - **Stage:** 2 — Design
-- **Reads:** `sdlc/022-duration-fingerprint/intent.md`
+- **Reads:** `intent.md`
+- **Review:** `review-spec.md`
 
 ## The decision
 
-Replace `magnitudeBucket`'s `log10` with an **explicit band table keyed to this gate's own
-timings**, and include the band name in the fingerprint.
-
 ```
-verify_duration_outlier:elevated      120s ≤ d < 240s
-verify_duration_outlier:severe        240s ≤ d < 300s
-verify_duration_outlier:stepTimeout   300s ≤ d          (open-ended)
+verify_duration_outlier:${outcome}:${ratioBand}
 ```
 
-> **Corrected before review returned.** A first draft had a fourth band, `multiTimeout`, at
-> 600s+. It is **structurally unreachable**: `scripts/verify.ts:217` breaks on the first failing
-> step, so at most one step can time out in a run. The ceiling is one 300s timeout plus the fast
-> steps preceding it — about 325s. Designing a band for 600s+ would have been a boundary chosen
-> against a range I had not measured, which is `sdlc/013`'s error in new clothes.
->
-> The top band is therefore open-ended rather than capped. Nothing is unrepresentable, and no
-> number pretends to a precision the system cannot produce.
+- **`outcome`** — `pass` | `fail` | `timeout` | `unknown`, already on the payload and already
+  normalized through `closedValue(..., OUTCOMES)` at `anomaly.ts:223`.
+- **`ratioBand`** — `1x` | `2x` | `4x`, from `durationMs / thresholdMs`, where `thresholdMs` is
+  the value the detector *already computed to decide this was an anomaly at all*.
 
-Below 120s is unreachable — `minOutlierMs` is the floor for raising the anomaly at all — so no
-band exists for it. The `na` case for a non-finite or non-positive duration is kept.
+| ratio | band |
+|---|---|
+| `1 ≤ r < 2` | `1x` |
+| `2 ≤ r < 4` | `2x` |
+| `4 ≤ r` | `4x` |
 
-### Why bands rather than a finer logarithm
+`r < 1` is unreachable — the anomaly only exists because `durationMs > thresholdMs` — and maps
+to `1x` so the function is total.
 
-Half-decade buckets (`Math.floor(log10(v) * 2) / 2`) would separate 150s from 900s and are a
-one-character change. Rejected because the boundaries would land wherever the logarithm puts
-them — 316s, 562s — and none of those numbers means anything here. **The interesting boundaries
-in this system are 120s (the threshold), 300s (`STEP_TIMEOUT_MS`), and 600s (more than one step
-timing out).** A reader seeing `stepTimeout` in a fingerprint learns something; one seeing `5.5`
-has to reconstruct the arithmetic.
+## Why the first draft was wrong
 
-This is the `sdlc/015` lesson applied forward: a threshold should be a *decision*, and the way to
-make it one is to name it after the thing it corresponds to.
+It proposed absolute bands at 120s / 240s / 300s / 600s named `elevated`, `severe`,
+`stepTimeout`, `multiTimeout`. Four separate things were wrong with that, and they are recorded
+because each is a distinct mistake:
 
-### The numbers, and where each comes from
+**1. It classified a total using per-step constants.** `latest.durationMs` is `totalMs` — the sum
+of up to five steps (`verify.ts:224`). `STEP_TIMEOUT_MS` bounds *one* step. Five passing steps at
+62s total 310s and exit 0; the draft labelled that run `stepTimeout` and nothing was killed. The
+implication only runs one way: a killed step forces total ≥ 300s, but total ≥ 300s implies
+nothing about any step. The draft's whole claimed advantage over a logarithm was that a reader
+"learns something" from the name — and what they'd learn is false exactly when the machine is
+uniformly slow rather than hung, which is the condition `sdlc/015` documented.
 
-| Boundary | Value | Derived from |
+**2. The bands were anchored to a floor that moves.** The trigger is
+`max(p95 * durationOutlierMultiple, minOutlierMs)`, not `minOutlierMs`. At the observed p95 of
+67.5s the real floor is **270s**, so the draft's `elevated` band [120, 240) would be **empty** —
+and at p95 = 75s, `severe` empties too. `sdlc/012` made the baseline rolling precisely so it
+would move, and it moves most during exactly the slow periods when duration anomalies fire. The
+draft's fingerprint would have degraded back toward a constant under the conditions it was built
+for.
+
+**3. `STEP_TIMEOUT_MS` is not a constant and cannot be imported.** It is
+`Number(process.env.CLAUDEWATCH_VERIFY_TIMEOUT_MS ?? 300_000)` (`verify.ts:59`) — configurable,
+unexported, and in a module that runs the entire gate at import. The draft's A8 was
+unimplementable, and binding to `300_000` would have bound to a default while the real ceiling
+differed.
+
+**4. It asserted an architecture rule that does not exist.** *"`packages/metrics` must not import
+from `scripts/`"* — there is no such rule. The rule that exists runs the **other way**:
+`scripts/verify.ts` must not import `packages/core`, for a specific reason
+(`config.ts:36-39`). And `scripts/env.test.ts:7` imports from `packages/` freely. Presenting an
+invented constraint as an inherited one is the `sdlc/015` failure mode this spec had itself
+named two paragraphs earlier.
+
+**The revised design needs none of those constants.** A ratio against the detector's own
+threshold cannot be emptied by a moving baseline, needs no knowledge of step timeouts, and
+crosses no package boundary.
+
+## Why `outcome` carries most of the weight
+
+The intent's bar is *"two anomalies a human would call different events get different
+fingerprints."* The band table alone still collides on the pairs that matter most:
+
+| A | B | Same band? |
 |---|---|---|
-| floor | 120s | `BOUNDS.minOutlierMs` — imported, not restated |
-| `elevated`/`severe` | 240s | **2× the threshold.** The one boundary here that is a judgement rather than a constant in the system. Chosen so a run that merely doubles the alert floor is distinguishable from one approaching a step timeout. |
-| `severe`/`stepTimeout` | 300s | `STEP_TIMEOUT_MS` in `scripts/verify.ts` — a run at or past this had a step killed |
-| ~~`stepTimeout`/`multiTimeout`~~ | ~~600s~~ | **Removed.** Unreachable — see the correction above. |
+| A run killed at the ceiling (`timeout`, exit 124) | A run that passed in 310s (`pass`, exit 0) | Yes — dead gate and green gate, one fingerprint |
+| A `typecheck` hang (~300s) | A `test` hang (~315s) | Yes |
 
-**300s and 600s must not be hardcoded twice.** `scripts/verify.ts` owns `STEP_TIMEOUT_MS` and
-`packages/metrics` must not import from `scripts/`. So the value is declared in `BOUNDS` with a
-comment naming its source, and a test asserts the two agree — the same shape as `sdlc/021`'s
-`MAX_LINE_BYTES` binding, and for the same reason: a duplicated constant that nothing checks is
-`sdlc/015` waiting to happen.
+`outcome` is a fact recorded by `verify.ts:135`, not an inference from a sum. Putting it first in
+the fingerprint separates *the gate was killed* from *the box was slow* — which is what "different
+events" actually means here — and costs one field.
+
+**`failedStep` is deliberately not included.** It would separate the typecheck/test hang pair, and
+`sdlc/009`'s suppression exists so a recurring condition files one incident rather than twelve; a
+hang that wanders between steps would then file one per step. That is a real trade and this is the
+place it is decided rather than discovered. Recorded as an open question, not a settled one.
 
 ## Behavioral contract
 
-### `durationBand(ms: number): string`
+### `durationRatioBand(durationMs: number, thresholdMs: number): string`
 
-Replaces `magnitudeBucket`. Not exported from the package's public surface — internal to
-`anomaly.ts` — but exported from the module so its test can reach it.
+Exported from `anomaly.ts` so its test can reach it.
 
-| Input | Output |
+| Condition | Result |
 |---|---|
-| non-finite, ≤ 0 | `'na'` |
-| `0 < d < 120_000` | `'belowThreshold'` |
-| `120_000 ≤ d < 240_000` | `'elevated'` |
-| `240_000 ≤ d < 300_000` | `'severe'` |
-| `300_000 ≤ d` | `'stepTimeout'` |
-
-`belowThreshold` is unreachable from `detectDurationOutlier` (the caller has already compared
-against `minOutlierMs`), and exists so the function is **total** rather than having an implicit
-gap. A closed set of four strings also keeps the fingerprint §17-safe, which the old
-`String(number)` was only incidentally.
+| either argument non-finite, or `thresholdMs <= 0` | `'na'` |
+| `r < 2` (including `r < 1`) | `'1x'` |
+| `2 ≤ r < 4` | `'2x'` |
+| `4 ≤ r` | `'4x'` |
 
 ### Fingerprint
 
-`verify_duration_outlier:${durationBand(latest.durationMs)}`
+`verify_duration_outlier:${closedValue(payload.outcome, OUTCOMES)}:${durationRatioBand(durationMs, thresholdMs)}`
 
-Same shape as today, so `isSuppressed`'s equality match is unchanged.
+Both components are members of closed sets, so the fingerprint remains a bounded string —
+worth having, though **not** for the reason the draft gave. Fingerprints go to a machine-local
+`suppressions.json` and to incident drafts; neither is telemetry, so `SPEC.md` §17 does not
+govern them. The draft claimed it did. It does not.
 
 ## Edge cases
 
 | # | Case | Behavior |
 |---|---|---|
-| E1 | Exactly 120_000 | `elevated`. The threshold is `>`, so this is unreachable in practice, but the band table must not have a hole at its own floor. |
-| E2 | Exactly 300_000 | `stepTimeout`. A step killed at exactly the ceiling is a timeout, not a near-miss. |
-| E3 | `NaN`, `Infinity`, `-1`, `0` | `'na'`, as today. |
-| E4 | A blip then a hang within 24h | **Different fingerprints, so the hang is NOT suppressed.** The case the loop exists for. |
-| E5 | Two hangs of similar size within 24h | Same fingerprint, second suppressed. `sdlc/009`'s reason preserved. |
-| E6 | A duration beyond any plausible run (e.g. 10^7 ms) | `stepTimeout`. The top band is open-ended, so there is no upper bound to get wrong — and nothing above it to leave unrepresentable. |
-| E7 | **No anomaly has ever fired.** 115 recorded runs, median 11.1s, max 67.5s, none over the 120s threshold. | This change is therefore untestable against production data and is tested against synthetic events only. Stated because a reader could otherwise assume the bands were tuned to observed anomalies; they are tuned to the system's *structure* — the threshold and the step timeout — which is the only evidence available. |
+| E1 | `r` exactly 2 or 4 | Upper band. |
+| E2 | `thresholdMs` is 0 or negative | `'na'`. Unreachable — `detectDurationOutlier` returns early when `p95 <= 0` — kept for totality. |
+| E3 | A blip (`r≈1.1`, `pass`) then a hang (`r≈4`, `timeout`) within 24h | **Different on both components.** The case the loop exists for. |
+| E4 | The same hang recurring at `r` 4.1 then 4.3 | Same fingerprint, second suppressed. `sdlc/009` preserved. |
+| E5 | **A recurring condition straddling a boundary** — `r` oscillating 1.9 / 2.1 / 1.95 | **Alternates fingerprints and files roughly every other hour.** This is a real regression against `log10`, whose only boundary sat outside the reachable range. Accepted knowingly: `outcome` is stable across such oscillation, so the pair still collapses to two fingerprints rather than twelve, and a ratio boundary is far from the distribution's mass in a way an absolute one is not. Recorded so it is a decision. |
+| E6 | No anomaly has ever fired | 115 recorded runs, median 11.1s, max 67.5s, none over threshold. Tested against synthetic events only; the bands are tuned to the detector's own structure, not to observed anomalies, because there are none. |
 
 ## Acceptance criteria
 
 | # | Criterion |
 |---|---|
-| A1 | Each band returns its documented name for a value inside it, asserted per band |
-| A2 | Each boundary value lands in the **upper** band: 120_000 ⇒ `elevated`, 240_000 ⇒ `severe`, 300_000 ⇒ `stepTimeout` |
-| A3 | `na` for `NaN`, `Infinity`, `-Infinity`, `0`, `-1` |
-| A4 | **The motivating case**: 150s and 900s produce *different* fingerprints — and, in the same test, today's `log10` scheme is shown to produce the *same* one, so the test cannot pass against the old code |
-| A5 | Two runs in the same band produce the *same* fingerprint — the suppression property that must survive |
-| A6 | **A blip does not suppress a later hang**: drive `evaluate` with a 150s anomaly, record the suppression, then a 900s anomaly, and assert the second is raised rather than suppressed |
-| A7 | Two similar hangs *are* suppressed, through the same `evaluate` path — A6's non-vacuous pair |
-| A8 | `BOUNDS.stepTimeoutMs` equals `STEP_TIMEOUT_MS` in `scripts/verify.ts`, asserted by reading that file |
-| A9 | The other three fingerprints are byte-identical to today for the same inputs |
+| A1 | `durationRatioBand` returns each band for a value inside it, and `'na'` for non-finite or non-positive `thresholdMs` |
+| A2 | Boundaries land in the upper band: `r = 2` ⇒ `2x`, `r = 4` ⇒ `4x` |
+| A3 | **Bands are unaffected by the absolute duration.** 300s against a 150s threshold and 3000s against a 1500s threshold both give `2x` — the property the draft's absolute bands could not have |
+| A4 | **The motivating case, through `detect`**: with a fixed baseline, a 150s `pass` and a 900s `timeout` latest produce **different** fingerprints |
+| A5 | **The suppression property, through `detect`**: two latests in the same band with the same outcome produce the **same** fingerprint |
+| A6 | **A blip does not suppress a later hang**: run `detect`, capture the blip's fingerprint, then call `detect` again with the hang and `[{fingerprint: captured, raisedAt: hoursAgo(1)}]`; assert `status === 'anomalies'` and `suppressed` is empty |
+| A7 | **A7's non-vacuous pair**: the same construction with a *matching* fingerprint yields `suppressed` non-empty |
+| A8 | **A killed run and a slow-but-green run of similar duration get different fingerprints** — the collision `outcome` exists to break |
+| A9 | **Band reachability survives a moved baseline.** At p95 = 67.5s (threshold 270s), all three bands remain reachable, asserted by computing them — the defect that killed the draft's design |
+| A10 | For a fixed baseline, `detect` gives different fingerprints for 150_000 and 550_000, and the **same** for 310_000 and 320_000 — fails against today's code, against an unwired band function, and against a constant |
+| A11 | The other three fingerprints are unchanged (regression guard only — `magnitudeBucket` has one call site, so this cannot fail; kept, and labelled, as a guard rather than evidence) |
 
-A4 is the criterion that makes the rest non-vacuous: it pins the *change*, not just the new
-behaviour. A6/A7 exercise the real `evaluate` path rather than `durationBand` alone, because the
-defect is about suppression and suppression lives there.
+A10 is the standing guard. A4 proves the change happened; A10 keeps proving it.
 
 ## Risks
 
-- **A8 reads a file from another package.** `packages/metrics` must not *import* `scripts/`, but a
-  test may read it as text — the `sdlc/021` precedent where `env.test.ts` imports core while the
-  gate does not. If `STEP_TIMEOUT_MS`'s declaration is reformatted, the regex breaks and the test
-  goes red for the wrong reason. Acceptable: a red test naming a constant mismatch is far cheaper
-  than a silent drift.
-- **The reachable range is 120s–~325s**, so `severe` and `stepTimeout` are narrow and no run has
-  ever entered any band. The design rests on the system's structure rather than its history,
-  which is the honest basis available — but it means the band boundaries have not been validated
-  against a real anomaly and cannot be until one occurs.
-- **240s is the one invented number here.** It is a judgement, and this spec is where it is
-  argued rather than inherited. If it proves wrong the band table is one line to change — which is
-  the point of naming boundaries instead of computing them.
-- **Existing `suppressions.json` entries carry old fingerprints** (`verify_duration_outlier:5`).
-  After this change they match nothing, so a condition suppressed under the old scheme can raise
-  once more. That is correct — the old fingerprint was meaningless — but it should be stated, not
-  discovered.
+- **E5's oscillation is the known cost.** Stated above rather than discovered later.
+- **`failedStep` is omitted deliberately**, and that decision may prove wrong for the hang
+  investigation. It is one field to add if so.
+- **Existing `suppressions.json` rows carry `verify_duration_outlier:5`** and will match nothing.
+  Impact is bounded and small: `isSuppressed` already ignores rows older than 24h, so at most one
+  duplicate incident draft, on one machine, once. (`writeSuppressions` never prunes, so dead rows
+  accumulate — pre-existing, out of scope, queued.)
+- **No anomaly has ever fired**, so none of this is validated against a real event and cannot be
+  until one occurs.
