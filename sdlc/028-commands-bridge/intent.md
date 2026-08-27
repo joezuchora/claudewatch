@@ -78,14 +78,25 @@ So fixing `commands.ts` alone leaves the actual defect — the gate says nothing
 
 ## Known cost, declared up front
 
-Enabling the rule reddens two files this loop otherwise has no reason to open
-(`manifest.test.ts`, `call-sites.test.ts`). That is a **fence excursion and it is declared here in
-Stage 1**, not discovered in Stage 5 — loop 027 shipped a `plan.md` that denied an excursion
-present in the same commit, and the audit rightly called it.
+**AMENDED after the Stage 2 spec review: the excursion is seven files, not two.** The first draft
+declared two and the reviewer found four more, plus `SPEC.md`. Recording the correction here rather
+than letting Stage 5 find `intent.md` and the diff in contradiction — which is exactly what loop
+027 shipped.
 
-Item 4 also forces the `vscode` stubs to gain `Uri`, `window.showInformationMessage` and
-`env.openExternal`, which loop 027 recorded as missing and mislabelled as a "superset". That is
-this loop's problem to fix, not a surprise.
+| File | Why |
+|---|---|
+| `manifest.test.ts` | enabling the rule reddens it (7 typecheck errors under the fix) |
+| `call-sites.test.ts` | same (13) |
+| `statusbar.test.ts` | must gain `Uri` + `env.openExternal`; its "last-writer-wins" comment is false |
+| `tooltip.test.ts` | same |
+| `scripts/mock-topology.test.ts` | two new pairs and a new importer-set assertion |
+| `extension.test.ts` | the `test.todo` this loop closes, and a docstring that lists it as a gap |
+| `SPEC.md` | `§10.5` does not list `claudewatch.diagnostics` at all |
+
+The `vscode` stub work is more than loop 027's "superset" note suggested: `mock.module` turns out to
+be a per-key **composite** across files, not last-writer-wins, so a key only one stub defines can
+vanish from the merged module. Measured, not read. Giving `commands.test.ts` its own complete stub
+is provably insufficient.
 
 ## Not in scope
 
