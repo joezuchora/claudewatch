@@ -2,187 +2,209 @@
 
 - **ID:** 024-cache-seed-helper
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** accepted (revision 2, after the Stage 2 review)
 - **Reads:** `intent.md`
 - **Date:** 2026-08-27
 
+## What revision 1 got wrong
+
+The Stage 2 reviewer returned six blocking findings. Five were correct and are the reason this
+document changed shape; one I decline. Recording them here rather than only in `review.md`,
+because three of them changed the *design*, not the wording.
+
+| | Finding | Verified how | Effect |
+|---|---|---|---|
+| B1 | A3 was vacuous — it passed on the pre-change tree | the helper never overrides `freshness`, so it contains no `staleReason` to mutate; the only one is in `makeTestSnapshot`, already annotated | A3 rewritten to mutate the **schema** |
+| B2 | `scripts/perf.test.ts` is a third consumer; imports `makeSandbox`, has a whole `describe` block | `grep -n makeSandbox scripts/perf.test.ts` → lines 6, 103, 105, 123, 225, 246 | third consumer added to the fence |
+| B3 | "nothing reads `staleReason`, and never will" was false | five production readers found | intent corrected; `fetchedAt` hazard documented |
+| B4 | A4 was `x === x` after the change | trivially, once `makeTestEnvelope` returns `version: CACHE_VERSION` | replaced by an offline round-trip |
+| B5 | intent's fence forbade the `CACHE_VERSION` export the spec required | both documents read side by side | **dissolved** — see below |
+| B6 | A5's "before" state is reachable only via a live 401 | `client.ts:91` is the sole `authInvalid` source; a network error maps to `serviceUnavailable` → `⊙ error` | acceptance moved fully offline |
+
+**Declined: N4** ("Stage: 1 — Plan should be Stage 1 — Intent"). `.claude/sdlc/templates/intent.md:4`
+itself reads `**Stage:** 1 — Plan`. The header matches the repo's own template; changing it would
+put this loop out of step with the other 22.
+
+B4 is the finding that improved the design rather than just correcting it, and it cascades:
+building the fixture from the product's own writer means `CACHE_VERSION` need never be exported,
+which dissolves B5 outright and fixes M8 (both fixtures omit `lastHttpStatus` and
+`lastErrorMessage`, which `makeCacheEnvelope` supplies) for free.
+
 ## Answers to the intent's open questions
 
-**Q1 — where does the helper live?**
-`packages/core/src/test-helpers.ts`. Three facts decide it, all checked rather than assumed:
+**Q1 — where does the helper live?** `packages/core/src/test-helpers.ts`. Three facts, each
+checked: `packages/core/package.json` already publishes the subpath `"./test-helpers"`;
+`packages/statusline/package.json` already declares `"@claudewatch/core": "workspace:*"` and
+`main.test.ts:2` already imports across it; and the root `package.json` declares no workspace
+dependency, which is why `scripts/perf.ts:39` reaches relatively into
+`../packages/metrics/src/anomaly.js` — so `perf.ts` imports `../packages/core/src/test-helpers.js`
+the same way. The file already holds filesystem helpers (`makeTempCacheDir`,
+`setupTestCacheDir`), so a sandbox seeder is not a change of kind. Its docstring ("only imported
+by `*.test.ts` files") becomes false and is corrected in the same change.
 
-- `packages/core/package.json` already publishes the subpath `"./test-helpers":
-  "./src/test-helpers.ts"`, and `packages/statusline/package.json` already declares
-  `"@claudewatch/core": "workspace:*"`. `main.test.ts:2` already imports across it. So
-  `smoke.test.ts` needs no new dependency.
-- The root `package.json` declares **no** dependency on the workspace packages, which is why
-  `scripts/perf.ts:39` reaches relatively into `../packages/metrics/src/anomaly.js` instead of
-  using a package specifier. `perf.ts` therefore imports `../packages/core/src/test-helpers.js`
-  the same way. This is precedent in the file being changed, not a new pattern.
-- The file already contains filesystem helpers (`makeTempCacheDir`, `setupTestCacheDir`), so a
-  seeder that writes a sandbox `HOME` is not a change of kind.
+**Q2 — write files, or return an envelope?** Write, and return the paths. `perf.ts` needs
+`cachePath` for its mtime guard; `smoke.test.ts` needs only `home`. A helper returning an
+envelope would leave both callers re-writing the credential file, which is half of what drifted.
 
-Its docstring says "only imported by `*.test.ts` files". That becomes false and must be
-corrected in the same change: a benchmark script will import it too.
-
-**Q2 — write files, or return an envelope for the caller to write?**
-Write the files, and return the paths. The consumers want different things back — `perf.ts`
-needs `cachePath` for its mtime guard, `smoke.test.ts` needs only `home` — and a helper that
-returned an envelope would leave both callers re-writing the credential file, which is half of
-what drifted. One function, one write, a result object carrying every path a caller might
-assert on.
-
-**Q3 — does correcting `version: 1` change a test's meaning?**
-Yes, in exactly one place. `packages/core/src/cooldown.test.ts:61` asserts
-`expect(result.version).toBe(1)` inside a test named *"preserves existing snapshot"*. The
-number is the fixture's value copied into the assertion; the property under test is
-preservation. Its sibling at line 83 already writes the correct form,
-`expect(result.version).toBe(env.version)`. Line 61 becomes the same. That is not a weakening:
-if `enterCooldown` dropped the field, `result.version` would be `undefined` and `env.version`
-would not, so the assertion still fails for the reason it exists. The other 27 call sites pass
-the envelope to in-memory mocks and never read `.version`.
+**Q3 — does correcting `version: 1` change a test's meaning?** In one place.
+`cooldown.test.ts:61` asserts `expect(result.version).toBe(1)` inside a test named *"preserves
+existing snapshot"*; the number is the fixture's value copied into the assertion. Its sibling at
+:83 already writes the correct form, `expect(result.version).toBe(env.version)`. Line 61 becomes
+the same, which is not a weakening: a dropped field gives `undefined !== env.version`. The other
+24 call sites use in-memory mocks and never read `.version`. **A fourth literal exists** that
+revision 1 missed: `perf.test.ts:114`, `expect(envelope.version).toBe(2)`.
 
 ## Behaviour
 
-### The helper
+### 1. `makeTestEnvelope` is built from the product's writer
+
+```ts
+export function makeTestEnvelope(overrides?: Partial<CacheEnvelope>): CacheEnvelope {
+  return { ...makeCacheEnvelope(makeTestSnapshot()), ...overrides };
+}
+```
+
+`makeCacheEnvelope` (`cache.ts:196`) is exported, is what `writeCache` uses, and supplies
+`version: CACHE_VERSION` plus the `lastHttpStatus`/`lastErrorMessage` both fixtures omit. This
+single line fixes the `version: 1` trap and M8's missing row, keeps `CACHE_VERSION` private, and
+means the fixture cannot drift from the writer without the writer itself changing.
+
+### 2. The seeder
 
 ```ts
 export interface SandboxSeed {
-  /** Absolute path to the sandbox HOME. */
   home: string;
-  /** Absolute path to the seeded cache envelope. */
   cachePath: string;
-  /** Absolute path to the fixture credential. */
   credentialsPath: string;
-  /** The utilization the seeded envelope renders — assert on THIS, never on a literal. */
+  /** The utilization the seeded envelope renders. Assert on THIS, never on a literal. */
   utilizationPct: number;
 }
 
 export function seedSandboxHome(opts: {
   prefix: string;
-  utilizationPct: number;
   accessToken: string;
-  fetchedAt?: string;
+  utilizationPct?: number;              // convenience; default 42
+  snapshot?: UsageSnapshot;             // full control, e.g. makeTestEnterpriseSnapshot()
+  envelope?: Partial<CacheEnvelope>;    // e.g. cooldownUntil, or a deliberately bad version
+  seedCache?: boolean;                  // default true; false = first-run, no cache at all
 }): SandboxSeed;
 ```
+
+The wider surface is finding M9: revision 1's four-parameter version could not express an
+enterprise snapshot, a cooldown, a deliberately-rejected envelope, or a first-run sandbox — and
+the third of those is needed by this loop's own mutation demonstration.
 
 It creates `mkdtemp(<tmpdir>/<prefix>)` and inside it:
 
 | Path | Mode | Contents |
 |---|---|---|
 | `.claude/` | `0700` | — |
-| `.claude/.credentials.json` | `0600` | `{claudeAiOauth:{accessToken, refreshToken:'r', expiresAt:4102444800000}}` |
+| `.claude/.credentials.json` | `0600` | `const creds: CredentialFile = {...}` — **typed** (M5) |
 | `.cache/claudewatch/` | `0700` | — |
-| `.cache/claudewatch/usage.json` | `0600` | `makeTestEnvelope({ snapshot })` serialized |
+| `.cache/claudewatch/usage.json` | `0600` | `makeTestEnvelope({ snapshot, ...envelope })`, unless `seedCache: false` |
 
-The `0700`/`0600` column is `perf.ts`'s current behaviour, adopted over `smoke.test.ts`'s
-defaults (`0755`/`0644`). Reason, taken from the comment already at `scripts/perf.ts:107`: this
-helper is a template someone will copy to a path where the mode matters. Modes are passed to
-`mkdirSync`/`writeFileSync` at creation, not chmodded after, so no `0644` window exists — plus
-the belt-and-braces `chmodSync` `perf.ts` already carries, because `mode` is advisory against a
-permissive umask.
+Modes are `perf.ts`'s, adopted over `smoke.test.ts`'s `0755`/`0644`, and passed at creation so no
+`0644` window exists. Per M6 the `chmodSync` afterwards is **dropped**, and `perf.ts:120`'s
+justification for it ("advisory against a permissive umask") is not repeated: umask can only
+clear bits, never add them. `mode` is ignored only when the file already exists, which cannot
+happen inside a fresh `mkdtemp`.
 
-The snapshot is built by `makeTestSnapshot(...)`, whose return type is annotated
-`UsageSnapshot`. **This is the whole mechanism.** Both current seeds are `JSON.stringify` over
-an unannotated object literal, which `tsc` cannot check; routing through a typed builder means
-a schema change that invalidates the fixture is a compile error in a file `bun run typecheck`
-covers. `scripts/` has been inside that coverage since loop 018 removed it from
-`tsconfig.json`'s `exclude`.
+The snapshot is built by `makeTestSnapshot(...)`, return-annotated `UsageSnapshot`. **That is the
+whole mechanism**, and the reviewer confirmed it works by compiling all three drift rows:
+`staleReason: null` → TS2322, `ageSeconds: 0` → TS2353, missing `primaryResetsAt` → TS2741.
+`Partial<T>` loosens only the top level, so nested literals stay checked. Per N7, overrides must
+be written as **inline object literals** at the call — excess-property checking is bypassed when
+the override is a pre-declared variable.
 
-The envelope is built by `makeTestEnvelope`, so the cache version comes from one place.
+### 3. Consumers — three, not two
 
-### The `version: 1` correction
+- `packages/statusline/src/smoke.test.ts`: `makeSandbox()` deleted; `beforeAll` calls
+  `seedSandboxHome({ prefix: 'cw-smoke-', utilizationPct: 42, accessToken: '…SMOKE-TEST-NOT-REAL' })`.
+  The five `toContain('42%')` literals become `` `${seed.utilizationPct}%` ``.
+- `scripts/perf.ts`: `makeSandbox()` deleted; `measure()` calls `seedSandboxHome({ prefix:
+  'cw-perf-', utilizationPct: SENTINEL_PCT, accessToken: '…PERF-FIXTURE-NOT-REAL' })` and takes
+  `home`/`cachePath` from the result. `SENTINEL_PCT` stays exported.
+- `scripts/perf.test.ts`: its `describe('makeSandbox')` block (103–131) and the mode test
+  (224–233) retarget to `seedSandboxHome`; `perf.test.ts:114`'s `toBe(2)` is deleted in favour of
+  the round-trip in A2, which is the property that literal was reaching for.
 
-`makeTestEnvelope` changes `version: 1` to `version: CACHE_VERSION`, imported from `cache.ts`
-(which already exports nothing of the sort — see Risks). This is the change that makes hoisting
-correct rather than merely tidy: the hoisted helper writes its envelope through
-`makeTestEnvelope`, so if that still said `1`, both consumers would begin failing.
-
-### Consumers
-
-`packages/statusline/src/smoke.test.ts`: `makeSandbox()` is deleted; `beforeAll` calls
-`seedSandboxHome({ prefix: 'cw-smoke-', utilizationPct: 42, accessToken:
-'sk-ant-oat01-SMOKE-TEST-NOT-REAL' })` and keeps the result. The seven
-`expect(r.stdout).toContain('42%')` literals become `` `${seed.utilizationPct}%` ``.
-
-`scripts/perf.ts`: `makeSandbox()` is deleted; `measure()` calls `seedSandboxHome({ prefix:
-'cw-perf-', utilizationPct: SENTINEL_PCT, accessToken: 'sk-ant-oat01-PERF-FIXTURE-NOT-REAL' })`
-and takes `home` and `cachePath` from the result instead of recomputing the join. `SENTINEL_PCT`
-stays exported from `perf.ts` — it is that script's contract with its own guard, and the intent
-puts collapsing the two sentinels out of scope.
-
-Everything else in both files is untouched: the timeout guard, the mtime guard, the sentinel
-probe, the `USERPROFILE`/`HOMEDRIVE`/`HOMEPATH` pinning, the signal handlers.
+Everything else in all three files is untouched: timeout guard, mtime guard, sentinel probe,
+`USERPROFILE`/`HOMEDRIVE`/`HOMEPATH` pinning, signal handlers.
 
 ## Edge cases
 
-1. **`makeTestSnapshot`'s defaults are not the seeds' values.** It defaults `fiveHour` to `42`
-   with `resetsAt: '2026-03-07T17:00:00.000Z'` — a date in the past — and `display` to match.
-   The seeds use `'2099-01-01T00:00:00.000Z'`. The helper must override `fiveHour`, `sevenDay`,
-   and the whole `display` block together; overriding `fiveHour` alone would leave `display`
-   pointing at 42 while the window said something else. A past `resetsAt` is not obviously
-   harmless — it feeds reset-time rendering — so the helper keeps `2099`.
-2. **`fetchedAt` and staleness.** Probed against the real binary: a seed 20 minutes old renders
-   `42% stale`. Staleness is recomputed from `fetchedAt` at render; the seeded `freshness` block
-   is decorative and only its *presence* is checked (`cache.ts:113`). Default `fetchedAt` is
-   therefore `new Date().toISOString()`, matching both current seeds, and is a parameter so a
-   future case can seed a stale one deliberately.
-3. **The two consumers run concurrently.** `bun test` runs `smoke.test.ts` while `verify`'s perf
-   step may be running `perf.ts`. `mkdtempSync` guarantees distinct directories, and the
-   distinct `prefix` values keep them legible in `/tmp`. No shared path exists.
-4. **Cleanup is the caller's.** `perf.ts` registers SIGINT/SIGTERM handlers around its sandbox
-   and `smoke.test.ts` uses `afterAll`; both are existing, correct, and different. The helper
-   does not attempt a shared cleanup policy — it returns `home` and each caller keeps the
-   `rmSync` it already has.
-5. **A fake token in a shipped bundle.** The helper holds `sk-ant-oat01-*-NOT-REAL` strings and
-   lives in the core package's `src/`. `packages/core` builds with `bun build src/index.ts`, and
-   `index.ts` does not re-export `test-helpers.js`, so it should not be reachable — but "should"
-   is the word that has been wrong before in this repo. Verified against the built artifact as
-   an acceptance criterion, not asserted here.
+1. **`makeTestSnapshot`'s defaults are not the seeds' values** — `fiveHour` defaults to `42` with
+   a *past* `resetsAt`. The helper overrides `fiveHour`, `sevenDay` and the whole `display` block
+   together; overriding `fiveHour` alone would leave `display` disagreeing with it.
+2. **`fetchedAt` and staleness.** Staleness is recomputed from `fetchedAt`; the seeded `freshness`
+   block is decorative and only its presence is checked. Default is `new Date().toISOString()`.
+   Per B3 the parameter carries a hazard: a caller seeding a stale `fetchedAt` puts the binary on
+   `main.ts:249-255`, which **writes the cache** and would trip `perf.ts:207`'s mtime guard. The
+   helper's docstring says so. Kept rather than dropped, because `seedCache: false` and a
+   deliberately-stale seed are how the first-run and cooldown cases get written later.
+3. **N2 — the 600s coupling.** `isCacheFresh`'s default TTL is 600s and `smoke.test.ts` seeds once
+   in `beforeAll` for seven spawns. That is an undocumented 10-minute budget on the whole suite.
+   The helper's docstring states it.
+4. **N1 — the two consumers do not race.** `verify.ts:36-55` runs `test` then `perf`
+   sequentially; revision 1 claimed they overlap and that was wrong. The real concurrency is
+   `perf.test.ts` spawning `perf.ts` from inside `bun test`. `mkdtempSync` makes it moot.
+5. **Cleanup stays the caller's** — `perf.ts` has SIGINT/SIGTERM handlers, `smoke.test.ts` has
+   `afterAll`. Both correct, both different; the helper imposes no policy.
 
 ## Acceptance criteria
 
-Each is mechanically checkable, and each names the command that checks it.
+Every criterion is offline and deterministic. None spawns the compiled binary, and none can be
+satisfied by the pre-change tree — B6's lesson, and B1's.
 
-- **A1.** `packages/statusline/src/smoke.test.ts` and `scripts/perf.ts` contain no
-  `writeFileSync` of a credential or a cache envelope.
-  `grep -c 'claudeAiOauth' packages/statusline/src/smoke.test.ts scripts/perf.ts` → `0` for both.
-- **A2.** `bun run typecheck` exits 0.
-- **A3.** Corrupting the fixture's shape is a **compile** failure, not a silent pass: changing
-  the helper's `staleReason` to `null` — the exact invalid value `scripts/perf.ts` ships today
-  — makes `bun run typecheck` exit non-zero naming that property. Demonstrated by mutation.
-- **A4.** `makeTestEnvelope().version === CACHE_VERSION`, asserted in
-  `packages/core/src/test-helpers` coverage by a test that reads `CACHE_VERSION` rather than the
-  literal `2`.
-- **A5.** An envelope from `makeTestEnvelope()`, written to a sandbox `HOME` and read by the
-  **compiled binary**, is a cache hit: stdout contains the seeded utilization and the exit code
-  is 0. Before this change the same test yields `auth invalid` and exit 2. This is the criterion
-  that distinguishes "the number was changed" from "the trap was removed", and it must spawn the
-  real binary — the 28 existing call sites all pass because they never write to disk.
-- **A6.** Both consumers still pass: `bun test packages/statusline/src/smoke.test.ts` exits 0,
-  and `bun run perf --samples 30 --report-only` exits 0 with its sentinel probe satisfied.
-- **A7.** `bun run verify` exits 0.
-- **A8.** The seeded utilization reaches the assertions by reference: `grep -c "42%"
-  packages/statusline/src/smoke.test.ts` → `0`.
-- **A9.** Mode claims are true of the files on disk, not just of the arguments passed:
-  `statSync(cachePath).mode & 0o777 === 0o600` and the same for the credential, asserted in a
-  test that reads a sandbox the helper really created. (Loop 014 shipped a `0600` claim that was
-  `0644` on disk; the test that "checked" it chmodded a file of its own first.)
-- **A10.** `packages/core/dist/index.js` does not contain `NOT-REAL` — the fixture token is not
-  in the shipped bundle. Checked after `bun run --filter @claudewatch/core build`.
+- **A1.** No consumer builds a credential or envelope literal.
+  `grep -c "claudeAiOauth\|version\": *2\|\"version\": 2" packages/statusline/src/smoke.test.ts scripts/perf.ts`
+  → `0` for both. Run as `grep -c … || true`: `grep -c` **exits 1 on zero matches** (M4), so the
+  passing case fails a `set -e` script.
+- **A2.** *(replaces r1's A4 and A5 — the round trip, offline.)* In `packages/core`, using the
+  existing `setupTestCacheDir()`: write `JSON.stringify(makeTestEnvelope())` to the cache path,
+  then call `readCacheResult()`. Assert `reason !== 'versionMismatch'`, the returned envelope is
+  non-null, and **the file still exists afterwards**. Positive precondition in the same test: the
+  file exists *before* the read, and a deliberately-bad `makeTestEnvelope({ version: 0 })`
+  through the same path *does* yield `versionMismatch` and *does* delete the file. Without both
+  halves this is a test that proves the pipe is connected and nothing else — loop 022's shape.
+  On the pre-change tree the first half fails.
+- **A3.** *(replaces r1's vacuous A3.)* Mutate the **schema**: add a required field to
+  `UsageSnapshot` in `packages/core/src/types.ts`. After the change, `bun run typecheck` exits
+  non-zero **naming `scripts/perf.ts`**. Record the pre-change run of the same mutation, where
+  `scripts/perf.ts` is not named at all — its literal absorbs the change silently. That
+  difference is the entire point of the loop, and it is the only mutation only this loop
+  survives.
+- **A4.** *(M1 — the helper honours its input.)* A core test seeds `utilizationPct: 77` — a value
+  equal to no default anywhere — and asserts the envelope read **back off disk** has both
+  `snapshot.fiveHour.utilizationPct === 77` and `snapshot.display.primaryUtilizationPct === 77`.
+  Without this, a `seedSandboxHome` that accepted `utilizationPct` and dropped it would leave
+  `makeTestSnapshot`'s default `42` in place and every smoke assertion would still pass green.
+- **A5.** `grep -c "42%" packages/statusline/src/smoke.test.ts` → `0` **and** the file still
+  contains ≥5 `toContain` assertions referencing `seed.utilizationPct`. The second half matters:
+  the first is also satisfied by deleting every assertion in the file.
+- **A6.** Modes are true **on disk**, not just in the arguments: `expect(statSync(p).mode & 0o777)
+  .toBe(0o600)` — note the parenthesisation; `mode & 0o777 === 0o600` parses as `mode & false`
+  and is always falsy (M6). Guarded by `if (process.platform !== 'win32')`, since SPEC.md §12
+  calls modes advisory there and `packages/statusline` has a `build:windows` target. This check
+  exists today at `perf.test.ts:224-233` and is **relocated**, not written.
+- **A7.** `bun run verify` exits 0. (r1's A2 — a bare `typecheck` — is deleted: it is step 1 of
+  `verify` and was true of the tree already, M10.)
+- **A8.** No fixture token in any **shipped** artifact, after `bun run build`: `grep -c 'NOT-REAL'`
+  → 0 against `packages/statusline/dist/claudewatch` (the compiled binary SPEC.md §12 names),
+  `packages/vscode/dist/extension.js` (the VSIX payload), and `packages/core/dist/index.js`.
+  r1 checked only the last, which no consumer imports — `packages/core/package.json` points
+  `main` and `exports` at `src/index.ts` (M2).
+- **A9.** `SPEC.md:497` reads `"version": 2`. The §9.6 cache-file format documents `1` today and
+  is the likely origin of the `test-helpers.ts` bug (M7).
 
 ## Risks
 
-- **`CACHE_VERSION` is not exported.** `packages/core/src/cache.ts:12` declares it
-  `const CACHE_VERSION = 2` — module-private. A4 and the helper both need it. Exporting a
-  constant from a shipped module is a production-surface change, small but real, and it must be
-  named in `plan.md`'s fence rather than smuggled in. The alternative — re-declaring `2` in
-  `test-helpers.ts` — recreates the exact defect this loop exists to remove.
-- **A5 spawns the compiled binary**, so it belongs in a suite that already tolerates the build
-  dependency. `smoke.test.ts` has the `beforeAll` that builds on demand; putting A5 anywhere
-  else means duplicating that. Placing it in `smoke.test.ts` is the cheap answer and keeps the
-  binary-spawning tests in the file whose docstring says that is its job.
-- **Tightening modes on the smoke sandbox from `0755` to `0700`** changes behaviour for a
-  directory the test itself creates and removes. If anything in the statusline path enumerates
-  a parent directory, this could surface as a permission error rather than a cleaner test. Low,
-  and A6 catches it, but it is a real behaviour change and not a pure refactor.
+- **`makeTestEnvelope` gains two fields** (`lastHttpStatus`, `lastErrorMessage`) for all 25 call
+  sites. All pass it to in-memory mocks or read `cooldownUntil`/`lastErrorClass`, so this should
+  be inert — but "should" is the word this repo has been wrong about before, and A7 is what
+  actually decides it.
+- **Tightening smoke's sandbox from `0755` to `0700`** is a real behaviour change, not a
+  refactor, on a directory the test creates and removes. A7 catches it.
+- **`perf.test.ts` retargeting is the largest untested-by-design surface.** It is itself the test
+  file, so a mistake there is silent by construction; the plan-to-diff audit must look at it
+  specifically rather than treating it as incidental churn.
