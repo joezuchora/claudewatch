@@ -384,6 +384,8 @@ describe('the real tree', () => {
     // a different test file, or when a third mocker was added.
     expect(findMocks(realTree()).map((m) => [m.testPath, m.specifier]).toSorted()).toEqual([
       ['packages/statusline/src/main.test.ts', './core-deps.js'],
+      ['packages/vscode/src/commands.test.ts',  './commands-bridge.js'],
+      ['packages/vscode/src/commands.test.ts',  'vscode'],
       ['packages/vscode/src/extension.test.ts', './extension-bridge.js'],
       ['packages/vscode/src/extension.test.ts', 'vscode'],
       ['packages/vscode/src/statusbar.test.ts', './statusbar-bridge.js'],
@@ -404,6 +406,11 @@ describe('the real tree', () => {
     // Down to ONE importer as of sdlc/027, which gave extension.ts its own bridge so that
     // extension.test.ts could mock without stubbing tooltip.ts's formatTooltip. Pinned so a
     // future second importer is a visible change rather than a silent one.
+    // sdlc/028: without this line, "commands-bridge.ts has exactly one importer" is asserted by
+    // nothing — A1(a) records that the mock EXISTS, not that the module it mocks is unshared.
+    // That is the hole loop 026 wrote A1(b) to close, and it reopens for every new bridge.
+    expect(findImporters(files, './commands-bridge.js', 'packages/vscode/src'))
+      .toEqual(['packages/vscode/src/commands.ts']);
     expect(findImporters(files, './core-bridge.js', 'packages/vscode/src'))
       .toEqual(['packages/vscode/src/tooltip.ts']);
     expect(findImporters(files, './extension-bridge.js', 'packages/vscode/src'))

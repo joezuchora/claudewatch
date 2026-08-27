@@ -68,17 +68,27 @@ let configValues: Record<string, unknown> = {};
 const vscodeMock = {
   // env + commands are here for extension.test.ts, not for this file.
   //
-  // `mock.module('vscode')` is process-wide and last-writer-wins, and which file writes last
-  // depends on when each module scope happens to evaluate, so a stub here can end up serving
-  // extension.ts. What is MEASURED, by deleting each key and running the package (sdlc/027
-  // Stage 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
+  // `mock.module('vscode')` is process-wide, and the merge is a per-key COMPOSITE — NOT
+  // last-writer-wins, which is what an earlier revision of this comment said. Measured in sdlc/028
+  // with a probe in a whole-package run: the resolved module's `window` came from one stub while
+  // `Uri`, defined by another, was absent from the merged module entirely. So a stub here can end
+  // up serving extension.ts or commands.ts, key by key, and no single file's factory is
+  // authoritative. What is MEASURED by deleting each key and running the package (sdlc/027 Stage
+  // 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
   //
   // This is NOT a superset of what every file needs, and an earlier revision of this comment
   // claimed it was. Still absent from both stubs: `Uri`, `window.showInformationMessage`,
   // `window.showErrorMessage`, `env.openExternal` — all reached from commands.ts. Latent only
   // because openDashboard/showDiagnostics are registered and never invoked; the moment
-  // extension.test.ts's third `test.todo` becomes a test, this breaks.
-  env: { isTelemetryEnabled: false },
+  // commands.ts's own tests exist (sdlc/028 did that), which is why `Uri` and `env.openExternal`
+  // are here now. Still absent and still latent: nothing stubs what `activate`'s remaining
+  // uncovered paths would need.
+  env: { isTelemetryEnabled: false, openExternal: (): void => {} },
+  // `Uri` is here for commands.test.ts. It CANNOT be installed by mutation from there: a module's
+  // top-level exports are readonly, so a key missing from the per-key composite is missing for
+  // good. Measured in sdlc/028 — `v.Uri = {...}` throws "Attempted to assign to readonly
+  // property", while nested properties assign fine.
+  Uri: { parse: (s: string) => s },
   commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
   StatusBarAlignment: { Right: 2 },
   ThemeColor: MockThemeColor,

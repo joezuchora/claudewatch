@@ -564,6 +564,10 @@ Optional fields must be omitted cleanly if unavailable. They must not render as 
 
 - `ClaudeWatch: Refresh Now` — manual refresh, bypasses TTL (still respects cooldown)
 - `ClaudeWatch: Open Usage Dashboard` — opens claude.ai usage page in browser
+- `ClaudeWatch: Diagnostics` — shows the extension bundle path and the formatter's output for the
+  cached snapshot, in a modal. Registered as `claudewatch.diagnostics`. Added to this section by
+  `sdlc/028`: the command has shipped since before the SDLC loop began and was documented in
+  neither §8.4 nor here, which went unnoticed until it acquired tests.
 
 ### 10.6 Settings
 

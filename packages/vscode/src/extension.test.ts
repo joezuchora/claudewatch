@@ -34,8 +34,12 @@
  * pass produced 14+ render lines in the real `~/.cache/claudewatch/metrics-spool.jsonl` that way.
  *
  * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): `activate`'s
- * config-change handlers, the polling timer's scheduling, and `commands.ts`. There is a
- * `test.todo` per gap so `bun test` prints them.
+ * config-change handlers, the polling timer's scheduling, and `activate`'s
+ * `onDidChangeTelemetryEnabled` listener. There is a `test.todo` per gap so `bun test` prints them
+ * — THREE of them, matching the three gaps named here. An earlier revision said "a `test.todo` per
+ * gap" while listing three gaps beside four todos, the fourth having been added without updating
+ * the count. `commands.ts` was the fourth gap and is now covered by `commands.test.ts`
+ * (sdlc/028).
  */
 import { describe, expect, test, mock, beforeAll, afterAll, afterEach } from 'bun:test';
 import { homedir, tmpdir } from 'os';
@@ -479,7 +483,6 @@ describe('lifecycle', () => {
 
 test.todo('activate: the onDidChangeConfiguration handlers (interval, thresholds, telemetry)', () => {});
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
-test.todo('commands.ts: openDashboard and showDiagnostics', () => {});
 // extension.ts:76-80. Dead in this file because the `vscode` stub omits the key, so the
 // `typeof === 'function'` guard is false and the listener is never registered. Named here rather
 // than left to a coverage report nobody runs. (Stage 5 audit.)
