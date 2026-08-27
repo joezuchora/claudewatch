@@ -1,8 +1,16 @@
 /**
- * The extension's view of @claudewatch/core.
+ * The view of @claudewatch/core for everything in this package EXCEPT the status bar.
  *
- * Extension source imports the core API through this module rather than directly, so that
- * statusbar.test.ts can mock a module that packages/vscode owns.
+ * Consumers: `extension.ts` and `tooltip.ts`. Nothing mocks this module, and that is the point —
+ * it is the bridge whose consumers get the real core.
+ *
+ * It used to say it existed "so that statusbar.test.ts can mock a module that packages/vscode
+ * owns", and it used to serve the status bar too. Because `mock.module` is process-wide, mocking
+ * it for the status bar also stubbed `formatTooltip` for `tooltip.test.ts`, whose subject reaches
+ * it through `tooltip.ts` — so those tests asserted against `formatted: 42%` for four loops, and
+ * loop 002 had to relocate a planned test out of that file. The status bar now has its own
+ * `statusbar-bridge.ts`; this module exists to NOT be mocked. If you are about to mock it, split
+ * it again instead. (sdlc/025)
  *
  * Bun applies `mock.module` process-wide and `mock.restore()` does not undo it, so a test
  * that mocks '@claudewatch/core' replaces the real module for packages/core's own tests too.
@@ -17,8 +25,6 @@
  */
 import * as core from '@claudewatch/core';
 
-export const classify = core.classify;
-export const evaluate = core.evaluate;
 export const formatTooltip = core.formatTooltip;
 export const resolveCredentials = core.resolveCredentials;
 export const fetchUsage = core.fetchUsage;
@@ -36,10 +42,6 @@ export const markStale = core.markStale;
 export const makeErrorSnapshot = core.makeErrorSnapshot;
 export const extractLastError = core.extractLastError;
 export const setTelemetryConfig = core.setTelemetryConfig;
-export const emit = core.emit;
-export const emitProcess = core.emitProcess;
-export const renderEvent = core.renderEvent;
-export const utilizationBucket = core.utilizationBucket;
 
 export type {
   UsageSnapshot,

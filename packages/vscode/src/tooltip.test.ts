@@ -76,6 +76,11 @@ describe('buildTooltip', () => {
     // formatTooltip output should be present, not the error fallback
     expect(md.value).not.toContain('unexpected error');
     expect(md.value).toContain('42%');
+    // The assertion the stub CANNOT satisfy. `toContain('42%')` above matches both the real
+    // formatter ("Current (5hr): 42%") and statusbar.test.ts's stub ("formatted: 42%"), which
+    // is why these tests passed for four loops while asserting against a stub. format.ts:373
+    // emits this line; the stub emits nothing like it. (sdlc/025)
+    expect(md.value).toContain('Usage Windows');
   });
 
   test('Healthy without snapshot falls back to error text', () => {
@@ -117,10 +122,14 @@ describe('buildTooltip', () => {
   });
 });
 
-// Opus tooltip rendering is covered in packages/core/src/format.test.ts, where it can be
-// asserted against the real formatter.
+// Opus tooltip rendering is covered in packages/core/src/format.test.ts.
 //
-// It cannot be asserted here: statusbar.test.ts mocks the shared './core-bridge.js' for the
-// whole process, so formatTooltip in this file is a stub returning "formatted: N%". A test
-// here would verify the stub, not the code. Splitting the bridge per consumer would fix it;
-// see sdlc/002-opus-window/review.md.
+// It was relocated there because it COULD NOT be asserted here: statusbar.test.ts mocked the
+// shared './core-bridge.js' process-wide, so formatTooltip in this file was a stub returning
+// "formatted: N%" and a test here would have verified the stub. sdlc/025 split the bridge, so
+// that obstacle is gone — this file now sees the real formatter, which is what the
+// `toContain('Usage Windows')` assertion above depends on.
+//
+// The Opus coverage has been LEFT in format.test.ts rather than moved back: where it belongs is
+// a separate judgement from whether it can live here, and moving it is not this loop's job.
+// See sdlc/002-opus-window/review.md and sdlc/025-vscode-bridge-split/.

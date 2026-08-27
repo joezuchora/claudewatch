@@ -1,37 +1,33 @@
 import { describe, expect, test, mock, beforeEach } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
-import { renderEvent as realRenderEvent, utilizationBucket as realUtilizationBucket } from '@claudewatch/core';
-import type { UsageSnapshot, RuntimeState, ThresholdLevel } from '@claudewatch/core';
+import {
+  renderEvent as realRenderEvent,
+  utilizationBucket as realUtilizationBucket,
+  classify as realClassify,
+  evaluate as realEvaluate,
+} from '@claudewatch/core';
+import type { UsageSnapshot } from '@claudewatch/core';
 
-// Re-register @claudewatch/core with real classify/evaluate to prevent mock leaks
-// from other test files (main.test.ts mocks @claudewatch/core globally).
-// We inline the real implementations since the leaked mock overrides the package.
-function realClassify(snapshot: UsageSnapshot): RuntimeState {
-  if (snapshot.authState === 'invalid') return 'AuthInvalid';
-  if (snapshot.authState === 'missing') return 'NotConfigured';
-  const hasValid = snapshot.fiveHour.utilizationPct !== null || snapshot.sevenDay.utilizationPct !== null;
-  if (snapshot.freshness.isStale) {
-    if (hasValid) return snapshot.freshness.staleReason === 'malformedResponse' ? 'Degraded' : 'Stale';
-    return snapshot.freshness.staleReason === 'malformedResponse' ? 'Degraded' : 'HardFailure';
-  }
-  return hasValid ? 'Healthy' : 'Degraded';
-}
+// `classify` and `evaluate` come straight from the package.
+//
+// They used to be reimplemented here — 16 lines of domain logic in a surface package, against
+// SPEC.md §8.2 — justified by a comment reading "main.test.ts mocks @claudewatch/core globally".
+// That was false. Nothing in this repo mocks `@claudewatch/core`; main.test.ts mocks
+// './core-deps.js', which is the whole reason core-deps.ts exists (sdlc/001). The comment
+// outlived the fix that made it wrong, and the duplicate logic outlived the comment. (sdlc/025)
 
-function realEvaluate(pct: number, warnPct: number = 70, critPct: number = 90): ThresholdLevel {
-  if (pct >= critPct) return 'critical';
-  if (pct >= warnPct) return 'warning';
-  return 'normal';
-}
-
-// The bridge mock doubles as a spy on telemetry emission. sdlc/003's residual finding is
-// that this mock is process-wide within packages/vscode; here that works in our favour.
+// The bridge mock doubles as a spy on telemetry emission.
+//
+// It mocks './statusbar-bridge.js', which `statusbar.ts` alone imports. It used to mock the
+// shared './core-bridge.js', and because `mock.module` is process-wide, that also stubbed
+// `formatTooltip` for `tooltip.test.ts` — whose subject reaches it through `tooltip.ts`. The
+// keys below must match statusbar-bridge.ts's exports exactly: `mock.module` replaces the module
+// wholesale, so a missing key is `undefined` at call time rather than a compile error.
 const emittedEvents: Array<Record<string, unknown>> = [];
 
-mock.module('./core-bridge.js', () => ({
+mock.module('./statusbar-bridge.js', () => ({
   classify: realClassify,
   evaluate: realEvaluate,
-  formatTooltip: (snapshot: UsageSnapshot) => `formatted: ${snapshot.display.primaryUtilizationPct}%`,
-  makeTestSnapshot,
   emitProcess: (e: Record<string, unknown>) => { emittedEvents.push(e); },
   renderEvent: realRenderEvent,
   utilizationBucket: realUtilizationBucket,
@@ -158,6 +154,26 @@ describe('StatusBarManager', () => {
       const mgr = new StatusBarManager();
       mgr.update(makeSnapshot());
       expect(mockItem.text).toBe('$(graph) 42%');
+    });
+
+    /**
+     * The tooltip is rendered by the REAL formatter, and this is the only assertion in this file
+     * that looks at it.
+     *
+     * statusbar.ts imports buildTooltip from tooltip.js, which imports formatTooltip from
+     * core-bridge.js — a module this file no longer mocks. So every mgr.update() here now goes
+     * through the real formatter instead of the `formatted: N%` stub. That is a change of subject,
+     * not just of wiring, and before sdlc/025 NOTHING in this file read mockItem.tooltip: the
+     * tooltip could have been the empty string, or the formatter could have thrown and been
+     * swallowed, and all 26 tests stayed green. "Usage Windows" is emitted by format.ts:373 and
+     * by nothing the stub ever produced.
+     */
+    test('renders its tooltip through the real formatter', () => {
+      const mgr = new StatusBarManager();
+      mgr.update(makeSnapshot());
+      const tooltip = mockItem.tooltip as { value: string };
+      expect(tooltip.value).toContain('Usage Windows');
+      expect(tooltip.value).not.toContain('formatted:');
     });
 
     test('shows spinner with percentage when loading', () => {
