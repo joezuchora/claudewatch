@@ -140,9 +140,12 @@ function within(e: StoredEvent, now: number, hours: number): boolean {
  * fingerprint and from there in `suppressions.json` — a crafted event could otherwise write
  * attacker-chosen prose into a repo file that a human then reads and acts on.
  *
- * The same reasoning as SPEC.md §12's telemetry rule, applied in the opposite direction: on the
+ * The same reasoning as SPEC.md §17's payload rule, applied in the opposite direction: on the
  * way OUT of the product every payload leaf is a number or a member of a closed set, so on the
  * way back IN nothing else should be believed either. (security pass, sdlc/012)
+ *
+ * §17, not §12 — corrected sdlc/023. §12's telemetry entry is the *trust boundary* (local spool,
+ * never transmitted, 0600/0700); the rule about payload VALUES is §17 at SPEC.md:857.
  */
 const OUTCOMES = ['pass', 'fail', 'timeout'] as const;
 const DRIFT_CATEGORIES = ['unknownWindow', 'unknownField', 'typeMismatch', 'missingField'] as const;

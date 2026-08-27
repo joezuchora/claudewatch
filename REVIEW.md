@@ -40,7 +40,10 @@ Reviewed by the engineer, against `spec.md` and `SPEC.md`.
 
 ## Pass 2 — Security and vulnerabilities
 
-Run the `security-reviewer` subagent. Authoritative invariants are `SPEC.md §12`.
+Run the `security-reviewer` subagent. Authoritative invariants are `SPEC.md §12` (trust
+boundaries, credential handling, file modes) **and `SPEC.md §17`** (what a telemetry payload may
+contain). The payload-value rule this pass enforces lives in §17, not §12 — naming only §12 sent
+at least one reader to the wrong section.
 
 - **No token leakage** into logs, cache files, `--debug` output, error messages, process
   arguments, or committed fixtures.

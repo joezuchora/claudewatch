@@ -40,10 +40,28 @@ queue; it ends as a new `intent.md`.
 
 ## A note on scope
 
-ClaudeWatch ships no telemetry by design (`SPEC.md §12`, §20), so there is no monitoring to
-page anyone. In practice the signal here is a GitHub issue, a CI failure, or a user report.
-That is a narrower Maintain stage than a service with production observability would have —
-which is a real limitation, not something to paper over.
+**This note was written before the observability existed, and said the opposite of what is now
+true.** It claimed ClaudeWatch "ships no telemetry by design, so there is no monitoring to page
+anyone" — citing `SPEC.md §12` and §20, neither of which says that. §12 describes a *trust
+boundary* (local spool, never transmitted); §20 says telemetry is *not enabled by default*.
+Corrected in `sdlc/023`.
+
+What actually exists, built across `sdlc/003`, `009`, `012` and `022`: an opt-in local spool, an
+agent the user runs to ship it, a metrics service, and `bun run metrics:detect` — which evaluates
+control bounds over the recorded runs and **drafts an `incident.md` on its own**. Several of this
+repo's incident records began that way.
+
+So the Maintain stage has three signal sources, not one:
+
+1. **The detector**, which files a draft without being asked. Read it critically — it knows only
+   the store and has not read the code, and this repo has seven recorded occasions where the
+   first theory was wrong.
+2. **A CI failure or a red gate.** Since `sdlc/020` the `verify_run` event names the failing test,
+   so a gate failure is reconstructable from the record rather than from terminal scrollback.
+3. **A GitHub issue or user report.**
+
+The real remaining limitation is narrower than the old text claimed: there is no *paging*, and
+nobody is watching in real time. The signal arrives when someone next looks.
 
 ## Next
 
