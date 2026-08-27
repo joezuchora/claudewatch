@@ -1,5 +1,5 @@
 import { describe, expect, test, mock, beforeEach } from 'bun:test';
-import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
+import { makeTestSnapshot, makeTestEnterpriseSnapshot } from '@claudewatch/core/test-helpers';
 import {
   renderEvent as realRenderEvent,
   utilizationBucket as realUtilizationBucket,
@@ -149,11 +149,45 @@ describe('StatusBarManager', () => {
     });
   });
 
+  /**
+   * A6a. The stub replaces statusbar-bridge.js wholesale, so its key set IS the module's surface
+   * for every test in this process. Nothing else checks it: a MISSING key is caught loudly (the
+   * module fails to load), but a SURPLUS one is silently inert — the sdlc/025 plan-to-diff audit
+   * added `formatTooltip: () => 'BOGUS'` to the factory and got 50 pass, 0 fail, typecheck clean.
+   * That is the dangerous direction, because a surplus key is how the stub drifts back into
+   * claiming symbols the real bridge does not export.
+   *
+   * Importing the bridge here returns the STUB, not the real module — that is the point.
+   */
+  test('the stub exposes exactly the five symbols statusbar.ts imports', async () => {
+    const stubbed = await import('./statusbar-bridge.js');
+    expect(Object.keys(stubbed).toSorted()).toEqual([
+      'classify', 'emitProcess', 'evaluate', 'renderEvent', 'utilizationBucket',
+    ]);
+  });
+
   describe('update with healthy snapshot', () => {
     test('shows graph icon with percentage', () => {
       const mgr = new StatusBarManager();
       mgr.update(makeSnapshot());
       expect(mockItem.text).toBe('$(graph) 42%');
+    });
+
+    /**
+     * The Enterprise branch (statusbar.ts:99-120) had ZERO coverage in this file, and could not
+     * have had any: the stub reimplemented `classify` WITHOUT core's enterprise branch, so an
+     * enterprise snapshot classified as Degraded and the branch was unreachable by construction.
+     * The sdlc/025 security pass found that divergence — the local copy had gone stale against
+     * core, which is exactly the decay the no-domain-logic-in-surfaces rule exists to prevent.
+     * Importing the real `classify` makes the branch reachable, so it gets a test.
+     */
+    test('enterprise tier renders its own branch, not the window one', () => {
+      const mgr = new StatusBarManager();
+      mgr.update(makeTestEnterpriseSnapshot({ fetchedAt: '2026-03-07T12:00:00.000Z' }));
+      // Observed, not guessed: my first expectation here was `$(graph) 0.1%` and was wrong on
+      // both the icon and the rounding. The branch uses its own icon and keeps sub-1% precision
+      // (0.1455 -> "0.15%") rather than rounding to "0%", per its comment.
+      expect(mockItem.text).toBe('$(organization) E 0.15%');
     });
 
     /**

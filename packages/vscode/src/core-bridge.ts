@@ -4,8 +4,8 @@
  * Consumers: `extension.ts` and `tooltip.ts`. Nothing mocks this module, and that is the point —
  * it is the bridge whose consumers get the real core.
  *
- * It used to say it existed "so that statusbar.test.ts can mock a module that packages/vscode
- * owns", and it used to serve the status bar too. Because `mock.module` is process-wide, mocking
+ * Its previous docstring named the status bar's test as the reason this module existed, and it
+ * used to serve the status bar too. Because `mock.module` is process-wide, mocking
  * it for the status bar also stubbed `formatTooltip` for `tooltip.test.ts`, whose subject reaches
  * it through `tooltip.ts` — so those tests asserted against `formatted: 42%` for four loops, and
  * loop 002 had to relocate a planned test out of that file. The status bar now has its own
