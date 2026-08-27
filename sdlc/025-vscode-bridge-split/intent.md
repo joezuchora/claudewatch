@@ -75,8 +75,12 @@ it. See below.
       not — `extension.ts` imports the same bridge, so there are two. Forbidding a one-line
       change to `statusbar.test.ts`'s mock specifier would have forced the split that fixes one
       of them instead of the split that fixes both. A criterion that rules out the better design
-      is a criterion to withdraw, not to satisfy. Replaced by: `statusbar.test.ts` changes by at
-      most its mock specifier, and its assertions are untouched.
+      is a criterion to withdraw, not to satisfy. Replaced by: `statusbar.test.ts` changes
+      only in its `mock.module` call — the specifier and the factory's key set — plus one added
+      assertion (spec A6b) and the deletion of duplicated domain logic whose justifying comment
+      is false (spec A7). Its existing `test` bodies are otherwise untouched.
+      *Revision 2:* the first replacement said "at most its mock specifier", which the spec's own
+      Behaviour section then contradicted. Two criteria, same commit, mutually unsatisfiable.
 - [ ] The architecture rule holds: the new module is re-exports only, no domain logic
       (SPEC.md §8.2).
 
@@ -86,6 +90,20 @@ it. See below.
 - **Removing `mock.module` from `statusbar.test.ts`.** A plausible alternative fix — let it use
   the real formatter — but it changes what those tests assert, and this loop is about isolation,
   not about rewriting the statusbar suite.
+  *Revision 2, honestly:* the tooltip half of this arrives anyway. `statusbar.ts` imports
+  `buildTooltip`, which imports `formatTooltip` from `core-bridge.js`, so once the mock moves,
+  `statusbar.test.ts` renders tooltips through the real formatter transitively. It is accepted
+  and declared rather than avoided; the statusbar's own `classify`/`evaluate` stay stubbed, so
+  the fence holds for everything except the tooltip path.
+- **The mock-topology guard test** ("every mocked module has at most one non-test importer").
+  Answered Q3 in spec revision 1, then failed its own review on four counts — vacuous when its
+  scanner matches nothing, blind to `mock.module('@claudewatch/core')` which is the worst case,
+  direct-importers-only against a transitive problem, and never in this done-list. **Deferred to
+  loop 026.** It is the largest work item here and the only new test infrastructure; it should
+  not ride along with a three-file change.
+- **`commands.ts`**, which bypasses the bridge entirely with
+  `await import('@claudewatch/core')` — a fourth core consumer and a standing violation of
+  `core-bridge.ts`'s stated contract. Found at Stage 2, recorded, not fixed here.
 - **The statusline side.** `core-deps.ts` has one consumer and no equivalent collision.
 - **Any change to `packages/core`.** The formatter is fine; only the surface's view of it is not.
 - **Backfilling the Opus-row test loop 002 relocated.** Once the split lands that test *could*
