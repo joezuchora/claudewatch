@@ -107,18 +107,44 @@ export function findMocks(files: readonly SourceFile[]): Array<{ testPath: strin
  *    `mocked './core-bridge.js', which three files imported` — had it read `imported from
  *    './core-bridge.js'`, the analyzer would have counted its own docstring as a third importer.
  *
- * The `(?<!:)` guard on line comments keeps `https://` intact.
+ * Line comments are stripped by a quote-aware scan rather than a regex, because every regex form
+ * of this is wrong in one direction or the other: unanchored `//` eats the tail of a line after a
+ * string like `'a//b'` (a FALSE NEGATIVE — a real mock.module goes unseen), while anchoring to
+ * line-leading lets a TRAILING `foo(); // mock.module('./x.js')` through as a real call (a FALSE
+ * POSITIVE — the analyzer counts a comment). This module shipped each of those in turn. Tracking
+ * quote state costs a dozen lines and has neither failure.
  */
+/**
+ * Drop a `//` comment from one line, ignoring `//` that sits inside a string literal.
+ *
+ * Deliberately not a regex — see normalizeForScan's note on why both regex forms are wrong.
+ * Block-comment syntax is not tracked here; that is the caller's line-leading strip.
+ */
+function stripLineComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote !== null) {
+      if (c === '\\') { i++; continue; }          // escaped char, including an escaped quote
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; continue; }
+    if (c === '/' && line[i + 1] === '/') return line.slice(0, i);
+  }
+  return line;
+}
+
 export function normalizeForScan(text: string): string {
   return text
-    // LINE-LEADING comments only. A greedy `/\*[\s\S]*?\*\//g` eats everything between a string
-    // containing `/*` (a glob like '**/*.test.ts') and the next `*/` anywhere in the file, and an
-    // unanchored `//` eats the rest of a line after a string like 'a//b' — both silently dropping a
-    // real mock.module call, which is a FALSE NEGATIVE in a guard whose whole job is not to miss
-    // one. Found by the sdlc/027 security pass; the `a//b` shape was measured returning [].
-    // Every comment in this repo is line-leading, so anchoring costs nothing.
+    // Block comments: line-leading only. A greedy strip eats everything between a string
+    // containing an open-comment sequence (a glob like star-star-slash-star) and the next close
+    // anywhere in the file, silently dropping a real mock.module call — a FALSE NEGATIVE in a
+    // guard whose whole job is not to miss one. Every block comment in this repo is line-leading.
     .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ' ')
-    .replace(/^[ \t]*\/\/[^\n]*/gm, ' ')
+    // Line comments: quote-aware, so a trailing comment AND a string containing `//` are both
+    // handled. Both shapes are pinned by tests; each was a live defect in an earlier revision.
+    .split('\n').map(stripLineComment).join('\n')
     .replace(/\{[^{}]*\}/g, (m) => m.replace(/\s+/g, ' ')); // collapse wrapped brace groups
 }
 

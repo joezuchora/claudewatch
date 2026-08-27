@@ -20,11 +20,15 @@ mock.module('vscode', () => ({
   // env + commands are here for extension.test.ts, not for this file.
   //
   // `mock.module('vscode')` is process-wide and last-writer-wins, and which file writes last
-  // depends on when each module scope happens to evaluate. So every vscode stub in this package
-  // must be a SUPERSET of what any of them needs: extension.ts:75 reads
-  // vscode.env.onDidChangeTelemetryEnabled OUTSIDE a try/catch, and activate registers commands.
-  // Without these keys, a whole-package run throws there — order-dependently, which is worse than
-  // deterministically. (sdlc/027)
+  // depends on when each module scope happens to evaluate, so a stub here can end up serving
+  // extension.ts. What is MEASURED, by deleting each key and running the package (sdlc/027
+  // Stage 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
+  //
+  // This is NOT a superset of what every file needs, and an earlier revision of this comment
+  // claimed it was. Still absent from both stubs: `Uri`, `window.showInformationMessage`,
+  // `window.showErrorMessage`, `env.openExternal` — all reached from commands.ts. Latent only
+  // because openDashboard/showDiagnostics are registered and never invoked; the moment
+  // extension.test.ts's third `test.todo` becomes a test, this breaks.
   env: { isTelemetryEnabled: false },
   commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
   MarkdownString: MockMarkdownString,
@@ -43,9 +47,12 @@ mock.module('vscode', () => ({
     })),
   },
   workspace: {
-    // extension.ts:115 calls this unguarded. The security pass found the SUPERSET claim above was
-    // not true without it — the comment asserted a property the code did not have, which is the
-    // exact shape it exists to prevent. (sdlc/027)
+    // Defensive, and honestly labelled as such: deleting this from both stubs and running the
+    // package gives 0 failures, so unlike `env` it is NOT load-bearing in the current evaluation
+    // order. It stays because extension.ts:115 calls it unguarded and the order is not a
+    // guarantee. An earlier revision justified it by a whole-package throw that does not occur —
+    // asserting an invariant the code does not have, which is the exact shape this comment block
+    // exists to prevent. (sdlc/027 Stage 5, measured)
     onDidChangeConfiguration: (): { dispose(): void } => ({ dispose(): void {} }),
     getConfiguration: mock(() => ({
       get: <T>(_key: string, defaultValue: T): T => defaultValue,

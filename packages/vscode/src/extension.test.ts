@@ -124,6 +124,9 @@ let cacheFresh = false;
 let inCooldown = false;
 let cooldownWanted = false;
 let policyPresentation = 'unknown';
+/** Drives the unexpected-throw arm (extension.ts:254). Nothing else in doRefresh can be made to
+ *  throw without also breaking the catch-all's own `readCache`. */
+let writeCacheThrows = false;
 
 const snap = (o?: Partial<UsageSnapshot>): UsageSnapshot => makeTestSnapshot(o);
 
@@ -140,12 +143,18 @@ mock.module('./extension-bridge.js', () => ({
   fetchUsage: async () => {
     log('fetchUsage');
     if (fetchMode.mode === 'throw') throw new Error('fetchUsage must not be reached in this case');
-    await new Promise((r) => setTimeout(r, 1));
+    // Deliberately NO timer. `flush()`'s guarantee rests on this mock resolving on the microtask
+    // queue; a `setTimeout` here reintroduces the macrotask lull that made the old `settle()` a
+    // 5ms-margin flake (sdlc/027 Stage 5: delay 1ms -> 0 fail, 6ms -> 2 fail, 20ms -> 6 fail).
+    // The premise is pinned by a test rather than by this comment — see 'adds no macrotask wait'.
     return fetchMode.mode === 'ok' ? { ok: true, data: fetchMode.data } : { ok: false, ...fetchMode.result };
   },
   normalize: (d: unknown) => { log('normalize'); return d as UsageSnapshot; },
   readCache: () => { log('readCache'); return cachedEnvelope; },
-  writeCache: (e: unknown) => log('writeCache', e),
+  writeCache: (e: unknown) => {
+    log('writeCache', e);
+    if (writeCacheThrows) throw new Error('writeCache exploded');
+  },
   isCacheFresh: () => cacheFresh,
   makeCacheEnvelope: (s: unknown, c: unknown = null, l: unknown = null) =>
     ({ version: 2, snapshot: s, cooldownUntil: c, lastErrorClass: l, lastHttpStatus: null, lastErrorMessage: null }),
@@ -164,24 +173,29 @@ const { activate, deactivate } = await import('./extension.js');
 // --- helpers ---
 
 /**
- * Wait until the bridge mock's call log stops growing.
+ * Yield one macrotask, which drains the microtask queue to exhaustion.
  *
- * `activate` fires an un-awaited `doRefresh(false)` (extension.ts:103) that nothing can await, so
+ * `activate` fires an un-awaited `doRefresh(false)` (extension.ts:105) that nothing can await, so
  * asserting immediately after `activate` races it. Arithmetic does not work either: a command
  * issued while that refresh is in flight is SWALLOWED by the dedupe rather than counted, so you
- * cannot "subtract the initial refresh". Draining is the only correct option. Fails loudly rather
- * than proceeding on timeout.
+ * cannot "subtract the initial refresh".
+ *
+ * This REPLACES a drain-until-quiet helper that polled until the call log stopped growing. That
+ * was not a completion test, it was a lull test, and `doRefresh` contains a lull: it suspends at
+ * `await fetchUsage(...)`. Whenever that suspension outlasted one 5ms poll, the helper returned
+ * mid-refresh, `refreshInFlight` stayed true, and the NEXT case's refresh was silently swallowed
+ * by the dedupe — surfacing as that case's own missing calls. Measured in Stage 5 by varying only
+ * the mock's delay, which changes no behaviour under test: 1ms -> 0 fail, 6ms -> 2, 20ms -> 6.
+ * A 5ms margin, i.e. one loaded CI box away from red.
+ *
+ * One macrotask is a GUARANTEE here rather than a longer heuristic, and only because of a premise
+ * the mock upholds: `fetchUsage` starts no timer, so `doRefresh` contains no macrotask wait
+ * between entry and `finally`. Every continuation is a microtask, and the microtask queue drains
+ * completely before the next macrotask callback runs. That premise is load-bearing, so it is
+ * asserted ('adds no macrotask wait') rather than trusted.
  */
-async function settle(timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let last = -1;
-  while (Date.now() < deadline) {
-    if (calls.length === last) return;
-    last = calls.length;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  throw new Error(`settle() timed out after ${timeoutMs}ms with ${calls.length} calls: ` +
-    JSON.stringify(calls.map((c) => c.name)));
+async function flush(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 function makeCtx(): { subscriptions: Array<{ dispose(): void }> } {
@@ -193,13 +207,13 @@ let ctx = makeCtx();
 async function start(): Promise<void> {
   ctx = makeCtx();
   await activate(ctx as never);
-  await settle();
+  await flush();
   calls = [];   // drop activate's initial refresh; every case asserts on what IT caused
 }
 
 const refresh = async (): Promise<void> => {
   await registered.get('claudewatch.refresh')!();
-  await settle();
+  await flush();
 };
 
 const names = (): string[] => calls.map((c) => c.name);
@@ -214,13 +228,19 @@ afterEach(() => {
   fetchMode = { mode: 'throw' };
   credentials = { authState: 'missing', accessToken: null };
   cachedEnvelope = null; cacheFresh = false; inCooldown = false;
-  cooldownWanted = false; policyPresentation = 'unknown';
+  cooldownWanted = false; policyPresentation = 'unknown'; writeCacheThrows = false;
 });
 
 // --- A9: the stub's key set ---
 
 describe('the bridge mock', () => {
   test('exposes exactly the symbols extension.ts imports', async () => {
+    // Catches a SURPLUS key only, and that is the whole of its value. A MISSING key is a hard
+    // SyntaxError at module-link time (0 pass, 1 fail) — measured, against a spec that claimed it
+    // would be a swallowed TypeError. See extension-bridge.ts's docstring.
+    // Known gap: BRIDGE_KEYS is a hand-written literal, and because this module is mocked the
+    // assertion compares the MOCK's keys to it, never the bridge's real exports. A symbol added to
+    // extension-bridge.ts but not imported by extension.ts drifts past both.
     const stubbed = await import('./extension-bridge.js');
     expect(Object.keys(stubbed).toSorted()).toEqual(BRIDGE_KEYS);
   });
@@ -234,7 +254,7 @@ describe('doRefresh, driven through the registered command', () => {
     await refresh();
     expect(names()).toEqual(['readCache', 'resolveCredentials', 'makeErrorSnapshot', 'writeCache']);
     expect(calls.find((c) => c.name === 'makeErrorSnapshot')!.arg).toBe('missing');
-    // The catch at extension.ts:252 also calls readCache. Exactly one here proves this case
+    // The catch at extension.ts:254 also calls readCache. Exactly one here proves this case
     // reached its own branch rather than throwing into the catch-all — which is how the sdlc/027
     // prototype fooled itself.
     expect(names().filter((n) => n === 'readCache')).toHaveLength(1);
@@ -299,6 +319,10 @@ describe('doRefresh, driven through the registered command', () => {
     await start();
     await refresh();
     expect(names()).toContain('enterCooldown');
+    // Pins WHICH arm. `enterCooldown` is reachable from extension.ts:240 and :249; only the
+    // with-cache arm calls markStale first. Without this the case passes via the no-cache arm
+    // and the {cached} x {cooldown} cell it claims to cover is untested. (Stage 5 audit.)
+    expect(names()).toContain('markStale');
   });
 
   test('an unknown-presentation failure with NO cache uses an unknown snapshot', async () => {
@@ -308,6 +332,37 @@ describe('doRefresh, driven through the registered command', () => {
     await refresh();
     expect(calls.find((c) => c.name === 'makeErrorSnapshot')!.arg).toBe('unknown');
     expect(names()).not.toContain('markStale');
+  });
+
+  test('...and the no-cache arm enters cooldown too', async () => {
+    // extension.ts:249, the fourth cell of {cached, none} x {cooldown y, n}. The plan's Tests
+    // table promised all four; revision 1 shipped three and the miss was invisible because the
+    // with-cache case above asserted only `toContain('enterCooldown')`. (Stage 5 audit.)
+    credentials = { authState: 'valid', accessToken: 'tok' };
+    fetchMode = { mode: 'fail', result: { failureClass: 'serviceUnavailable', status: 503, message: 'x' } };
+    cooldownWanted = true;
+    await start();
+    await refresh();
+    expect(calls.find((c) => c.name === 'makeErrorSnapshot')!.arg).toBe('unknown');   // no-cache arm
+    expect(names()).toContain('enterCooldown');
+    expect(names()).not.toContain('markStale');
+  });
+
+  test('an unexpected throw lands in the catch-all instead of escaping', async () => {
+    // extension.ts:254 — the arm the Stage 2 spec review added to A3 by name, precisely because a
+    // prototype had fooled itself by miscounting it, and which revision 1 then shipped without.
+    // Exact equality is what makes it decisive: the SECOND `readCache` is the catch's signature,
+    // and no non-throwing path produces one.
+    await start();
+    // AFTER start(), deliberately. Setting it before means activate's own initial refresh throws
+    // too, so the fixture leans on the catch-all to survive its own setup and a second escape
+    // bleeds into the next case. One throw, in the call under test. (Found by mutating the catch
+    // away and getting two failures where one was predicted.)
+    writeCacheThrows = true;
+    await refresh();                       // must resolve, not reject: the point is not crashing
+    expect(names()).toEqual([
+      'readCache', 'resolveCredentials', 'makeErrorSnapshot', 'writeCache', 'readCache',
+    ]);
   });
 });
 
@@ -319,7 +374,7 @@ describe('doRefresh, driven through activate (the non-manual path)', () => {
     cacheFresh = true;
     ctx = makeCtx();
     await activate(ctx as never);
-    await settle();
+    await flush();
     expect(names()).toEqual(['setTelemetryConfig', 'readCache']);
     expect(names()).not.toContain('resolveCredentials');
   });
@@ -330,7 +385,7 @@ describe('doRefresh, driven through activate (the non-manual path)', () => {
     inCooldown = true;
     ctx = makeCtx();
     await activate(ctx as never);
-    await settle();
+    await flush();
     expect(names()).toContain('markStale');
     expect(names()).toContain('writeCache');
     expect(names()).not.toContain('resolveCredentials');
@@ -344,9 +399,40 @@ describe('doRefresh, driven through activate (the non-manual path)', () => {
     inCooldown = true;
     ctx = makeCtx();
     await activate(ctx as never);
-    await settle();
+    await flush();
     expect(names()).toContain('markStale');
     expect(names()).not.toContain('writeCache');
+  });
+});
+
+describe('the premises these tests rest on', () => {
+  test('the bridge mock adds no macrotask wait', async () => {
+    // flush() is only a guarantee while this holds. A promise resolved on the microtask queue
+    // always beats setTimeout(...,0), so reintroducing a timer into the mock's fetchUsage — the
+    // exact edit that quantified the old helper's 5ms margin — reddens this and nothing else.
+    const bridge = await import('./extension-bridge.js');
+    fetchMode = { mode: 'ok', data: snap() };
+    const raced = await Promise.race([
+      bridge.fetchUsage('tok').then(() => 'microtask'),
+      new Promise((r) => setTimeout(() => r('macrotask'), 0)),
+    ]);
+    expect(raced).toBe('microtask');
+  });
+
+  test('the refresh command returns a promise that settles AFTER the refresh', async () => {
+    // Pins extension.ts:93, this loop's one production change. A2 permitted it so it could not be
+    // slipped in unnoticed; the Stage 5 audit then found no test needed it — reverting to the
+    // discarding form left the suite green, which was the plan's own falsification condition and
+    // it was met. This is the test that earns it: the discarding form returns undefined, so the
+    // first assertion fails outright, and the second fails because nothing has run yet.
+    credentials = { authState: 'valid', accessToken: 'tok' };
+    fetchMode = { mode: 'ok', data: snap() };
+    await start();
+    const returned = registered.get('claudewatch.refresh')!();
+    expect(returned).toBeInstanceOf(Promise);
+    await returned;
+    // Deliberately NO flush(): if the handler awaited the refresh, the log is already complete.
+    expect(names()).toContain('writeCache');
   });
 });
 
@@ -358,7 +444,7 @@ describe('lifecycle', () => {
     const a = registered.get('claudewatch.refresh')!();
     const b = registered.get('claudewatch.refresh')!();   // lands while a is suspended in fetchUsage
     await Promise.all([a, b]);
-    await settle();
+    await flush();
     expect(names().filter((n) => n === 'fetchUsage')).toHaveLength(1);
   });
 
@@ -377,7 +463,7 @@ describe('lifecycle', () => {
     try {
       ctx = makeCtx();
       await activate(ctx as never);
-      await settle();
+      await flush();
       expect(intervalHandles).toHaveLength(1);
       expect(clearedHandles).not.toContain(intervalHandles[0]);
       deactivate();
@@ -394,3 +480,7 @@ describe('lifecycle', () => {
 test.todo('activate: the onDidChangeConfiguration handlers (interval, thresholds, telemetry)', () => {});
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
 test.todo('commands.ts: openDashboard and showDiagnostics', () => {});
+// extension.ts:76-80. Dead in this file because the `vscode` stub omits the key, so the
+// `typeof === 'function'` guard is false and the listener is never registered. Named here rather
+// than left to a coverage report nobody runs. (Stage 5 audit.)
+test.todo('activate: the onDidChangeTelemetryEnabled listener', () => {});

@@ -241,6 +241,24 @@ describe('discovery', () => {
       .toEqual([{ testPath: 'a/y.test.ts', specifier: './real.js' }]);
   });
 
+  test('a TRAILING mock.module comment is not a mock', () => {
+    // The false positive the line-leading anchoring bought: the same defect the test above
+    // exists to prevent, relocated from column 0 to after code. Measured discovering
+    // './phantom.js' as a real mock before stripLineComment became quote-aware. Found by the
+    // sdlc/027 plan-to-diff audit — which noted the previous fix had NO test at this position.
+    expect(findMocks([f('a/x.test.ts',
+      "mock.module('./real.js', () => ({}));\nfoo(); // mock.module('./phantom.js', () => ({}))")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+  });
+
+  test('an escaped quote does not leave the stripper stuck inside a string', () => {
+    // stripLineComment's `\\` branch. Without it the escaped quote closes the literal, the rest of
+    // the line is read as code, and a trailing comment stops being stripped.
+    expect(findMocks([f('a/x.test.ts',
+      "const s = 'it\\'s'; // mock.module('./phantom.js', () => ({}))\nmock.module('./real.js', () => ({}));")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+  });
+
   test('prose mentioning mock.module in a comment is not a mock', () => {
     // `a/x.test.ts`, not `a/x.ts`. As `a/x.ts` this passed because findMocks bails on
     // isTestFile before the regex is consulted — green for a reason unrelated to its name.

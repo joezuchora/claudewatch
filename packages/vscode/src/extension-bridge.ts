@@ -7,10 +7,19 @@
  * `core-bridge.ts`, and a test mocking it would have re-created sdlc/025's defect exactly —
  * tooltip.test.ts asserting against a stubbed formatTooltip again.
  *
- * Keep this to the symbols extension.ts imports. `mock.module` replaces the module WHOLESALE, so a
- * symbol the stub omits is `undefined` at call time, not a compile error — and in doRefresh that
- * surfaces as a TypeError swallowed by the catch-all at extension.ts:252, i.e. a green and
- * meaningless test. extension.test.ts asserts the stub's key set for that reason.
+ * Keep this to the symbols extension.ts imports — but not for the reason an earlier revision of
+ * this docstring gave. It claimed a symbol the stub omits is `undefined` at call time, surfacing
+ * as a TypeError swallowed by doRefresh's catch-all and yielding a green, meaningless test. That
+ * is false on this runtime, and it was asserted rather than measured. What actually happens:
+ *
+ *     SyntaxError: Export named 'markStale' not found in module '…/extension-bridge.ts'
+ *     0 pass, 1 fail
+ *
+ * ES module linking rejects a MISSING key before a single test runs, so that direction needs no
+ * assertion. A SURPLUS key is the direction nothing else catches — a symbol the stub provides and
+ * extension.ts no longer imports links fine and quietly widens the fake. That is what
+ * extension.test.ts's key-set assertion earns its place on, and the only thing it does.
+ * (Measured in sdlc/027 Stage 5, in both directions.)
  *
  * Value re-binding, not `export … from`: a static re-export keeps the mock linked to the original
  * module and the contamination survives (sdlc/001, at the cost of 127 tests).

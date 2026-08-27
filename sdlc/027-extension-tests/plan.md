@@ -34,10 +34,24 @@ Steps 1 and 2 are separately verifiable and must each leave the gate green befor
 | `packages/vscode/src/tooltip.test.ts` | `vscode` stub gains `env` + `commands` |
 | `packages/vscode/src/statusbar.test.ts` | same |
 | `scripts/mock-topology.test.ts` | the pairs assertion at `:348` and the importer set at `:367` |
+| `scripts/mock-topology.ts` | **declared excursion — see below** |
+
+**Excursion, declared retroactively.** This plan originally listed `scripts/mock-topology.ts`
+under "explicitly not touched", and the implementation commit changed it anyway. The commit body
+declared it; this file, which shipped in that same commit, went on asserting the opposite and was
+not reconciled until the Stage 5 audit caught it. Recording it here rather than leaving the two
+artifacts in contradiction — a fence that is quietly wrong is worse than one that is wide, because
+the next audit trusts it.
+
+Why the excursion was necessary: this loop's own docstring contained a literal
+`mock.module('vscode')` as prose, which the analyzer discovered as a real second mocker and failed
+the build. The guard had to learn to ignore comments before this loop could land. Two revisions of
+that fix were themselves defective — an unanchored strip lost real calls hidden after a string
+containing `//`, and the line-leading anchoring that replaced it let a *trailing* comment through
+as a real call. It is now a quote-aware scan, with both shapes pinned by tests.
 
 **Explicitly not touched:** all of `packages/core`, `packages/statusline`, `packages/metrics`,
-`commands.ts`, `tooltip.ts`, `statusbar.ts`, `telemetry-gate.ts`, `manifest.test.ts`, `SPEC.md`,
-`scripts/mock-topology.ts` (the analyzer itself — only its test's pinned values change).
+`commands.ts`, `tooltip.ts`, `statusbar.ts`, `telemetry-gate.ts`, `manifest.test.ts`, `SPEC.md`.
 
 ## Changes
 
@@ -45,7 +59,13 @@ Steps 1 and 2 are separately verifiable and must each leave the gate green befor
 
 Each `mock.module('vscode', …)` factory gains `env: { isTelemetryEnabled: false }` and
 `commands: { registerCommand: () => ({ dispose() {} }) }`, so whichever stub wins the process-wide
-race is a superset of all three files' needs.
+race carries what `activate` reads.
+
+Not a superset of all three files' needs, and the word "superset" here and in the shipped comments
+was wrong: `Uri`, `window.showInformationMessage`, `window.showErrorMessage` and `env.openExternal`
+are reached from `commands.ts` and are in none of the stubs. Latent while those commands are
+registered but never invoked. Measured in Stage 5: removing `env` costs 16 failures, removing
+`onDidChangeConfiguration` costs none.
 
 ### `extension-bridge.ts` *(new)*
 

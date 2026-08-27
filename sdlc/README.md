@@ -644,3 +644,59 @@ And the sharpest thing in the loop: the draft spec **named the `sdlc/015` failur
 paragraph and committed it two paragraphs later**, presenting an architecture rule that does not
 exist as an inherited constraint. Writing the lesson down does not confer immunity to it. The
 catalogue in this file is a record of what to check, not a charm against repeating it.
+
+## Loop 027 — the plan wrote its own falsification test, and the loop skipped it
+
+The first loop in twenty-seven where a Stage 5 reviewer **changed the outcome** rather than
+annotating it. The plan-to-diff audit returned FENCE VIOLATED with three blocking findings; all
+three reproduced under my own hands and all three were real.
+
+The one that matters most for this catalogue: **`plan.md` wrote an explicit falsification
+condition for its own central claim, and the implementation never ran it.** Verbatim from the
+plan: *"revert `:90` to the discarding form → predicted: the fetch cases hang or time out. If they
+pass, `settle()` is not actually waiting and A6 is theatre."* The auditor ran it in about thirty
+seconds. The suite stayed green. A6 was theatre, and the one production change the spec had
+permitted *specifically so it could not be slipped in unnoticed* had been slipped in unnoticed by
+the very check designed to notice it.
+
+**New rule: when a plan writes its own falsification condition, running it is not optional, and
+its result goes in `review.md` whichever way it comes out.** A predicted experiment that is never
+performed is worse than one that was never designed, because the artifact chain now records
+diligence that did not happen.
+
+The underlying defect is a ninth entry in the vacuity catalogue, and a nasty one: **a drain helper
+that tests for a lull instead of for completion.** `settle()` polled until the call log stopped
+growing — but the function under test *contains* a pause, so a pause was read as an ending. It
+returned mid-refresh, left the in-flight flag set, and the **next** test's work was swallowed by
+the dedupe and reported as that test's own missing calls. It accused the wrong test. Quantified by
+varying only the mock's fetch delay, which changes no behaviour under test: 1 ms → 0 failures,
+6 ms → 2, 20 ms → 6. A 5 ms margin, shipped green, on a suite that ran 807 tests.
+
+The fix worth generalising is not "raise the timeout". It is **remove the thing being waited on**:
+with no timer anywhere in the mock, the code under test contains no macrotask wait, so one
+`setTimeout(…, 0)` is a guarantee rather than a heuristic — the microtask queue drains completely
+before the next macrotask runs. There is no margin left to tune. And because that guarantee rests
+on a premise, the premise is now a test that races the mock against `setTimeout(…, 0)`, so
+reintroducing a timer fails by name instead of degrading silently.
+
+Two smaller findings, both of the house species:
+
+- **The fix for a false negative bought a false positive, in the same shape it was fixing.** The
+  comment-stripper had been anchored to line-leading `//` to stop a docstring's literal
+  `mock.module('vscode')` from counting. That let `foo(); // mock.module('./phantom.js')` through
+  as a *real mock* — the identical defect, moved from column 0 to a trailing position, with no
+  test at the new position. Every regex form of this is wrong in one direction. A twelve-line
+  quote-aware scan has neither failure. **When two fixes each break the other's case, the shape is
+  wrong, not the tuning.**
+- **A restore mechanism is a claim too.** Mid-review I undid a mutation with `git checkout <file>`
+  on a file whose fix was still uncommitted — silently discarding the fix, then measuring the old
+  code, and nearly writing up the result. `git checkout` reverts to HEAD; that is not the same
+  thing as "undo". Caught only because the number disagreed with the prediction.
+
+Which is the discipline that keeps earning its place, now for the fourth loop running: **predict
+the mutation result before running it, and when the number disagrees, believe the number.** Six
+mutations this loop, five predictions right and one wrong. The five taught nothing. The wrong one
+— 2 failures where 1 was predicted — exposed a fixture that was leaning on the very catch-all it
+was written to test, so that removing the catch produced a second, unhandled escape into the next
+test. The value of the prediction is not being right. It is that being wrong is *informative*, and
+a number you never predicted cannot surprise you.
