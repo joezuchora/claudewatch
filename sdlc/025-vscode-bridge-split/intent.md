@@ -70,7 +70,13 @@ it. See below.
       caught nothing.
 - [ ] The whole-suite run and the single-file run of `tooltip.test.ts` agree. Today they do not,
       and nothing reports the disagreement.
-- [ ] `statusbar.test.ts` keeps working unchanged; the split must not require touching it.
+- [ ] ~~`statusbar.test.ts` keeps working unchanged; the split must not require touching it.~~
+      **Withdrawn at Stage 2.** Written when I believed `tooltip.ts` was the only victim. It is
+      not — `extension.ts` imports the same bridge, so there are two. Forbidding a one-line
+      change to `statusbar.test.ts`'s mock specifier would have forced the split that fixes one
+      of them instead of the split that fixes both. A criterion that rules out the better design
+      is a criterion to withdraw, not to satisfy. Replaced by: `statusbar.test.ts` changes by at
+      most its mock specifier, and its assertions are untouched.
 - [ ] The architecture rule holds: the new module is re-exports only, no domain logic
       (SPEC.md §8.2).
 
