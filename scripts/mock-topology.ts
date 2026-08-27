@@ -79,7 +79,12 @@ export function findMocks(files: readonly SourceFile[]): Array<{ testPath: strin
   const out: Array<{ testPath: string; specifier: string }> = [];
   for (const f of files) {
     if (!isTestFile(f.path)) continue;
-    for (const m of f.text.matchAll(new RegExp(MOCK_CALL.source, 'g'))) {
+    // normalizeForScan, not raw text. Comment-stripping was applied to importer COUNTING in
+    // sdlc/026 and never to mock DISCOVERY — an asymmetry that bit for real in sdlc/027, where a
+    // comment reading `mock.module('vscode')` (written to explain this very mechanism) was
+    // discovered as a second mocker and turned A1(a) red. sdlc/026's review had noted this
+    // module's own docstring "came within one word" of the same thing.
+    for (const m of normalizeForScan(f.text).matchAll(new RegExp(MOCK_CALL.source, 'g'))) {
       out.push({ testPath: f.path, specifier: m[1]! });
     }
   }

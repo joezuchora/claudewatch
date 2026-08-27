@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { resolveExtensionTelemetry } from './telemetry-gate.js';
-import { setTelemetryConfig } from './core-bridge.js';
+import { setTelemetryConfig } from './extension-bridge.js';
 import {
   resolveCredentials,
   fetchUsage,
@@ -17,8 +17,8 @@ import {
   markStale,
   makeErrorSnapshot,
   extractLastError,
-} from './core-bridge.js';
-import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from './core-bridge.js';
+} from './extension-bridge.js';
+import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from './extension-bridge.js';
 import { StatusBarManager } from './statusbar.js';
 import { openDashboard } from './commands.js';
 
@@ -86,9 +86,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudewatch.refresh', () => {
-      doRefresh(true);
-    }),
+    // Returns the promise rather than discarding it. `registerCommand` accepts a Thenable, so
+    // this is what the host already tolerates — and discarding it meant nothing could ever await
+    // a refresh, which made every test of the fetch branches timing-dependent. The one production
+    // change in sdlc/027, named in its spec so it could not be slipped in.
+    vscode.commands.registerCommand('claudewatch.refresh', () => doRefresh(true)),
   );
   context.subscriptions.push(
     vscode.commands.registerCommand('claudewatch.openDashboard', openDashboard),

@@ -66,6 +66,16 @@ let configValues: Record<string, unknown> = {};
 // Store mock as module-level object so we can reference it directly
 // (avoids issues with mock.module leaking across test files in CI)
 const vscodeMock = {
+  // env + commands are here for extension.test.ts, not for this file.
+  //
+  // `mock.module('vscode')` is process-wide and last-writer-wins, and which file writes last
+  // depends on when each module scope happens to evaluate. So every vscode stub in this package
+  // must be a SUPERSET of what any of them needs: extension.ts:75 reads
+  // vscode.env.onDidChangeTelemetryEnabled OUTSIDE a try/catch, and activate registers commands.
+  // Without these keys, a whole-package run throws there — order-dependently, which is worse than
+  // deterministically. (sdlc/027)
+  env: { isTelemetryEnabled: false },
+  commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
   StatusBarAlignment: { Right: 2 },
   ThemeColor: MockThemeColor,
   MarkdownString: MockMarkdownString,

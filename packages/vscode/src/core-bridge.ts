@@ -1,8 +1,11 @@
 /**
- * The view of @claudewatch/core for everything in this package EXCEPT the status bar.
+ * The view of @claudewatch/core for `tooltip.ts`, and only `tooltip.ts`.
  *
- * Consumers: `extension.ts` and `tooltip.ts`. Nothing mocks this module, and that is the point —
- * it is the bridge whose consumers get the real core.
+ * Nothing mocks this module, and that is the point — it is the unmocked residue. Note it is NOT
+ * named for its consumer the way statusbar-bridge.ts and extension-bridge.ts are; those are named
+ * for the single test that mocks them, and this one has no mocker to be named for. Renaming it
+ * `tooltip-bridge.ts` would be tidier and is deliberately not done here, because it would touch a
+ * file this loop has no other reason to open. (sdlc/027)
  *
  * Its previous docstring named the status bar's test as the reason this module existed, and it
  * used to serve the status bar too. Because `mock.module` is process-wide, mocking
@@ -26,22 +29,6 @@
 import * as core from '@claudewatch/core';
 
 export const formatTooltip = core.formatTooltip;
-export const resolveCredentials = core.resolveCredentials;
-export const fetchUsage = core.fetchUsage;
-export const normalize = core.normalize;
-export const readCache = core.readCache;
-export const writeCache = core.writeCache;
-export const isCacheFresh = core.isCacheFresh;
-export const makeCacheEnvelope = core.makeCacheEnvelope;
-export const isInCooldown = core.isInCooldown;
-export const enterCooldown = core.enterCooldown;
-export const clearCooldown = core.clearCooldown;
-export const shouldCooldown = core.shouldCooldown;
-export const failurePolicy = core.failurePolicy;
-export const markStale = core.markStale;
-export const makeErrorSnapshot = core.makeErrorSnapshot;
-export const extractLastError = core.extractLastError;
-export const setTelemetryConfig = core.setTelemetryConfig;
 
 export type {
   UsageSnapshot,
