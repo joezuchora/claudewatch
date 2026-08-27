@@ -700,3 +700,49 @@ mutations this loop, five predictions right and one wrong. The five taught nothi
 was written to test, so that removing the catch produced a second, unhandled escape into the next
 test. The value of the prediction is not being right. It is that being wrong is *informative*, and
 a number you never predicted cannot surprise you.
+
+## Loop 028 — an honest label on a fictional threat
+
+The reviewers earned their place twice, in the same shape both times: **each found a claim already
+written down as settled.** The plan-to-diff audit found a docstring asserting the absence of two keys
+declared six and eleven lines below it — in the very commit whose criterion was "do not ship a
+newly-false docstring". The security pass found something subtler and worse.
+
+This loop shipped a **characterization test**: a test written deliberately to document an unmet
+`SPEC.md §12` invariant rather than quietly skip it. It was labelled "NOT an approval", quoted §12
+correctly, named the right architectural constraint, and said it should fail when the fix lands.
+Everything about the framing was honest.
+
+**The threat it documented cannot happen.** It asserted that a credential path and an `sk-ant-` token
+reach a user-visible modal via `readCache` throwing. `readCacheResult` wraps both `readFileSync` and
+`JSON.parse` in `try`/`catch` and returns `null`; nothing in that call graph opens the credential file
+at all. The one reachable throw, measured, is
+`undefined is not an object (evaluating 'snapshot.fiveHour.utilizationPct')` — no token, no path, no
+username. The real exposure is nothing.
+
+**New rule: a test that documents a limitation must drive the REACHABLE path, not a plausible one.**
+Sizing the exposure — tracing what can actually arrive at the surface — is the work. The label is not.
+Had this gone unreviewed, a follow-up loop would have built a redactor against a credential-leak threat
+model this architecture makes impossible, while leaving the genuinely larger surface untouched:
+`formatTooltip` interpolates `enterprise.disabledReason`, unconstrained free text from the API,
+verbatim on the **success** path, into every surface including the status-bar tooltip.
+
+This is the tenth entry in the vacuity catalogue and the most disguised. The previous nine were
+carelessness of one kind or another. This one was produced *by* care — by the deliberate act of
+documenting a limitation — and felt, while being written, like the opposite of the failure mode it
+was. Loops 025–027 produced claims made by reading. Loop 028 produced a claim made by conscientious
+disclosure, which is the same error wearing better clothes.
+
+Two process notes worth keeping:
+
+- **A justification for combining steps is a claim, and claims get measured.** The plan required four
+  commits, each leaving the gate green; three shipped. I justified it by asserting steps 3 and 4 were
+  inseparable, because adding a mock necessarily reddens the topology guard. Half true: step 3 alone
+  does redden it, but a **two-line** update would have made it green. The coupling was a
+  plan-authoring choice — assigning that two-line change to step 4 — not a property of the change.
+- **The contamination shape that ruins a criterion recurs one criterion over.** The Stage 2 reviewer
+  caught A2's seed tripping a second rule, making it a null experiment; the seed was fixed. The very
+  next mutation in the same table, M8, does the same thing — an orphaned import fires
+  `no-unused-vars` alongside the rule under test. Fixing an instance is not fixing the shape.
+
+Eight mutations, six predictions right, two wrong. The two wrong ones produced both findings. Again.

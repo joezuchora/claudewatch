@@ -143,23 +143,34 @@ describe('showDiagnostics', () => {
     expect(shown[0]!.msg).not.toContain('FORMATTED-TOOLTIP');
   });
 
-  test('CHARACTERIZATION: a raw error message is surfaced verbatim — SPEC.md §12 unmet', async () => {
+  test('CHARACTERIZATION: the reachable error message is surfaced verbatim', async () => {
     // NOT an approval. §12 says "It must redact sensitive values from all surfaced errors" and
-    // "must not include tokens in issue templates, screenshots, or debug output", and
-    // showDiagnostics IS the debug-output surface. Nothing in the tree redacts anything: there is
-    // no redactor in packages/core at all, so this invariant is unimplemented product-wide, not
-    // merely skipped here.
+    // "must not include tokens in ... debug output", and showDiagnostics IS the debug-output
+    // surface. Nothing in the tree redacts anything — there is no redactor in packages/core at
+    // all, so this invariant is unimplemented product-wide, not merely skipped here. Fixing it
+    // properly means a core module with its own tests; a surface-local one violates §8.2.
     //
-    // Fixing it properly means a redactor in packages/core with its own tests — a surface-local one
-    // would violate SPEC.md §8.2. That is a loop, not a step in this one, so sdlc/028 records the
-    // finding and this test pins the CURRENT behaviour so the follow-up has something to break.
-    // When the redactor lands, this test should FAIL and be rewritten as the assertion §12 wants.
-    readCacheImpl = () => {
-      throw new Error('ENOENT open /home/testuser/.claude/.credentials.json (sk-ant-oat01-FAKE)');
+    // AN EARLIER REVISION OF THIS TEST PINNED A THREAT THAT CANNOT HAPPEN. It threw
+    // `ENOENT open /home/testuser/.claude/.credentials.json (sk-ant-oat01-FAKE)` and asserted the
+    // token and path came through. But `readCache` cannot produce that: `readCacheResult` wraps
+    // BOTH `readFileSync` and `JSON.parse` in try/catch and returns null (cache.ts:79-94), and
+    // nothing in this call graph opens the credential file — `commands-bridge.ts` re-exports only
+    // `readCache` and `formatTooltip`. So the test documented a fake threat model, and a follow-up
+    // loop would have been scoped against it. Found by the sdlc/028 security pass.
+    //
+    // The ONE reachable throw, measured: a cache file lacking `fiveHour` passes
+    // `readCacheResult`'s shape check (which validates only fetchedAt/display/freshness) and then
+    // `formatTooltip` throws. The message carries no token, no path, no username:
+    formatTooltipImpl = () => {
+      throw new Error("undefined is not an object (evaluating 'snapshot.fiveHour.utilizationPct')");
     };
+    readCacheImpl = () => envelope();
     await showDiagnostics();
-    expect(shown[0]!.msg).toContain('sk-ant-oat01-FAKE');
-    expect(shown[0]!.msg).toContain('.credentials.json');
+    expect(shown[0]!.msg).toContain('Error reading cache: undefined is not an object');
+    // So the measured exposure of the §12 gap on THIS surface is nothing. The follow-up redactor
+    // is architectural hygiene, not an incident — and it must scope the SUCCESS path too, where
+    // `formatTooltip` interpolates `enterprise.disabledReason`, unconstrained free text, verbatim.
+    expect(shown[0]!.msg).not.toContain('sk-ant');
   });
 });
 
