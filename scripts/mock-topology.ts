@@ -50,7 +50,12 @@ export interface Violation {
  */
 export const AMBIENT_ALLOWLIST: readonly string[] = ['vscode'];
 
-export const MOCK_CALL = /mock\.module\(\s*['"]([^'"]+)['"]/g;
+/**
+ * Exported WITHOUT the `g` flag. A global regex carries `lastIndex` between calls, so a consumer
+ * doing `MOCK_CALL.test(x)` twice would silently skip matches. `findMocks` builds its own global
+ * copy from `.source`. (sdlc/026 security pass)
+ */
+export const MOCK_CALL = /mock\.module\(\s*['"]([^'"]+)['"]/;
 
 export function isTestFile(path: string): boolean {
   return path.endsWith('.test.ts');

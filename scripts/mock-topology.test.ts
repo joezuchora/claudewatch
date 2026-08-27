@@ -10,7 +10,11 @@
  * reviewer's probe file was swept up by `git add -A` and turned CI red.
  */
 import { describe, expect, test } from 'bun:test';
-import { readdirSync, readFileSync, statSync } from 'fs';
+import {
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
+  symlinkSync, writeFileSync,
+} from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { analyze, findImporters, findMocks, lineImportsValue, type SourceFile } from './mock-topology.js';
 
@@ -198,12 +202,28 @@ describe('discovery', () => {
 const ROOT = join(import.meta.dir, '..');
 const SELF = 'scripts/mock-topology.test.ts';
 
-function collect(dir: string, out: SourceFile[] = []): SourceFile[] {
+/**
+ * `lstatSync`, not `statSync`, and symlinks are skipped outright.
+ *
+ * The sdlc/026 security pass found both halves of this, and I reproduced both in a temp tree:
+ * `statSync` follows symlinks, so a directory symlink like `src/sub/loop -> ../../src` recurses
+ * without bound, and a symlink named `*.ts` pointing at `~/.claude/.credentials.json` would be
+ * read verbatim into this process on every `bun run verify`. The repo has zero tracked symlinks
+ * (`git ls-files -s` shows no 120000 entries), so skipping them costs nothing and closes both.
+ *
+ * Per-entry failures are skipped rather than thrown: a broken symlink otherwise aborts the run
+ * with an ENOENT carrying an absolute path into CI logs.
+ */
+export function collect(dir: string, out: SourceFile[] = [], root = ROOT): SourceFile[] {
   for (const e of readdirSync(dir)) {
     if (e === 'node_modules' || e === 'dist' || e === 'typefixtures') continue;
     const p = join(dir, e);
-    if (statSync(p).isDirectory()) collect(p, out);
-    else if (e.endsWith('.ts')) out.push({ path: p.replace(ROOT + '/', ''), text: readFileSync(p, 'utf-8') });
+    try {
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) collect(p, out, root);
+      else if (e.endsWith('.ts')) out.push({ path: p.replace(root + '/', ''), text: readFileSync(p, 'utf-8') });
+    } catch { continue; }
   }
   return out;
 }
@@ -212,12 +232,40 @@ function realTree(): SourceFile[] {
   const files: SourceFile[] = [];
   for (const e of readdirSync(join(ROOT, 'packages'))) {
     const src = join(ROOT, 'packages', e, 'src');
-    try { if (statSync(src).isDirectory()) collect(src, files); } catch { /* no src */ }
+    // existsSync + lstatSync rather than try/catch. The catch-all that used to be here swallowed
+    // a ReferenceError when `statSync` stopped being imported, so the walk silently collected
+    // ZERO packages and the real-tree assertions failed with an empty set instead of an error
+    // naming the cause. A catch that hides a programming error is worse than no catch.
+    if (existsSync(src) && lstatSync(src).isDirectory()) collect(src, files);
   }
   collect(join(ROOT, 'scripts'), files);
   // This file quotes mock.module(...) in its own synthetic cases; it is not a mocker of anything.
   return files.filter((x) => x.path !== SELF);
 }
+
+describe('the directory walk', () => {
+  test('skips symlinks, so it cannot be walked out of its own tree', () => {
+    // Written in mktemp -d, never in the repo. Reproduces exactly what the security pass found:
+    // as written with statSync, this returned the secret's contents and recursed to depth 60.
+    const tmp = mkdtempSync(join(tmpdir(), 'cw-symlink-'));
+    try {
+      mkdirSync(join(tmp, 'src', 'sub'), { recursive: true });
+      writeFileSync(join(tmp, 'src', 'real.ts'), 'export const x = 1;');
+      writeFileSync(join(tmp, 'secret.json'), 'SECRET-MUST-NOT-BE-READ');
+      symlinkSync(join(tmp, 'secret.json'), join(tmp, 'src', 'leak.ts'));
+      symlinkSync('../../src', join(tmp, 'src', 'sub', 'loop'));
+
+      const got = collect(join(tmp, 'src'), [], tmp);
+
+      // Positive precondition: the real file IS collected, so a green result below is not just
+      // "the walk found nothing".
+      expect(got.map((g) => g.path)).toEqual(['src/real.ts']);
+      expect(got.map((g) => g.text).join()).not.toContain('SECRET');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('the real tree', () => {
   test('has no mock-topology violations', () => {
