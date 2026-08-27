@@ -5,14 +5,21 @@
     "suspicious": "warn",
     "perf": "warn"
   },
-  "ignorePatterns": ["dist", "node_modules", "*.vsix"],
+  "ignorePatterns": [
+    "dist",
+    "node_modules",
+    "*.vsix"
+  ],
   "rules": {
     "no-await-in-loop": "off",
-    "no-underscore-dangle": "off"
+    "no-underscore-dangle": "off",
+    "typescript/no-explicit-any": "error"
   },
   "overrides": [
     {
-      "files": ["**/*.test.ts"],
+      "files": [
+        "**/*.test.ts"
+      ],
       "rules": {
         "no-new": "off"
       }

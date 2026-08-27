@@ -16,7 +16,27 @@ import { fetchUsage } from './client.js';
 import { mock } from 'bun:test';
 import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
-const spoolLines = (): Array<Record<string, any>> => {
+/**
+ * The spool-event shape this file asserts on. Fields are declared as the assertions use them:
+ * `kind` and `payload` always read, `ok`/`durationMs` read only on fetch_result, payload members
+ * optional because they vary by kind. ONE FLAT INTERFACE, deliberately not a discriminated union —
+ * a union would force narrowing at all 13 assertion sites for no gain in a test file whose fixtures
+ * it constructs itself. (sdlc/028 B3)
+ */
+interface SpoolEvent {
+  kind: string;
+  ok: boolean;
+  durationMs: number;
+  payload: {
+    outcome?: string;
+    statusClass?: string;
+    attempts?: number;
+    category?: string;
+    count?: number;
+  };
+}
+
+const spoolLines = (): SpoolEvent[] => {
   if (!existsSync(getSpoolPath())) return [];
   return readFileSync(getSpoolPath(), 'utf-8').trim().split('\n')
     .filter(Boolean).map((l) => JSON.parse(l));

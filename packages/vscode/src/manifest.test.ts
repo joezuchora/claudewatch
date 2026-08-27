@@ -9,9 +9,37 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const manifest = JSON.parse(
+/**
+ * The slice of package.json this file asserts on.
+ *
+ * Asserted fields are REQUIRED, not optional, and the shape attaches by declaration annotation
+ * rather than `as` — `JSON.parse` returns `any`, so an annotation needs no cast operator at all.
+ * Optional fields would reintroduce six TS18048s, because `expect(setting).toBeDefined()` does not
+ * narrow for tsc. Declaring them required is an assertion about this repo's own manifest, which the
+ * tests below then check. (sdlc/028 B3)
+ */
+interface TelemetrySetting {
+  type: string;
+  default: boolean;
+  tags: string[];
+  markdownDescription: string;
+}
+interface Manifest {
+  publisher: string;
+  license: string;
+  icon: string;
+  homepage: string;
+  keywords: string[];
+  categories: string[];
+  repository?: { url?: string };
+  bugs?: { url?: string };
+  engines: { vscode: string };
+  contributes: { configuration: { properties: Record<string, TelemetrySetting> } };
+}
+
+const manifest: Manifest = JSON.parse(
   readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf-8'),
-) as Record<string, any>;
+);
 
 describe('extension manifest: telemetry setting', () => {
   const setting = manifest.contributes?.configuration?.properties?.['claudewatch.telemetry.enabled'];
