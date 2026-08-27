@@ -574,3 +574,42 @@ payload is unchanged" is to drive the real gate from a test — which makes `bun
 `bun run verify`, whose `test` step runs `bun test`. Infinite recursion, found by running it.
 The refactor it forced (pure functions in `junit.ts`, orchestration only in `verify.ts`) is
 better than what I set out to write.
+
+## Loop 021 — four fixes, each needing another fix
+
+The feature is ten lines. What the loop actually produced is a record of how a change goes wrong
+when every step looks fine.
+
+The spec's load-bearing premise — *"the gate runs only when someone types `bun run verify`"* —
+was false. A systemd unit **in this repository** runs it hourly, and I wrote that unit. The
+counterfactual built on it ("off-by-default would have collected nothing") assumed the person who
+owns the machine would never add one line to it. The spec-reviewer was asked directly whether that
+was self-serving reasoning; it was, and the default flipped.
+
+Then the mitigation for the flip did not mitigate. `Environment=` in a systemd unit does **not**
+beat a `~/.profile` export, because ExecStart runs a login shell and the profile is sourced after
+systemd hands the environment over. The plan called that line "not optional and not deferrable",
+and it did not do the job it existed for. The real defence is an inline assignment on the command.
+
+And the flip's own risk fired within ten minutes: the container's gate stopped recording silently,
+exactly as the plan warned, because this container has no systemd unit and nothing had been told
+to opt in.
+
+The sanitizer sequence is the sharpest instance of the general pattern:
+
+1. A describe name `A5/A6/A7` was recorded as `A5<path>` — a mangled name defeats the purpose of
+   recording which test failed.
+2. Loosening the rule to fix that made it **defeatable eleven ways**, including `(/home/joe/x)`
+   and `` `/home/joe/x` ``. A security boundary weakened for a cosmetic problem — by the same loop
+   whose runbook says *a fix is not exempt from review because it is a fix*.
+3. The hardened version still leaked `foo-/opt/secrets/key`.
+4. That fix shipped **without a test**, so a mutation restoring the old class was silent.
+
+Each step passed the tests written alongside it. Step 2 was found by probing, step 3 by a
+reviewer, step 4 by mutation. **Tests confirm what you thought of; probing and mutation find what
+you did not.**
+
+One distinction worth keeping. In loop 020, two mutations reading "inert" were *faulty mutations*
+that changed no behaviour — reporting them as findings would have been false. In loop 021, two
+mutations reading "inert" were *real gaps in the tests*. The same output means opposite things,
+and the only way to tell is to look at what the mutation actually did.
