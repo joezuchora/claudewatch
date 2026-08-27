@@ -58,7 +58,7 @@ describe('cooldown', () => {
       const env = makeTestEnvelope();
       const result = enterCooldown(env, 'serviceUnavailable');
       expect(result.snapshot).toBe(env.snapshot);
-      expect(result.version).toBe(1);
+      expect(result.version).toBe(env.version);
     });
   });
 

@@ -11,47 +11,15 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
 import { spawnSync, spawn } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'fs';
-import { join, resolve } from 'path';
-import { tmpdir } from 'os';
+import { rmSync, existsSync } from 'fs';
+import { resolve } from 'path';
 import * as net from 'net';
+import { seedSandboxHome, type SandboxSeed } from '@claudewatch/core/test-helpers';
 
 const BIN = resolve(import.meta.dir, '..', 'dist', 'claudewatch');
 const REPO = resolve(import.meta.dir, '..', '..', '..');
 
-let sandbox: string;
-
-/** A HOME with credentials and a fresh cache, so no case touches the network. */
-function makeSandbox(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'cw-smoke-'));
-  mkdirSync(join(dir, '.claude'), { recursive: true });
-  mkdirSync(join(dir, '.cache', 'claudewatch'), { recursive: true });
-
-  const creds = join(dir, '.claude', '.credentials.json');
-  writeFileSync(creds, JSON.stringify({
-    claudeAiOauth: {
-      accessToken: 'sk-ant-oat01-SMOKE-TEST-NOT-REAL',
-      refreshToken: 'r',
-      expiresAt: 4102444800000,
-    },
-  }));
-  chmodSync(creds, 0o600);
-
-  writeFileSync(join(dir, '.cache', 'claudewatch', 'usage.json'), JSON.stringify({
-    version: 2, cooldownUntil: null, lastErrorClass: null,
-    snapshot: {
-      fetchedAt: new Date().toISOString(),
-      source: { usageEndpoint: 'success' }, authState: 'valid', tier: 'standard',
-      fiveHour: { utilizationPct: 42, resetsAt: '2099-01-01T00:00:00.000Z' },
-      sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
-      sevenDayOpus: { utilizationPct: null, resetsAt: null }, enterprise: null,
-      display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 42, primaryResetsAt: '2099-01-01T00:00:00.000Z' },
-      freshness: { isStale: false, staleReason: 'none' },
-      rawMetadata: { normalizationWarnings: [] },
-    },
-  }));
-  return dir;
-}
+let seed: SandboxSeed;
 
 beforeAll(() => {
   if (!existsSync(BIN)) {
@@ -59,10 +27,16 @@ beforeAll(() => {
       { cwd: REPO, stdio: 'ignore' });
     if (built.status !== 0) throw new Error('could not build the statusline binary for smoke tests');
   }
-  sandbox = makeSandbox();
+  // One seeded HOME for every case here. The helper is shared with scripts/perf.ts so the two
+  // cannot drift again; see sdlc/024.
+  seed = seedSandboxHome({
+    prefix: 'cw-smoke-',
+    utilizationPct: 42,
+    accessToken: 'sk-ant-oat01-SMOKE-TEST-NOT-REAL',
+  });
 });
 
-afterAll(() => { if (sandbox) rmSync(sandbox, { recursive: true, force: true }); });
+afterAll(() => { if (seed) rmSync(seed.home, { recursive: true, force: true }); });
 
 interface RunResult { code: number | null; stdout: string; timedOut: boolean; ms: number }
 
@@ -74,7 +48,7 @@ function runWithStdin(
   return new Promise((resolvePromise) => {
     const started = Date.now();
     const child = spawn(BIN, [], {
-      env: { ...process.env, HOME: sandbox, CLAUDEWATCH_TELEMETRY: '0' },
+      env: { ...process.env, HOME: seed.home, CLAUDEWATCH_TELEMETRY: '0' },
       stdio: [stdio, 'pipe', 'ignore'],
     });
 
@@ -123,7 +97,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await runWithStdin('ignore');
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('42%');
+    expect(r.stdout).toContain(`${seed.utilizationPct}%`);
   }, SPAWN_TIMEOUT_MS);
 
   test('SOCKET stdin — the reported failure in sdlc/004', async () => {
@@ -138,7 +112,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
       const r = await runWithStdin((sock as unknown as { _handle: { fd: number } })._handle.fd);
       expect(r.timedOut).toBe(false);
       expect(r.code).toBe(0);
-      expect(r.stdout).toContain('42%');
+      expect(r.stdout).toContain(`${seed.utilizationPct}%`);
     } finally {
       sock.destroy();
       pair.close();
@@ -149,7 +123,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await runWithStdin('pipe', { write: '' });
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('42%');
+    expect(r.stdout).toContain(`${seed.utilizationPct}%`);
   }, SPAWN_TIMEOUT_MS);
 
   test('pipe carrying valid session JSON produces RICH output', async () => {
@@ -165,7 +139,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await runWithStdin('pipe', { write: '{ not json at all' });
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('42%');
+    expect(r.stdout).toContain(`${seed.utilizationPct}%`);
     expect(r.stdout).not.toContain('myproject');
   }, SPAWN_TIMEOUT_MS);
 
@@ -173,7 +147,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await runWithStdin('pipe', { closeStdin: false });
     expect(r.timedOut).toBe(false);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain('42%');
+    expect(r.stdout).toContain(`${seed.utilizationPct}%`);
     // The claim is that the 250ms deadline bounds the read. r.ms includes process spawn,
     // which varies with suite load, so this asserts an order of magnitude rather than a
     // tight figure: comfortably above spawn variance, and far below "forever", which is
@@ -185,7 +159,7 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     const r = await new Promise<RunResult>((res) => {
       const started = Date.now();
       const child = spawn(BIN, ['--version'], {
-        env: { ...process.env, HOME: sandbox }, stdio: ['pipe', 'pipe', 'ignore'],
+        env: { ...process.env, HOME: seed.home }, stdio: ['pipe', 'pipe', 'ignore'],
       });
       let stdout = '';
       child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });

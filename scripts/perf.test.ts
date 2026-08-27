@@ -1,9 +1,9 @@
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, readFileSync, statSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { evaluate, makeSandbox, BUDGET_P50_MS, BUDGET_P95_MS, P95_MIN_SAMPLES, MIN_SAMPLES, WARMUP, SENTINEL_PCT } from './perf.js';
+import { evaluate, BUDGET_P50_MS, BUDGET_P95_MS, P95_MIN_SAMPLES, MIN_SAMPLES, WARMUP, SENTINEL_PCT } from './perf.js';
 
 const REPO = join(import.meta.dir, '..');
 const SCRIPT = join(import.meta.dir, 'perf.ts');
@@ -100,36 +100,6 @@ describe('evaluate — the deciding half, which is what makes it right or wrong'
   });
 });
 
-describe('makeSandbox', () => {
-  test('seeds an isolated HOME with a 0600 fixture credential and a v2 envelope', () => {
-    const home = makeSandbox();
-    try {
-      const credPath = join(home, '.claude', '.credentials.json');
-      expect(existsSync(credPath)).toBe(true);
-      expect(statSync(credPath).mode & 0o777).toBe(0o600);
-
-      const envelope = JSON.parse(
-        readFileSync(join(home, '.cache', 'claudewatch', 'usage.json'), 'utf-8'),
-      );
-      expect(envelope.version).toBe(2);
-      // Fresh, or the binary would fetch instead of hitting the cache.
-      expect(envelope.snapshot.freshness.isStale).toBe(false);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test('the fixture token is self-evidently not real', () => {
-    const home = makeSandbox();
-    try {
-      const raw = readFileSync(join(home, '.claude', '.credentials.json'), 'utf-8');
-      expect(raw).toContain('NOT-REAL');
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-});
-
 describe('the CLI, run the way the gate runs it', () => {
   test('a missing binary exits 2, never 0', () => {
     const r = run(['--bin', join(dir, 'does-not-exist'), '--samples', '30']);
@@ -219,17 +189,6 @@ describe('the CLI, run the way the gate runs it', () => {
     const r = run(['--bin', stub('silent', 'exit 0'), '--samples', '30']);
     expect(r.code).toBe(2);
     expect(r.err).toContain('did not render the seeded cache');
-  });
-
-  test('the sandbox is seeded 0600/0700, not chmod-ed afterwards', () => {
-    const home = makeSandbox();
-    try {
-      expect(statSync(join(home, '.claude')).mode & 0o777).toBe(0o700);
-      expect(statSync(join(home, '.cache', 'claudewatch')).mode & 0o777).toBe(0o700);
-      expect(statSync(join(home, '.cache', 'claudewatch', 'usage.json')).mode & 0o777).toBe(0o600);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
   });
 
   test('the child is handed the SANDBOX home, not the ambient one', () => {

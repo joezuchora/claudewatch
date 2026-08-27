@@ -28,15 +28,17 @@
  * lives in a deliberate `bun run perf`, which REVIEW.md already requires for startup-path
  * changes.
  */
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync, statSync, existsSync } from 'fs';
+import { rmSync, statSync, existsSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
 // A relative reach into the workspace package's src/, not `@claudewatch/metrics`. The root
 // package declares no dependency on the workspace packages and `scripts/verify.ts` sets no
 // precedent for one, so the package specifier does not resolve here. Adding a root dependency
 // purely to satisfy the plan's prose would be the tail wagging the dog; the prose was corrected
 // instead. (plan-to-diff audit, sdlc/013)
 import { percentile } from '../packages/metrics/src/anomaly.js';
+// Same relative reach, same reason. The cache seed used to be a local copy here; it drifted from
+// smoke.test.ts's on six of seven rows before sdlc/024 hoisted it.
+import { seedSandboxHome } from '../packages/core/src/test-helpers.js';
 
 /** SPEC.md §11.7. p50 is the live tripwire; p95 is a regression ceiling. See sdlc/013. */
 export const BUDGET_P50_MS = 50;
@@ -97,44 +99,6 @@ export function evaluate(
   ];
 }
 
-/**
- * An isolated HOME holding a fixture credential and a fresh v2 cache envelope.
- * Same shape as packages/statusline/src/smoke.test.ts's helper, deliberately: an earlier draft
- * of this script invented an env var that did not exist.
- */
-export function makeSandbox(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'cw-perf-'));
-  // Modes at creation, not after: writeFileSync-then-chmod leaves a 0644 window, and this
-  // helper is a template someone will copy to a path where that matters.
-  mkdirSync(join(dir, '.claude'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(dir, '.cache', 'claudewatch'), { recursive: true, mode: 0o700 });
-
-  const creds = join(dir, '.claude', '.credentials.json');
-  writeFileSync(creds, JSON.stringify({
-    claudeAiOauth: {
-      accessToken: 'sk-ant-oat01-PERF-FIXTURE-NOT-REAL',
-      refreshToken: 'r',
-      expiresAt: 4102444800000,
-    },
-  }), { mode: 0o600 });
-  chmodSync(creds, 0o600);   // belt and braces: mode is advisory against a permissive umask
-
-  writeFileSync(join(dir, '.cache', 'claudewatch', 'usage.json'), JSON.stringify({
-    version: 2, cooldownUntil: null, lastErrorClass: null,
-    snapshot: {
-      fetchedAt: new Date().toISOString(),
-      source: { usageEndpoint: 'success' }, authState: 'valid', tier: 'standard',
-      fiveHour: { utilizationPct: SENTINEL_PCT, resetsAt: '2099-01-01T00:00:00.000Z' },
-      sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
-      sevenDayOpus: { utilizationPct: null, resetsAt: null }, enterprise: null,
-      display: { primaryWindow: 'fiveHour', primaryUtilizationPct: SENTINEL_PCT },
-      freshness: { isStale: false, staleReason: null, ageSeconds: 0 },
-      rawMetadata: { normalizationWarnings: [] },
-    },
-  }), { mode: 0o600 });
-  return dir;
-}
-
 class MeasureError extends Error {}
 
 export function measure(bin: string, samples: number): number[] {
@@ -151,8 +115,13 @@ export function measure(bin: string, samples: number): number[] {
   process.on('SIGTERM', onSignal);
 
   try {
-    home = makeSandbox();
-    const cachePath = join(home, '.cache', 'claudewatch', 'usage.json');
+    const seed = seedSandboxHome({
+      prefix: 'cw-perf-',
+      utilizationPct: SENTINEL_PCT,
+      accessToken: 'sk-ant-oat01-PERF-FIXTURE-NOT-REAL',
+    });
+    home = seed.home;
+    const cachePath = seed.cachePath;
     const seededMtime = statSync(cachePath).mtimeMs;
 
     // HOME is not enough. `os.homedir()` follows HOME on POSIX and USERPROFILE on Windows —

@@ -168,12 +168,25 @@ satisfied by the pre-change tree — B6's lesson, and B1's.
   through the same path *does* yield `versionMismatch` and *does* delete the file. Without both
   halves this is a test that proves the pipe is connected and nothing else — loop 022's shape.
   On the pre-change tree the first half fails.
-- **A3.** *(replaces r1's vacuous A3.)* Mutate the **schema**: add a required field to
-  `UsageSnapshot` in `packages/core/src/types.ts`. After the change, `bun run typecheck` exits
-  non-zero **naming `scripts/perf.ts`**. Record the pre-change run of the same mutation, where
-  `scripts/perf.ts` is not named at all — its literal absorbs the change silently. That
-  difference is the entire point of the loop, and it is the only mutation only this loop
-  survives.
+- **A3.** *(replaces r1's vacuous A3. Then corrected again at Stage 4 — see below.)*
+  The fixture's three schema violations cannot be written any more.
+  **Evidence, both halves run:**
+  - *Pre-change*, `scripts/perf.ts:131` shipped `freshness: { isStale: false, staleReason: null,
+    ageSeconds: 0 }` and `:130` a `display` with no `primaryResetsAt` — and `bun run typecheck`
+    exited **0**. An invalid fixture and a green gate, coexisting.
+  - *Post-change*, the identical values in the seeding path give
+    `test-helpers.ts(174,36): error TS2322: Type 'null' is not assignable to type 'StaleReason'`,
+    exit **2**.
+
+  **What this criterion first said, and why it was wrong.** Revision 2 required that adding a
+  required field to `UsageSnapshot` make typecheck fail *naming `scripts/perf.ts`*. Run both
+  ways, it does not — and cannot. After the change `perf.ts` contains no fixture at all, so the
+  error correctly surfaces in `test-helpers.ts`, which was already in the pre-change failure list
+  (nine files, identical before and after). **That mutation does not discriminate**, and a
+  criterion that reports the same result on both trees is worth nothing. The discriminating
+  question is not *which file is named* but *whether an invalid fixture can exist*, which is what
+  the evidence above answers. This is the third time in this loop a criterion I wrote failed to
+  distinguish the change from its absence.
 - **A4.** *(M1 — the helper honours its input.)* A core test seeds `utilizationPct: 77` — a value
   equal to no default anywhere — and asserts the envelope read **back off disk** has both
   `snapshot.fiveHour.utilizationPct === 77` and `snapshot.display.primaryUtilizationPct === 77`.

@@ -1,13 +1,15 @@
 /**
- * Shared test fixtures for ClaudeWatch test suites.
- * Not shipped in production — only imported by *.test.ts files.
+ * Shared test fixtures for ClaudeWatch test suites, and for `scripts/perf.ts` — the benchmark
+ * is not a test file but seeds the same sandbox, and having it keep its own copy is exactly
+ * what sdlc/024 exists to end. Nothing here is reachable from `index.ts`, so none of it is
+ * bundled into a shipped artifact.
  */
 import { join } from 'path';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
-import type { UsageSnapshot, CacheEnvelope } from './types.js';
-import { setCacheBaseDir } from './cache.js';
+import type { UsageSnapshot, CacheEnvelope, CredentialFile } from './types.js';
+import { setCacheBaseDir, makeCacheEnvelope } from './cache.js';
 
 /**
  * Create a valid UsageSnapshot with sensible defaults.
@@ -58,17 +60,17 @@ export function makeTestEnterpriseSnapshot(overrides?: Partial<UsageSnapshot>): 
 
 /**
  * Create a valid CacheEnvelope wrapping a test snapshot.
+ *
+ * Built by the PRODUCT'S OWN WRITER rather than by a literal. This file previously hardcoded
+ * `version: 1`, and `CACHE_VERSION` has been 2 since sdlc/002 — so every envelope from here was
+ * one `readCacheResult` would reject as a `versionMismatch`, delete, and report as a cache miss.
+ * All 25 call sites happened to pass it to an in-memory mock, so nothing was ever red; the first
+ * caller to write one to disk would have paid for it. Delegating removes the class of bug rather
+ * than the instance: a version bump or a new envelope field now arrives here for free, and
+ * `CACHE_VERSION` stays module-private. (sdlc/024)
  */
 export function makeTestEnvelope(overrides?: Partial<CacheEnvelope>): CacheEnvelope {
-  return {
-    version: 1,
-    snapshot: makeTestSnapshot(),
-    cooldownUntil: null,
-    lastErrorClass: null,
-    lastHttpStatus: null,
-    lastErrorMessage: null,
-    ...overrides,
-  };
+  return { ...makeCacheEnvelope(makeTestSnapshot()), ...overrides };
 }
 
 /**
@@ -95,4 +97,94 @@ export function setupTestCacheDir(): { tempDir: string; cleanup: () => void } {
       try { rmSync(tempDir, { recursive: true }); } catch { /* ignore */ }
     },
   };
+}
+
+export interface SandboxSeed {
+  /** Absolute path to the sandbox HOME. Callers own its removal. */
+  home: string;
+  /** Absolute path to the seeded cache envelope. */
+  cachePath: string;
+  /** Absolute path to the fixture credential. */
+  credentialsPath: string;
+  /** The utilization the seeded envelope renders. Assert on THIS, never on a literal. */
+  utilizationPct: number;
+}
+
+/**
+ * Seed an isolated HOME with a fixture credential and a cache envelope, so a test or a
+ * benchmark can run the compiled binary without touching the network.
+ *
+ * This replaces two hand-rolled copies (packages/statusline/src/smoke.test.ts and
+ * scripts/perf.ts) that had drifted apart on six of seven rows — one shipped
+ * `staleReason: null`, an `ageSeconds` field that does not exist, and no `primaryResetsAt`,
+ * none of which `tsc` could see because both were `JSON.stringify` over an unannotated object
+ * literal. Routing the snapshot through `makeTestSnapshot`, whose return is annotated
+ * `UsageSnapshot`, is the entire guard: a schema change that invalidates this fixture is now a
+ * compile error, and `scripts/` has been inside `bun run typecheck` since sdlc/018.
+ *
+ * Two things a caller must know:
+ *
+ *  - **`fetchedAt` is a hazard, not a free parameter.** Seeding a stale one puts the binary on
+ *    main.ts:249-255, which WRITES the cache — which would trip scripts/perf.ts's mtime guard
+ *    and report the samples as non-cache-hits. Staleness is recomputed from `fetchedAt` at
+ *    render; the seeded `freshness` block is decorative and only its presence is checked.
+ *  - **The default seed expires in 600 seconds**, `isCacheFresh`'s default TTL. A suite that
+ *    seeds once and spawns for longer than that will start missing the cache.
+ *
+ * Cleanup is deliberately the caller's: perf.ts needs signal handlers, smoke.test.ts needs
+ * `afterAll`, and both are already correct.
+ */
+export function seedSandboxHome(opts: {
+  prefix: string;
+  accessToken: string;
+  utilizationPct?: number;
+  snapshot?: UsageSnapshot;
+  envelope?: Partial<CacheEnvelope>;
+  seedCache?: boolean;
+  fetchedAt?: string;
+}): SandboxSeed {
+  const utilizationPct = opts.utilizationPct ?? 42;
+  const home = mkdtempSync(join(tmpdir(), opts.prefix));
+
+  // Modes at creation, not after: a writeFileSync-then-chmod leaves a 0644 window, and this
+  // helper is a template someone will copy to a path where that matters. There is no trailing
+  // chmod — `mode` is ignored only when the file already exists, which cannot happen inside a
+  // fresh mkdtemp. (The copy this replaced justified its chmod as "advisory against a
+  // permissive umask", which is backwards: umask can only clear bits, never add them.)
+  mkdirSync(join(home, '.claude'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(home, '.cache', 'claudewatch'), { recursive: true, mode: 0o700 });
+
+  const credentialsPath = join(home, '.claude', '.credentials.json');
+  const creds: CredentialFile = {
+    claudeAiOauth: {
+      accessToken: opts.accessToken,
+      refreshToken: 'r',
+      expiresAt: 4102444800000,
+    },
+  };
+  writeFileSync(credentialsPath, JSON.stringify(creds), { mode: 0o600 });
+
+  const cachePath = join(home, '.cache', 'claudewatch', 'usage.json');
+  if (opts.seedCache !== false) {
+    // Overrides are written as an INLINE literal on purpose: excess-property checking is
+    // skipped when the argument is a pre-declared variable, so hoisting this to a `const` would
+    // let a stray field through — which is one of the three defects this helper exists to stop.
+    const snapshot = opts.snapshot ?? makeTestSnapshot({
+      fetchedAt: opts.fetchedAt ?? new Date().toISOString(),
+      fiveHour: { utilizationPct, resetsAt: '2099-01-01T00:00:00.000Z' },
+      sevenDay: { utilizationPct: 18, resetsAt: '2099-01-01T00:00:00.000Z' },
+      display: {
+        primaryWindow: 'fiveHour',
+        primaryUtilizationPct: utilizationPct,
+        primaryResetsAt: '2099-01-01T00:00:00.000Z',
+      },
+    });
+    writeFileSync(
+      cachePath,
+      JSON.stringify(makeTestEnvelope({ snapshot, ...opts.envelope })),
+      { mode: 0o600 },
+    );
+  }
+
+  return { home, cachePath, credentialsPath, utilizationPct };
 }

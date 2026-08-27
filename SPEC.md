@@ -494,7 +494,7 @@ On Linux this follows `$XDG_CACHE_HOME` convention (defaults to `~/.cache`). On 
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "snapshot": { /* UsageSnapshot */ },
   "cooldownUntil": null,
   "lastErrorClass": null,
