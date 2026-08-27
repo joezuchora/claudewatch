@@ -28,6 +28,13 @@
  *
  * KNOWN HOLE — discovery only sees packages/{*}/src and scripts/. A `mock.module` anywhere else
  * is invisible.
+ *
+ * KNOWN HOLE — a `mock.module('../bridge.js')` from a subdirectory is effectively unguarded. R1
+ * scopes local specifiers to the mocking test's own directory, so it can only count files in that
+ * subdirectory writing that same '../' string; the module's real neighbours one level up
+ * necessarily write './bridge.js' and are never counted. Not live (no src/ has subdirectories
+ * today) — which is exactly why nobody will notice when the first one appears. Found by the
+ * sdlc/026 plan-to-diff audit; the hole is in the rule, not the implementation.
  */
 
 export interface SourceFile {
@@ -80,12 +87,37 @@ export function findMocks(files: readonly SourceFile[]): Array<{ testPath: strin
 }
 
 /**
+ * Normalize a source file for import scanning.
+ *
+ * Two things this has to survive, both found by the sdlc/026 plan-to-diff audit and both
+ * reproduced before fixing:
+ *
+ *  - **Wrapped imports.** `lineImportsValue` works per line, and in
+ *    `import type {\n  A,\n} from './dep.js';` the line carrying the specifier is `} from './dep.js';`
+ *    — no `{`, no leading `import type`, so both guards miss it and a pure TYPE import was counted
+ *    as a value importer. That is a straight deviation from the spec's own table, and it is
+ *    live-shaped: `main.ts:31` and `extension.ts:20` are wrapped-import tails today.
+ *  - **Comments.** A commented-out `// import { x } from './dep.js';` counted as a real importer,
+ *    and so did prose. This module's own header came within one word of tripping it: line 10 says
+ *    `mocked './core-bridge.js', which three files imported` — had it read `imported from
+ *    './core-bridge.js'`, the analyzer would have counted its own docstring as a third importer.
+ *
+ * The `(?<!:)` guard on line comments keeps `https://` intact.
+ */
+export function normalizeForScan(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments, including docstrings
+    .replace(/(?<!:)\/\/[^\n]*/g, ' ')        // line comments, but not the // in a URL
+    .replace(/\{[^{}]*\}/g, (m) => m.replace(/\s+/g, ' ')); // collapse wrapped brace groups
+}
+
+/**
  * Does this line reference `spec` as a VALUE?
  *
- * Type-only references are erased at compile time and cannot be contaminated. The subtlety the
- * first draft of this got wrong: `import { a, type B } from 'x'` is a value import, while
- * `import { type A, type B } from 'x'` is not — and this repo already uses inline `type`
- * modifiers in cli-detect.ts, verify.ts and smoke.test.ts.
+ * Type-only references are erased at compile time and cannot be contaminated. The subtlety:
+ * `import { a, type B } from 'x'` is a value import, while `import { type A, type B } from 'x'`
+ * is not — and this repo already uses inline `type` modifiers in cli-detect.ts, verify.ts and
+ * smoke.test.ts. Callers should pass `normalizeForScan`'d text.
  */
 export function lineImportsValue(line: string, spec: string): boolean {
   const esc = spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -100,7 +132,9 @@ export function lineImportsValue(line: string, spec: string): boolean {
   if (braces) {
     const bindings = braces[1]!.split(',').map((b) => b.trim()).filter(Boolean);
     if (bindings.length > 0 && bindings.every((b) => /^type\s/.test(b))) {
-      // A default or namespace binding alongside the braces would still be a value.
+      // A default or namespace binding alongside all-type braces is STILL a value import:
+      // `import Def, { type A } from 'x'` imports Def at runtime. Untested until the sdlc/026
+      // audit gutted this line to `return false` and all 23 tests stayed green.
       return /^\s*import\s+[A-Za-z_$*]/.test(line);
     }
   }
@@ -117,7 +151,9 @@ export function findImporters(
   for (const f of files) {
     if (isTestFile(f.path)) continue;
     if (scope !== null && dirOf(f.path) !== scope) continue;
-    if (f.text.split('\n').some((line) => lineImportsValue(line, spec))) out.push(f.path);
+    if (normalizeForScan(f.text).split('\n').some((line) => lineImportsValue(line, spec))) {
+      out.push(f.path);
+    }
   }
   return out.toSorted();
 }

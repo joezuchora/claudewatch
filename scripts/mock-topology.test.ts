@@ -69,12 +69,27 @@ describe('R1 — a mocked module may have at most one non-test importer', () => 
     // Measured case 3, and the case the Stage 2 reviewer measured differently. Three load orders
     // on bun 1.3.11 showed no leak. If their result reproduces, this is a false negative and the
     // guard has a hole here.
+    //
+    // BOTH importers sit in the mocking test's directory, differing ONLY in the specifier string.
+    // The first version put them in different directories, so directory scoping alone explained
+    // the green and the disputed property was never load-bearing — unfalsifiable by any bug.
     expect(analyze([
       f('a/src/x.test.ts', `mock.module('./dep.js', () => ({}));`),
       f('a/src/dep.ts', `export const x = 1;`),
       f('a/src/use.ts', `import { x } from './dep.js';`),
-      f('b/src/use.ts', `import { x } from '../../a/src/dep.js';`),
+      f('a/src/other.ts', `import { x } from '../src/dep.js';`),
     ])).toEqual([]);
+  });
+
+  test('A7b control: the SAME two importers writing the SAME string is a violation', () => {
+    // Differs from A7 by one specifier string, so A7's green isolates "different string" rather
+    // than "the analyzer ignored the second file".
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('a/src/dep.ts', `export const x = 1;`),
+      f('a/src/use.ts', `import { x } from './dep.js';`),
+      f('a/src/other.ts', `import { x } from './dep.js';`),
+    ])).toHaveLength(1);
   });
 });
 
@@ -136,6 +151,34 @@ describe('importer forms', () => {
     expect(base([f('pkg/src/m.ts', `import { a, type B } from './dep.js';`)])).toHaveLength(1);
   });
 
+  test('a WRAPPED type-only import does not count', () => {
+    // The sdlc/026 audit's second blocking finding. lineImportsValue works per line, and the line
+    // carrying the specifier in a wrapped import is `} from './dep.js';` — no brace group, no
+    // leading `import type`, so both guards missed it and a pure type import was counted.
+    expect(base([f('pkg/src/w.ts', `import type {\n  A,\n  B,\n} from './dep.js';`)])).toEqual([]);
+  });
+
+  test('control: the same wrapped import WITHOUT type does count', () => {
+    expect(base([f('pkg/src/w.ts', `import {\n  A,\n  B,\n} from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('a commented-out import does not count', () => {
+    // This module\'s own docstring came within one word of tripping this.
+    expect(base([f('pkg/src/c.ts', `// legacy: import { x } from './dep.js';`)])).toEqual([]);
+    expect(base([f('pkg/src/c2.ts', `/* see import { x } from './dep.js'; */`)])).toEqual([]);
+  });
+
+  test('a default binding alongside all-type braces IS a value import', () => {
+    // The branch the audit gutted to `return false` with all 23 tests still green. `Def` is
+    // imported at runtime regardless of the braces being type-only.
+    expect(base([f('pkg/src/d1.ts', `import Def, { type A } from './dep.js';`)])).toHaveLength(1);
+    expect(base([f('pkg/src/d2.ts', `import * as ns from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('control: all-type braces with NO default binding is not a value import', () => {
+    expect(base([f('pkg/src/d3.ts', `import { type A } from './dep.js';`)])).toEqual([]);
+  });
+
   test('A5: dynamic import counts, relative and bare', () => {
     expect(base([f('pkg/src/d.ts', `const m = await import('./dep.js');`)])).toHaveLength(1);
     const bare = analyze([
@@ -180,7 +223,11 @@ describe('discovery', () => {
   });
 
   test('prose mentioning mock.module in a comment is not a mock', () => {
-    expect(findMocks([f('a/x.ts', `// bun applies mock.module process-wide`)])).toEqual([]);
+    // `a/x.test.ts`, not `a/x.ts`. As `a/x.ts` this passed because findMocks bails on
+    // isTestFile before the regex is consulted — green for a reason unrelated to its name.
+    // Found by the sdlc/026 plan-to-diff audit, which confirmed it by deleting the isTestFile
+    // guard entirely and watching all 23 tests stay green.
+    expect(findMocks([f('a/x.test.ts', `// bun applies mock.module process-wide`)])).toEqual([]);
   });
 
   test('lineImportsValue is exported and directly testable', () => {
@@ -261,6 +308,29 @@ describe('the directory walk', () => {
       // "the walk found nothing".
       expect(got.map((g) => g.path)).toEqual(['src/real.ts']);
       expect(got.map((g) => g.text).join()).not.toContain('SECRET');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('recurses into subdirectories, and honours the skip list', () => {
+    // A13's "scan scope is recursive" was unexercised: the audit made `collect` non-recursive and
+    // all 23 tests stayed green, because the only subdirectory under a scanned root is
+    // typefixtures, which the walk deliberately skips. The recursion exists for the growth the
+    // spec anticipated (packages/metrics/src, scripts/) — the case that would be unprotected
+    // exactly when it arrives.
+    const tmp = mkdtempSync(join(tmpdir(), 'cw-recurse-'));
+    try {
+      mkdirSync(join(tmp, 'src', 'deep', 'deeper'), { recursive: true });
+      mkdirSync(join(tmp, 'src', 'typefixtures'));
+      writeFileSync(join(tmp, 'src', 'top.ts'), 'export const a = 1;');
+      writeFileSync(join(tmp, 'src', 'deep', 'mid.ts'), 'export const b = 2;');
+      writeFileSync(join(tmp, 'src', 'deep', 'deeper', 'low.ts'), 'export const c = 3;');
+      writeFileSync(join(tmp, 'src', 'typefixtures', 'skip.ts'), 'export const d = 4;');
+
+      expect(collect(join(tmp, 'src'), [], tmp).map((g) => g.path).toSorted()).toEqual([
+        'src/deep/deeper/low.ts', 'src/deep/mid.ts', 'src/top.ts',
+      ]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

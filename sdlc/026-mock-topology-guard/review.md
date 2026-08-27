@@ -9,8 +9,9 @@
 
 Two reviewers at Stage 2 and Stage 5, plus the loop-025 review that spawned this one. The Stage 2
 pass returned five blocking findings that rewrote the design; the Stage 5 security pass returned
-none blocking and one real defect. The plan-to-diff audit had not reported when this was written —
-recorded as unfinished below rather than assumed clean.
+none blocking and one real defect; the plan-to-diff audit — which reported after the first draft of
+this file and is folded in below — returned **two blocking findings, both of them uncovered code
+inside the guard built to prevent uncovered code.**
 
 ## Pass 1 — bugs and logical errors
 
@@ -74,6 +75,59 @@ Cleared after active checking, not assumed:
 Recorded, not fixed: a broken symlink or unreadable file used to throw an ENOENT carrying an
 **absolute path** into CI logs. The `try { … } catch { continue; }` per entry closes that too.
 
+## Pass 1b — the plan-to-diff audit
+
+The fence was clean: three files added, none existing touched, no globs. Both blocking findings
+were about the guard failing its own standard.
+
+**B1 — a branch of `lineImportsValue` had zero coverage (fixed).** The auditor replaced
+
+```ts
+return /^\s*import\s+[A-Za-z_$*]/.test(line);   // default/namespace alongside all-type braces
+```
+
+with `return false` and **all 23 tests stayed green**. I reproduced it: 24 pass, 0 fail. The branch
+was *correct* — `import Def, { type A } from 'x'` does import `Def` at runtime — but
+correct-and-untested is exactly the state this loop exists to prevent, sitting inside the analyzer
+built to prevent it. Now covered, and the mutation fails.
+
+**B2 — a wrapped `import type` was counted as a value importer (fixed).** `lineImportsValue` works
+per line, and in
+
+```ts
+import type {
+  A,
+} from './dep.js';
+```
+
+the line carrying the specifier is `} from './dep.js';` — no brace group, no leading `import type`,
+so both guards miss it. Measured: `analyze` returned a violation naming the type-only file. That is
+a straight deviation from the spec's own Step 4 table, and it is live-shaped — `main.ts:31` and
+`extension.ts:20` are wrapped-import tails today (value imports, so right by luck).
+
+Fixed with `normalizeForScan`, which also closes two smaller false positives the auditor found: a
+commented-out import counted as real, and so did prose. **This module's own docstring came within
+one word of tripping it** — line 10 reads `mocked './core-bridge.js', which three files imported`;
+had it read `imported from './core-bridge.js'`, the analyzer would have counted its own header as a
+third importer and A1(b) would have been red.
+
+**Advisories, all fixed:** the test named "prose mentioning mock.module in a comment is not a mock"
+used `a/x.ts`, so `findMocks` bailed on `isTestFile` before the regex was consulted — green for a
+reason unrelated to its name. A7 put its two importers in different directories, so directory
+scoping alone explained the green and the disputed property was never load-bearing; both now sit in
+the same directory differing only in specifier string, with A7b as the red control. A13's
+"recursive" was unexercised — the auditor made `collect` non-recursive and all 23 tests stayed
+green, because the only subdirectory under a scanned root is `typefixtures`, which the walk skips.
+
+**Corrected in the spec:** revision 2 promised an "A9b" criterion that was never written. The audit
+found the spec asserting coverage it did not have — in the loop about tests that claim more than
+they check.
+
+**Recorded, not fixed:** a `mock.module('../bridge.js')` from a subdirectory is effectively
+unguarded, because R1 can only count files in that subdirectory writing the same `'../'` string.
+The hole is in the rule, not the implementation. Now named in the analyzer's docstring, per this
+loop's own principle that holes go in the source rather than staying implicit.
+
 ## Pass 3 — compliance
 
 Fence held: exactly the two declared new files plus this loop's artifacts. `scripts/verify.ts`,
@@ -83,9 +137,11 @@ collects `scripts/*.test.ts`. Domain logic stayed out of surfaces; this adds non
 
 ## What is NOT done
 
-- **The plan-to-diff audit had not returned when this was written.** Its findings are not
-  incorporated here. If it reports anything, that is a follow-up commit, and this section is the
-  honest record that Stage 5 ran with one of two reviewers.
+- **`MOCK_CALL` is exported but no test asserts on it.** The suite reaches it through `findMocks`,
+  which is the equivalent affordance; the export is now decorative.
+- **Multi-statement lines undercount.** `import { type A } from './d.js'; import { b } from './d.js';`
+  returns false — the first brace group wins. Contrived, nobody writes it, and the direction is the
+  silent one, so it is recorded rather than dismissed.
 - **A7 encodes a disputed measurement.** I measured no leak when one file is reached by two
   different specifier strings; the Stage 2 reviewer measured a leak and concluded resolved-path
   keying. Three load orders on bun 1.3.11 said otherwise and neither of us could reproduce the
@@ -111,6 +167,10 @@ collects `scripts/*.test.ts`. Domain logic stayed out of surfaces; this adds non
 | delete the R2 branch | A10 fails | 1 fail ✓ |
 | empty the ambient allowlist | real tree red (`vscode` has 4 importers) | 3 fail ✓ — **faulty shape named in advance:** staying green would have meant the real-tree half was not calling the rule |
 | remove the symlink skip | the symlink test fails | 1 fail ✓ |
+| gut the default/namespace branch | **was INERT — a real gap** | 1 fail ✓ after the fix |
+| remove the wrapped-brace collapse | fails | 1 fail ✓ |
+| remove comment stripping | fails | 1 fail ✓ |
+| make `collect` non-recursive | **was INERT — a real gap** | 1 fail ✓ after the fix |
 
 ## Retrospective
 

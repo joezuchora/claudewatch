@@ -56,7 +56,11 @@ must stay green) and includes case 4 (leaks, must go red).
 
 This disagreement is recorded rather than resolved. If the reviewer's result is reproducible on
 some configuration, case 3 becomes a false negative for this rule — a hole, not a wrong answer.
-A9b below is the criterion that would catch it if it ever shows up.
+A7/A7b are the criteria that pin it: both importers sit in the mocking test's directory and differ
+only in the specifier string, so A7's green isolates the disputed property rather than being
+explained by directory scoping. (Revision 2 of this spec promised an "A9b" here that was never
+written — the plan-to-diff audit found the spec asserting coverage it did not have, in the loop
+about tests that claim more than they check.)
 
 ### 3. Revision 1 asserted the guard would NOT have caught loop 025. That was false.
 
