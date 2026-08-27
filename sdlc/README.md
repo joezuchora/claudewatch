@@ -613,3 +613,34 @@ One distinction worth keeping. In loop 020, two mutations reading "inert" were *
 that changed no behaviour — reporting them as findings would have been false. In loop 021, two
 mutations reading "inert" were *real gaps in the tests*. The same output means opposite things,
 and the only way to tell is to look at what the mutation actually did.
+
+## Loop 022 — a green suite hid a constant for nine loops
+
+The anomaly detector's duration fingerprint was `Math.floor(Math.log10(ms))`. Across the range
+the detector can actually reach — floor 120s, ceiling one 300s step timeout plus the fast steps
+before it — that is not a coarse bucket. It is a **constant**. Every anomaly it could raise
+carried `verify_duration_outlier:5`, so the first one of any size suppressed every later one for
+24 hours, and the open hang investigation is exactly what that hurts.
+
+**All 42 existing tests passed against the replacement.** That is the diagnosis, not a
+compatibility win. Every one captures the fingerprint dynamically and asserts the round trip —
+and *"a fingerprint suppresses itself"* is true of a constant. **A test that captures a value and
+feeds it back proves the pipe is connected, never that the value means anything.** That is a new
+entry in the vacuity catalogue, distinct from the eight before it.
+
+The spec review then rejected the first design outright, for two reasons I should have caught:
+
+It **classified a total run duration using constants that bound a single step** — five passing
+steps at 62s each total 310s and exit 0, which the draft would have labelled a step timeout with
+nothing killed. And it **anchored bands to a floor that moves**: the real trigger is
+`max(p95 * 4, minOutlierMs)`, so at the slowest legitimate run on record the floor is 270s and
+the draft's lowest band would have been empty — collapsing back to a constant under exactly the
+slow conditions it existed for.
+
+Both were one command away. `grep` for the import rule I invented; read the three lines around
+`thresholdMs`. The reviewer's advantage was not insight, it was **looking**.
+
+And the sharpest thing in the loop: the draft spec **named the `sdlc/015` failure mode in one
+paragraph and committed it two paragraphs later**, presenting an architecture rule that does not
+exist as an inherited constraint. Writing the lesson down does not confer immunity to it. The
+catalogue in this file is a record of what to check, not a charm against repeating it.

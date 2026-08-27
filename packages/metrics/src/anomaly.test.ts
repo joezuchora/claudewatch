@@ -484,6 +484,17 @@ describe('detect: values crossing the ingest trust boundary (sdlc/012 security p
 
 // --- sdlc/022: the duration fingerprint ---
 
+/**
+ * The replaced implementation, kept verbatim so A4 can show the collision it produced.
+ *
+ * Not imported — it is deleted from anomaly.ts. Copied here deliberately: a test that proves a
+ * change happened needs the before as well as the after, and inlining it in one assertion made
+ * the point invisible to a reader scanning the file.
+ */
+function magnitudeBucketAsShipped(value: number): string {
+  return String(Math.floor(Math.log10(value)));
+}
+
 /** A run of the given duration and outcome, on top of a 25-run baseline at ~30s (threshold 120s). */
 function latest(durationMs: number, outcome: 'pass' | 'fail' | 'timeout'): StoredEvent[] {
   return [...baselineRuns(25), ev({
@@ -566,8 +577,7 @@ describe('A4/A5/A8/A10 — the fingerprint through detect', () => {
     expect(blip).not.toBe(hangFp);
 
     // ...and the old scheme is shown to collide, in the same test, so this cannot pass against it.
-    const oldBucket = (v: number) => String(Math.floor(Math.log10(v)));
-    expect(oldBucket(150_000)).toBe(oldBucket(900_000));
+    expect(magnitudeBucketAsShipped(150_000)).toBe(magnitudeBucketAsShipped(900_000));
   });
 
   test('A5 — two runs in the same band and outcome SHARE a fingerprint', () => {
