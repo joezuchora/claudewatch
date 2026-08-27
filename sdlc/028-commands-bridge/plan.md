@@ -9,8 +9,12 @@ Reads `spec.md` as revised after the Stage 2 review. Implements B1–B5b against
 
 ## Scope fence
 
-Nine paths. Two are new; seven are the excursion `intent.md` declares, which was resized from two
-after the spec review found four more plus `SPEC.md`.
+**Eleven paths**, corrected after the Stage 5 audit — the prose said "nine" over an eleven-row
+table, silently omitting `commands.ts` and `.oxlintrc.json`, the two primary in-scope changes. The
+table was always complete; only the count was wrong, and a future auditor reading "nine" would have
+audited against the wrong number. Two are new; seven are the excursion `intent.md` declares, which
+was resized from two after the spec review found four more plus `SPEC.md`; two are the primary
+targets.
 
 | Path | Change | In fence because |
 |---|---|---|

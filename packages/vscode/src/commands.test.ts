@@ -90,6 +90,12 @@ beforeEach(async () => {
   // merged composite CANNOT be rescued from here: it has to come from a stub that survives the
   // merge. That is precisely why statusbar.test.ts and tooltip.test.ts must also carry `Uri`, and
   // why this file passing alone proves nothing about the package run (criterion A10).
+  // MEASURED INERT in the current configuration: the audit removed this override, made both other
+  // stubs' Uri.parse return a wrong value, and the package run stayed green — this file's own
+  // factory Uri wins while three files define it. Kept as defence because the composite is
+  // count-dependent (M6: when THIS file is the only definer of Uri, its own Uri vanishes), and
+  // labelled inert rather than presented as load-bearing. The two sinks above are load-bearing;
+  // this one is not.
   const prevParse = v.Uri.parse;
   v.Uri.parse = (u: string) => u;
   restore.push(() => { v.Uri.parse = prevParse; });

@@ -104,10 +104,24 @@ should agree with `CLAUDE.md` or `CLAUDE.md` should stop saying it.
   asserted; a non-modal message truncates).
 - `showDiagnostics` with no cache → the "No cache or snapshot found." path.
 - `showDiagnostics` when `readCache` throws → the `catch` at `:22`, message included.
-- `showDiagnostics` when `readCache` throws an error whose message embeds a fake `sk-ant-` token →
-  the rendered string contains neither the token nor a credential-file path. `SPEC.md §12` requires
-  redaction from surfaced errors and forbids tokens in "debug output"; `showDiagnostics` **is** the
-  debug-output surface, and this is the only time it will get tests.
+- ~~`showDiagnostics` when `readCache` throws an error whose message embeds a fake `sk-ant-` token →
+  the rendered string contains neither the token nor a credential-file path.~~ **NOT IMPLEMENTED —
+  SHIPPED INVERTED. This is a scope REDUCTION, not coverage.**
+
+  `SPEC.md §12` requires redaction from surfaced errors and forbids tokens in "debug output", and
+  `showDiagnostics` **is** the debug-output surface. What shipped asserts the exact opposite: that
+  the raw message IS surfaced verbatim, as a labelled characterization test.
+
+  Why: no redactor exists anywhere in the tree (verified independently by the Stage 5 audit —
+  `sanitizeCooldownUntil` is a date guard and `scripts/junit.ts`'s path scrubber is not an error
+  redactor), and a surface-local one would violate §8.2. It needs a core module with its own tests.
+
+  **That is a defensible engineering call and an indefensible process one.** This spec specified the
+  assertion in the positive and pre-emptively argued against exactly this deferral ("this is the
+  only time it will get tests"); `intent.md`'s not-in-scope list does not exclude redaction. The
+  decision was made at implementation time and recorded only in a code comment. It is recorded here
+  now, after the audit named it, rather than left for a reader tallying the test-mapping table to
+  count as done. Queued as its own loop.
 - `openDashboard` → opens the dashboard URL via `env.openExternal`.
 
 #### B5a — giving `commands.test.ts` its own complete stub is NOT sufficient
@@ -205,10 +219,18 @@ Each is mechanically checkable and names the command.
   `['packages/vscode/src/commands.test.ts', 'vscode']`. And because A1(b)'s importer-set assertion
   pins nothing about the new bridge, it must gain a line:
   `expect(findImporters(files, './commands-bridge.js', 'packages/vscode/src')).toEqual(['packages/vscode/src/commands.ts'])`.
-  Without it, "exactly one importer" is asserted by no test — the hole loop 026 wrote A1(b) to close,
-  reopened for the new bridge.
+  CORRECTED after the Stage 5 audit: an earlier draft said "without it, exactly one importer is
+  asserted by no test". Measured false — with the A1(b) line removed and a second importer added,
+  the R1 violations test fails on its own, because R1 already flags a mocked module with more than
+  one non-test importer. The A1(b) line is a **redundant pin**, not the sole guard: it survives if
+  the mock is ever removed, and it names the expected set rather than merely flagging a violation.
+  Both of those are worth having; the claimed hole was not real.
 - **A6** — the warning count drops **12 → 11**, AND the before/after warning lists differ by exactly
-  one removed line, `commands.ts:10:9 eslint(no-shadow)`, with **no added lines**. The count alone is
+  one removed warning, `commands.ts eslint(no-shadow)`, with **no newly-firing rule anywhere**.
+  CORRECTED to be line-number-insensitive: a literal textual diff also shows 3 removed + 3 added,
+  because the new `SpoolEvent` interface shifts three pre-existing `call-sites.test.ts` warnings
+  down by 20 lines — same file, same rule, same function. A reviewer applying the original wording
+  mechanically would have scored a pass as a fail. The count alone is
   not enough: a `commands.test.ts` written with a nested helper would trip
   `unicorn(consistent-function-scoping)` — which already fires twice in this repo — and A6 would read
   12 → 12 with the shadow fix landed correctly. A warning introduced by this loop's own new files is

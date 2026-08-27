@@ -27,13 +27,17 @@ mock.module('vscode', () => ({
   // authoritative. What is MEASURED by deleting each key and running the package (sdlc/027 Stage
   // 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
   //
-  // This is NOT a superset of what every file needs, and an earlier revision of this comment
-  // claimed it was. Still absent from both stubs: `Uri`, `window.showInformationMessage`,
-  // `window.showErrorMessage`, `env.openExternal` — all reached from commands.ts. Latent only
-  // because openDashboard/showDiagnostics are registered and never invoked; the moment
-  // commands.ts's own tests exist (sdlc/028 did that), which is why `Uri` and `env.openExternal`
-  // are here now. Still absent and still latent: nothing stubs what `activate`'s remaining
-  // uncovered paths would need.
+  // This is NOT a superset of what every file needs. `Uri` and `env.openExternal` WERE absent and
+  // are present now (below) — sdlc/028 added them because commands.ts finally got tests, and a
+  // key missing from the per-key composite cannot be installed by mutation from the consuming
+  // test. Still absent: `window.showInformationMessage` and `window.showErrorMessage`, both
+  // reached from commands.ts, latent only because commands.test.ts supplies its own `window`.
+  //
+  // An earlier revision of THIS PARAGRAPH listed `Uri` and `env.openExternal` as absent while
+  // declaring them six and eleven lines below, in the same hunk that added them — a replacement
+  // spliced into the middle of a sentence, leaving the leading list asserting the opposite. Caught
+  // by the sdlc/028 plan-to-diff audit, which noted the loop had introduced a false docstring in
+  // the very commit that fixed one two files over.
   env: { isTelemetryEnabled: false, openExternal: (): void => {} },
   // `Uri` is here for commands.test.ts. It CANNOT be installed by mutation from there: a module's
   // top-level exports are readonly, so a key missing from the per-key composite is missing for
