@@ -35,8 +35,8 @@ it was.
 | **C2** | **The mitigation did not mitigate.** The unit comment, the commit message, the spec and the plan all said `Environment=` beats a `~/.profile` export because ExecStart runs a login shell. Exactly backwards: the profile is sourced *after* systemd hands over the environment and overwrites it. The plan called that line "not optional and not deferrable". | **Fixed.** Verified the reviewer's repro, then verified the replacement: an inline assignment on the ExecStart command, which a shell startup file cannot reach. Unit, spec, plan and three docs corrected. |
 | A | `scripts/junit.ts` and `junit.test.ts` are **outside the fence**. A describe name I chose (`A5/A6/A7`) forced an edit to a sanitizer `SPEC.md` §17 holds up as a guarantee. | **Recorded, not waived.** This is exactly the coupling a fence exists to surface: a test-name choice inside the fence reached a security boundary outside it. |
 | C1/S3 | The test named *"the guard did not just get weaker"* used the three boundaries the loosened regex still honoured. It could not fail. | Already replaced by a 15-case smuggling probe before the reviews landed. |
-| B | **A9 has no test.** The docs were written by hand; "revert any doc hunk" is uncaught. | **Not fixed — recorded.** A grep test is cheap but brittle, and adding one under this fence after the fence was already violated is the wrong order. Queued. |
-| C3 | A7 covers the failing fixture only; passing-fixture exit-code equality is split across two tests and never compared in one place. | **Not fixed — recorded.** |
+| B | **A9 has no test.** The docs were written by hand; "revert any doc hunk" is uncaught. | **Fixed in the addendum below.** |
+| C3 | A7 covers the failing fixture only; passing-fixture exit-code equality is split across two tests and never compared in one place. | **Fixed in the addendum below.** |
 | C4 | `SECURITY.md` and `deploy/README.md` said "records nothing unless the variable is set", which is wrong for `=0`/`=off` — those *are* set and record nothing. Only `SPEC.md` documented the unrecognised-value warning. | **Fixed** in all four documents. |
 | C5 | Stale claims beside changed code: `verify.ts`'s header still argued *against* opt-in instrumentation — the design that had just shipped. | **Fixed.** |
 | — | `parseBooleanEnvValue` is now public API of `@claudewatch/core` via `export *`. The plan authorised the export but not that consequence. | **Recorded.** |
@@ -70,10 +70,31 @@ product-telemetry consent; the change adds no network call and strictly *reduces
 Two mutations reading "inert" were **real gaps in my tests**, not bad mutations — unlike loop
 020, where two were faulty mutations. Both distinctions matter and both are worth keeping.
 
-## What this change does not do
+## Addendum, 2026-08-27 — A7 and A9 closed
 
-- **No grep test for the documentation criterion** (A9). Reverting a doc hunk goes uncaught.
-- **A7 is half-implemented** (C3).
+Test-only; no behaviour changed. Both criteria were already specified in this loop's `spec.md`, so
+this is follow-through here rather than a new loop with a manufactured intent.
+
+**A7's missing half** — the passing fixture's exit codes were asserted separately inside A5 and
+A6 and never *compared*, which is a different claim. Now compared in one place, bound to the
+spool contrast, exactly as the failing case already was.
+
+**A9** — eight tests: the five files that must name the variable, the removed false sentence in
+`verify.ts`, the unit's unqualified promise, and the inline `ExecStart` assignment (the fix that
+made this loop's mitigation real, so the one most worth pinning).
+
+**And the first version of those A9 tests was vacuous.** They asserted only that each file
+*contained the variable name*. Mutations reverting the `SPEC.md` amendment and the
+`CONTRIBUTING.md` paragraph both stayed **green**, because the name survived elsewhere in the
+file. A vacuous test inside the tests written to close a "no test" finding — the ninth recorded
+instance, and the shortest feedback loop yet between committing the disease and catching it.
+Strengthened to pin the load-bearing sentences; five doc mutations now caught.
+
+A grep test remains a weak instrument and the code says so: it proves a string is present, never
+that the prose around it is true. What it catches is a documented behaviour quietly deleted while
+the code keeps working, which is the failure that actually happens.
+
+## What this change does not do
 - **The metrics series depends on configuration outside the repository** — the systemd unit on the
   NUC, and this container's Routine prompt. The repo cannot enforce or test either. The best
   available guard is that `metrics:detect` reports its run count, so a flat number is visible;

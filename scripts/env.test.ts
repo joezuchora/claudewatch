@@ -232,6 +232,27 @@ describe('A5/A6/A7 — the switch against the real script', () => {
     }
   }, 180_000);
 
+  test('A7 — a PASSING gate exits the same either way, and only the enabled run records', () => {
+    // The half loop 021 shipped without. The failing case was covered; the passing case had its
+    // exit codes asserted separately inside A5 and A6 and never COMPARED, which is a different
+    // claim. Recorded as unmet in 021's review.md rather than quietly counted as done.
+    const off = makeFixture(false);
+    const on = makeFixture(false);
+    try {
+      const offCode = runGate(off, { CLAUDEWATCH_VERIFY_METRICS: '0' });
+      const onCode = runGate(on, { CLAUDEWATCH_VERIFY_METRICS: '1' });
+      expect(offCode).toBe(onCode);
+      expect(offCode).toBe(0);
+      expect(existsSync(spool(off.home))).toBe(false);
+      expect(existsSync(spool(on.home))).toBe(true);
+    } finally {
+      for (const f of [off, on]) {
+        rmSync(f.dir, { recursive: true, force: true });
+        rmSync(f.home, { recursive: true, force: true });
+      }
+    }
+  }, 300_000);
+
   test('A7 — a failing gate exits the same either way, and only the enabled run records', () => {
     // Standalone, "same exit code" is satisfied by an implementation that ignores the variable
     // entirely. Binding it to the spool assertion is what gives it evidence of the feature.
@@ -251,4 +272,93 @@ describe('A5/A6/A7 — the switch against the real script', () => {
       }
     }
   }, 300_000);
+});
+
+// --- A9: the documentation criterion ---
+
+const REPO = join(import.meta.dir, '..');
+
+/**
+ * Loop 021 shipped A9's *content* by hand and its *check* not at all, so reverting any doc hunk
+ * was uncaught. Recorded as unmet in that loop's review.md; closed here.
+ *
+ * A grep test is a weak instrument and this comment is where that is admitted: it proves a string
+ * is present, never that the prose around it is true or current. What it does catch is the case
+ * that actually happens — a documented behaviour quietly deleted or renamed while the code keeps
+ * working. That is worth having, and it is all this is.
+ */
+describe('A9 — the switch is documented where it needs to be', () => {
+  const MUST_MENTION = [
+    'SPEC.md',
+    'SECURITY.md',
+    'CONTRIBUTING.md',
+    'deploy/README.md',
+    'deploy/systemd/claudewatch-sdlc-loop.service',
+  ];
+
+  for (const file of MUST_MENTION) {
+    test(`${file} names ${VERIFY_METRICS_ENV}`, () => {
+      const text = readFileSync(join(REPO, file), 'utf-8');
+      expect(text).toContain(VERIFY_METRICS_ENV);
+    });
+  }
+
+  /**
+   * Naming the variable is not the claim worth pinning.
+   *
+   * The first version of these tests asserted only that each file contained the variable name,
+   * and mutations reverting the SPEC.md amendment and the CONTRIBUTING.md paragraph both stayed
+   * GREEN — the name survived elsewhere in the file. A vacuous test inside the tests written to
+   * close a "no test" finding. What follows pins the sentences that carry meaning.
+   */
+  const MUST_CLAIM: Array<[string, string[]]> = [
+    ['SPEC.md', ['recording is opt-in', 'unset means off']],
+    ['SECURITY.md', ['opt-in', 'records nothing']],
+    ['CONTRIBUTING.md', ['records nothing about your checkout by default', 'Unset means off']],
+    ['deploy/README.md', ['opt-in', 'records nothing unless']],
+  ];
+
+  for (const [file, phrases] of MUST_CLAIM) {
+    for (const phrase of phrases) {
+      test(`${file} still says "${phrase}"`, () => {
+        expect(readFileSync(join(REPO, file), 'utf-8')).toContain(phrase);
+      });
+    }
+  }
+
+  test('verify.ts no longer claims the metrics are always recorded', () => {
+    // The specific false sentence loop 021 removed. If it returns, the code and the comment
+    // disagree again.
+    const text = readFileSync(join(REPO, 'scripts', 'verify.ts'), 'utf-8');
+    expect(text).not.toContain('always recorded');
+    // ...and the positive half, so deleting the whole file would not pass this.
+    expect(text).toContain(VERIFY_METRICS_ENV);
+  });
+
+  test('the unit file does not promise every firing records an event', () => {
+    // It said "records a verify_run event whatever the outcome" before recording became
+    // conditional. deploy/README.md now qualifies the same claim; the unit must not restate it
+    // unqualified.
+    const unit = readFileSync(join(REPO, 'deploy', 'systemd', 'claudewatch-sdlc-loop.service'), 'utf-8');
+    expect(unit).not.toContain('records a verify_run event whatever the outcome');
+    expect(unit).toContain(`${VERIFY_METRICS_ENV}=1`);
+  });
+
+  test('the unit sets the switch INLINE on ExecStart, not only via Environment=', () => {
+    // The finding that made loop 021's mitigation real: `Environment=` does not beat a
+    // ~/.profile export, because ExecStart runs a login shell and the profile is sourced after
+    // systemd hands the environment over. The inline assignment is the one that holds, so it is
+    // the one worth pinning.
+    const unit = readFileSync(join(REPO, 'deploy', 'systemd', 'claudewatch-sdlc-loop.service'), 'utf-8');
+    const execStart = unit.split('\n').find(l => l.startsWith('ExecStart='));
+    expect(execStart).toBeDefined();
+    expect(execStart!).toContain(`${VERIFY_METRICS_ENV}=1 bun run verify`);
+  });
+
+  test('CONTRIBUTING.md tells a contributor the default is off', () => {
+    // The one document the affected population actually reads.
+    const text = readFileSync(join(REPO, 'CONTRIBUTING.md'), 'utf-8');
+    expect(text).toContain(VERIFY_METRICS_ENV);
+    expect(text.toLowerCase()).toContain('records nothing');
+  });
 });
