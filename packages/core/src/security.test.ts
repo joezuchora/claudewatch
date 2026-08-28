@@ -660,6 +660,38 @@ describe('§12: the enterprise rules the first fixture could not reach (sdlc/032
     }
   });
 
+  test('the disabledReason whitelist drops every shape the blacklist let through', () => {
+    // sdlc/032's security pass drove all of these through the original four-shape BLACKLIST and
+    // into the tooltip verbatim. A blacklist enumerates what you thought of; a whitelist enumerates
+    // what the field is for. The character class alone still passed a username, a Windows path and
+    // a JWT — all ordinary sentence characters — so IDENTIFIER_SHAPES rejects a dot or colon wedged
+    // between non-space characters, which is what separates an identifier from prose.
+    const dropped = [
+      ['FQDN', 'host=my-laptop.corp.example.com'],
+      ['username', 'joe.zuchora'],
+      ['windows path', 'C:Users joe'],
+      ['JWT', 'Bearer eyJhbGciOi.eyJzdWIi.QWxhZGRpbg'],
+      ['underscored token', 'token sk_ant_live_abcdef'],
+      ['ANSI escape', `esc${String.fromCharCode(27)}[31mRED`],
+      ['newline', `nl${String.fromCharCode(10)}second`],
+      ['tab', `tab${String.fromCharCode(9)}here`],
+    ] as const;
+
+    const survived: string[] = [];
+    for (const [label, reason] of dropped) {
+      writeFileSync(getCachePath(), JSON.stringify(mk(reason)), { mode: 0o600 });
+      if (readCacheResult().envelope!.snapshot.enterprise!.disabledReason !== null) survived.push(label);
+    }
+    expect(survived).toEqual([]);
+
+    // Positive control: the message the rule exists to PRESERVE, and prose punctuation with it.
+    // Without this the whole test passes for a rule that nulls the field unconditionally.
+    for (const keep of ['Extra usage disabled by your administrator', 'Note: contact your administrator.']) {
+      writeFileSync(getCachePath(), JSON.stringify(mk(keep)), { mode: 0o600 });
+      expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason).toBe(keep);
+    }
+  });
+
   test('a legitimate disabledReason survives, and an oversized one is bounded', () => {
     // The redact-then-bound rule's two halves, both previously uncovered.
     writeFileSync(getCachePath(), JSON.stringify(mk('Disabled by your administrator')), { mode: 0o600 });

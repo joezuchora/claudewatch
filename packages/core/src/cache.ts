@@ -133,21 +133,22 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'versionMismatch' };
   }
 
-  // `fetchedAt` USED to be checked here, and a non-string one deleted the whole envelope — taking
-  // the live `cooldownUntil` with it, which is §9.4's only throttle on token-bearing requests.
-  // sdlc/031 measured that: `cooldownActive: false` and `usage.json` gone. It moved below, where a
-  // sentinel exists to degrade to.
+  // WHAT IS LEFT REJECTS, and the list shrank in sdlc/032's security pass.
   //
-  // What is left rejects because there is nothing coherent to substitute. That is the line — not
-  // "shape rejects, value degrades", which was a taxonomy this loop's own draft used to excuse the
-  // hazard above. **These paths keep their §9.4 exposure**: a structurally broken envelope still
-  // discards the cooldown. Named, not closed; closing it needs the cooldown stored separably from
-  // the snapshot. See sdlc/031's spec.
+  // It used to include `!parsed.snapshot.display` and `!parsed.snapshot.freshness`, justified as
+  // "nothing coherent to substitute". After the whitelist rebuild that justification is false —
+  // `sanitizeSnapshot` IS the substitute, and it constructs both objects from scratch. Keeping the
+  // clauses made the same class of garbage cost the §9.4 throttle or not depending on TRUTHINESS:
+  // measured, `display: null` deleted the file and discarded a live `cooldownUntil`, while
+  // `display: "x"` was degraded and kept it. One byte flipped to null cleared the backoff.
+  //
+  // Only a snapshot that is not an object at all still rejects, because `sanitizeSnapshot` would
+  // otherwise be handed a primitive and return an all-degraded snapshot indistinguishable from a
+  // cold start — and a miss is the honest outcome there.
   if (
     !parsed.snapshot ||
     typeof parsed.snapshot !== 'object' ||
-    !parsed.snapshot.display ||
-    !parsed.snapshot.freshness
+    Array.isArray(parsed.snapshot)
   ) {
     tryDelete(path);
     emitProcess(cacheEvent({ outcome: 'invalidShape' }));

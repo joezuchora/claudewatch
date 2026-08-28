@@ -117,3 +117,33 @@ describe('coherence — independent degradation invents states no producer can e
     expect(good.display.primaryUtilizationPct).toBe(42);
   });
 });
+
+describe('display is DERIVED from the window it names, not accepted (sdlc/032 security pass)', () => {
+  test('a percentage that disagrees with its window is replaced, not trusted', () => {
+    // The finding: `{primaryWindow:'fiveHour', primaryUtilizationPct:3}` beside
+    // `fiveHour.utilizationPct:96` passed every check and rendered "3%" with classify() = Healthy.
+    // A user at 96% shown 3%, and a green VS Code status bar, because the thresholds key off the
+    // same field. It UNDERSTATES usage, which is the direction that costs the user something.
+    const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+    s.fiveHour = { utilizationPct: 96, resetsAt: '2099-01-01T00:00:00.000Z' };
+    s.display = { primaryWindow: 'fiveHour', primaryUtilizationPct: 3, primaryResetsAt: '2099-01-01T00:00:00.000Z' };
+
+    const out = sanitizeSnapshot(s);
+    expect(out.display.primaryUtilizationPct).toBe(96);
+    // Positive control: an honest pair is unchanged, so this is not a rule that always rewrites.
+    expect(sanitizeSnapshot(makeTestSnapshot()).display.primaryUtilizationPct).toBe(42);
+  });
+
+  test("primaryWindow 'enterprise' beside a null enterprise collapses to unknown", () => {
+    // Neither original coupling rule caught this: rule 1 required tier === 'enterprise', rule 2
+    // excluded 'enterprise'. The state rendered a fabricated percentage under a standard tier.
+    const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+    s.tier = 'standard';
+    s.enterprise = null;
+    s.display = { primaryWindow: 'enterprise', primaryUtilizationPct: 4, primaryResetsAt: null };
+
+    const out = sanitizeSnapshot(s);
+    expect(out.display.primaryWindow).toBe('unknown');
+    expect(out.display.primaryUtilizationPct).toBeNull();
+  });
+});

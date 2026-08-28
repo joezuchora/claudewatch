@@ -99,7 +99,9 @@ describe('telemetry call sites', () => {
     test('emits corruptJson and invalidShape', () => {
       writeFileSync(getCachePath(), '{ not json');
       readCacheResult();
-      writeFileSync(getCachePath(), JSON.stringify({ version: 2, snapshot: { nope: 1 } }));
+      // A NON-OBJECT snapshot. `{ nope: 1 }` was the seed until sdlc/032's security pass shrank
+      // the reject list — an object is now degraded rather than rejected, so it emits `hit`.
+      writeFileSync(getCachePath(), JSON.stringify({ version: 2, snapshot: 'not-an-object' }));
       readCacheResult();
       expect(spoolLines().map((e) => e.payload.outcome))
         .toEqual(['corruptJson', 'invalidShape']);

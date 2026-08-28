@@ -150,11 +150,68 @@ function sanitizeEnterprise(raw: unknown): EnterpriseUsage | null {
  * short poisoned string that avoids every listed shape. Nulling the field outright was the
  * alternative, and it would delete a real user-facing explanation from every cached render.
  */
-const REDACT_SHAPES = [/[/\\]/, /sk-ant-/i, /@/, /\.local\b/i];
+/**
+ * A POSITIVE whitelist, not a blacklist. The blacklist was the first version and it leaked.
+ *
+ * sdlc/032's security pass drove these through the four-shape blacklist and into the tooltip
+ * verbatim: `host=my-laptop.corp.example.com`, `joe.zuchora`, `C:Users joe`,
+ * `Bearer eyJhbGciOi.eyJzdWIi.QWxhZGRpbg`, `token sk_ant_live_abcdef` — and, worse and unnamed in
+ * SPEC §12 at the time, CONTROL CHARACTERS: ANSI escapes, newlines, tabs. That string is
+ * interpolated into a VS Code tooltip, into the showDiagnostics modal, and serialised whole by
+ * `--json`; an escape sequence reaching a terminal is not a cosmetic problem.
+ *
+ * A blacklist enumerates what you thought of. A whitelist enumerates what the field is FOR — an
+ * administrator's sentence — and drops everything else. "Extra usage disabled by your
+ * administrator" passes; an FQDN, a Windows path, a JWT and an escape sequence do not.
+ */
+const ALLOWED_REASON = /^[\p{L}\p{N} .,;:'"()[\]!?%\-–—]+$/u;
+/**
+ * Control characters, by code point rather than by regex.
+ *
+ * A character-class regex here trips `no-control-regex`, and that rule is right to ask — matching
+ * control characters is usually accidental. Here it is the intent: this is what stops an ANSI
+ * escape sequence read off a cache file reaching a terminal through the VS Code tooltip, the
+ * showDiagnostics modal, or `--json`. Written as a scan instead of a disable comment, because the
+ * explicit form says what it means and the linter has nothing to object to.
+ */
+function hasControlChars(v: string): boolean {
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f)) return true;
+  }
+  return false;
+}
 
+/**
+ * Structural shapes an administrator's sentence does not contain, and identifiers do.
+ *
+ * The character whitelist alone still passed `joe.zuchora`, `C:Users joe` and
+ * `Bearer eyJhbGciOi.eyJzdWIi.QWxhZGRpbg` — all built from ordinary sentence characters. What
+ * separates them from prose is STRUCTURE: a dot or colon wedged between two non-space characters.
+ * Prose puts a space after them ("Note: contact IT.", "e.g. your administrator"); identifiers,
+ * hostnames, Windows paths and JWTs do not.
+ *
+ * The cost is real and worth naming: "U.S. policy" is rejected. The benefit is that a username, an
+ * FQDN and a JWT all are too.
+ */
+const IDENTIFIER_SHAPES = [/\w\.\w/, /\S:\S/];
+
+/**
+ * REDACT then BOUND — the one rule here that is neither a closed set nor a canonicalisation.
+ *
+ * `disabledReason`'s text is chosen by the API, so it cannot be enumerated, and it is interpolated
+ * straight into the VS Code tooltip (`format.ts:374`), into the `showDiagnostics` modal, and
+ * serialised whole by `--json`.
+ *
+ * Order is load-bearing and was already right: both checks run on the FULL string before the
+ * slice, so a 5,000-character value with a token at index 4,000 is dropped entirely rather than
+ * truncated into apparent safety. Bound-then-check would have been the exploitable order.
+ */
 function sanitizeDisabledReason(v: unknown): string | null {
   if (typeof v !== 'string' || v.length === 0) return null;
-  if (REDACT_SHAPES.some((re) => re.test(v))) return null;
+  if (hasControlChars(v)) return null;
+  if (!ALLOWED_REASON.test(v)) return null;
+  if (IDENTIFIER_SHAPES.some((re) => re.test(v))) return null;
   return v.slice(0, MAX_DISABLED_REASON);
 }
 
@@ -175,7 +232,6 @@ export function sanitizeSnapshot(raw: unknown): UsageSnapshot {
   const windows = { fiveHour, sevenDay, sevenDayOpus };
 
   let primaryWindow = isPrimaryWindow(display.primaryWindow) ? display.primaryWindow : 'unknown';
-  let primaryUtilizationPct = nonNegativeOrNull(display.primaryUtilizationPct);
   let tier = isAccountTier(s.tier) ? s.tier : 'unknown';
 
   // --- Coherence. Degrading each field independently INVENTS states no producer can emit. ---
@@ -183,19 +239,39 @@ export function sanitizeSnapshot(raw: unknown): UsageSnapshot {
   // `normalize()` sets `tier: 'enterprise'` only inside its `enterprise !== null` branch, so that
   // pair is unreachable from the producer. Poison one enterprise number and, without this, `tier`
   // survives because 'enterprise' is a valid member — and the result renders a plausible line with
-  // no indication anything is wrong. Coupling is also what makes the `null` percentage degrade
-  // honest on all four renderers rather than only on `formatStatusLine`, which is the fallback and
-  // the only one the first spec draft measured.
+  // no indication anything is wrong.
   if (enterprise === null && tier === 'enterprise') {
     tier = 'unknown';
     primaryWindow = 'unknown';
-    primaryUtilizationPct = null;
+  }
+  // Added by sdlc/032's security pass: rules 1 and 2 both missed `primaryWindow: 'enterprise'`
+  // beside `enterprise: null` under a NON-enterprise tier — rule 1 needs `tier === 'enterprise'`
+  // and rule 2 excluded `'enterprise'`. That state rendered a fabricated percentage.
+  if (primaryWindow === 'enterprise' && enterprise === null) {
+    primaryWindow = 'unknown';
   }
   if (primaryWindow !== 'unknown' && primaryWindow !== 'enterprise'
       && windows[primaryWindow].utilizationPct === null) {
     primaryWindow = 'unknown';
-    primaryUtilizationPct = null;
   }
+
+  // `display.primaryUtilizationPct` and `primaryResetsAt` are DERIVED, not accepted.
+  //
+  // Accepting them on their own merits was a real user-harm bug found by sdlc/032's security pass:
+  // `{primaryWindow: 'fiveHour', primaryUtilizationPct: 3}` beside `fiveHour.utilizationPct: 96`
+  // passed every check and rendered `⊙ 3%` with `classify()` returning Healthy — a user at 96%
+  // shown 3%, and a green VS Code status bar, because the thresholds key off the same field. It
+  // UNDERSTATES usage, which is the direction that costs the user something.
+  //
+  // These two are reconstructible from the window `primaryWindow` names, so this module's own rule
+  // applies: return what you constructed, never what you read. SPEC §5.3's invariant — primary is
+  // the highest utilization across valid windows — is only meaningful if the pair is consistent.
+  const primarySource: UsageWindow | null =
+    primaryWindow === 'unknown' ? null
+    : primaryWindow === 'enterprise'
+      ? (enterprise === null ? null
+         : { utilizationPct: enterprise.utilizationPct, resetsAt: null })
+      : windows[primaryWindow];
 
   return {
     fetchedAt: Number.isFinite(fetchedAtMs)
@@ -214,8 +290,12 @@ export function sanitizeSnapshot(raw: unknown): UsageSnapshot {
     enterprise,
     display: {
       primaryWindow,
-      primaryUtilizationPct,
-      primaryResetsAt: isoOrNull(display.primaryResetsAt),
+      primaryUtilizationPct: primarySource?.utilizationPct ?? null,
+      // Enterprise carries no per-window reset, so the stored value is kept for that case only —
+      // canonicalised, never echoed.
+      primaryResetsAt: primarySource === null
+        ? null
+        : (primarySource.resetsAt ?? isoOrNull(display.primaryResetsAt)),
     },
     freshness: {
       isStale: typeof freshness.isStale === 'boolean' ? freshness.isStale : false,

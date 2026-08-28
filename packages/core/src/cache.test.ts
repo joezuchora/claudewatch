@@ -290,10 +290,20 @@ describe('readCacheResult: distinguishing why a read failed', () => {
   });
 
   test('invalidShape is distinguishable from versionMismatch', () => {
+    // UPDATED by sdlc/032's security pass. `snapshot: { nope: true }` is an OBJECT, and since the
+    // whitelist rebuild it is degraded rather than rejected — envelope kept, cooldown kept, every
+    // field at its substitute. Only a snapshot that is not an object still rejects, because there
+    // `sanitizeSnapshot` would return an all-degraded snapshot indistinguishable from a cold start.
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 2, snapshot: 'not-an-object', cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('invalidShape');
+
+    // The behaviour that CHANGED, pinned so the narrowing is deliberate rather than incidental.
     writeFileSync(getCachePath(), JSON.stringify({
       version: 2, snapshot: { nope: true }, cooldownUntil: null, lastErrorClass: null,
     }), 'utf-8');
-    expect(readCacheResult().reason).toBe('invalidShape');
+    expect(readCacheResult().reason).toBe('hit');
   });
 
   test('readCache still returns just the envelope, unchanged', () => {
@@ -539,17 +549,27 @@ describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
     expect(existsSync(getCachePath())).toBe(true);
   });
 
-  test('T12b — a structurally broken envelope still rejects, and still loses the cooldown', () => {
-    // The other half of the line, asserted rather than left implied: there is nothing coherent to
-    // substitute for a missing `display`, so this path rejects — and its §9.4 exposure is real and
-    // NOT closed by this loop. Pinning it means the day someone closes it, this test says so.
+  test('T12b — a missing display no longer costs the cooldown', () => {
+    // REVERSED by sdlc/032's security pass, and the reversal is the point. This used to pin
+    // "a structurally broken envelope still rejects, and still loses the cooldown", justified as
+    // "nothing coherent to substitute". After the whitelist rebuild that is false — sanitizeSnapshot
+    // constructs `display` and `freshness` from scratch. Keeping the clauses made the same class of
+    // garbage cost the §9.4 throttle or not depending on TRUTHINESS: `display: null` deleted the
+    // file and discarded a live cooldown, `display: "x"` was degraded and kept it. One byte.
+    const cooldownUntil = LIVE_COOLDOWN();
     seed({
-      version: 2, cooldownUntil: LIVE_COOLDOWN(), lastErrorClass: null,
-      lastHttpStatus: null, lastErrorMessage: null,
-      snapshot: { fetchedAt: new Date().toISOString(), freshness: { isStale: false, staleReason: 'none' } },
+      version: 2, cooldownUntil, lastErrorClass: null, lastHttpStatus: null, lastErrorMessage: null,
+      snapshot: { ...makeTestSnapshot(), display: null },
     });
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(isInCooldown(result.envelope!)).toBe(true);
+    expect(result.envelope!.snapshot.display.primaryWindow).toBe('unknown');
+    expect(existsSync(getCachePath())).toBe(true);
+
+    // Positive control: a snapshot that is not an object at all STILL rejects.
+    seed({ version: 2, cooldownUntil, lastErrorClass: null, snapshot: 'x' });
     expect(readCacheResult().reason).toBe('invalidShape');
-    expect(existsSync(getCachePath())).toBe(false);
   });
 
   test('T8 — a RICH honest envelope round-trips deep-equal', () => {
