@@ -16,6 +16,8 @@ import {
 } from './telemetry.js';
 import { readFileSync } from 'fs';
 import { normalize } from './normalize.js';
+import { fetchUsage, isSurfaceableMessage } from './client.js';
+import { extractLastError } from './snapshot.js';
 import { makeCacheEnvelope, writeCache, getCachePath } from './cache.js';
 import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
@@ -249,5 +251,91 @@ describe('security: telemetry never leaks secrets or environment', () => {
     expect(raw).not.toContain('accessToken');
     expect(raw).not.toContain('refreshToken');
     expect(raw).not.toContain(homedir());
+  });
+});
+
+// === SPEC.md §12: "It must redact sensitive values from all surfaced errors" ===
+
+describe('§12: every surfaceable error message is a literal this repo wrote', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  const mockFetch = (impl: (...a: unknown[]) => Promise<Response>): void => {
+    globalThis.fetch = impl as unknown as typeof fetch;
+  };
+  const FAST = { retryDelayMs: 0, timeoutMs: 25 } as const;
+  const json = (status: number): Response =>
+    new Response('{}', { status, headers: { 'Content-Type': 'application/json' } });
+
+  /**
+   * All SEVEN failure paths `fetchUsage` can take, asserted individually.
+   *
+   * Seven, not six: sdlc/029's first draft counted six and missed the `response.json()` throw, which
+   * the spec review found. Before 029 that path produced a status-less `serviceUnavailable` carrying
+   * `err.message`, and a contract test asserted that as correct — the misclassification was
+   * enshrined, not undiscovered.
+   *
+   * Why this matters beyond tidiness: `client.ts:180` already called `err.message` "exactly the free
+   * text the telemetry allowlist exists to keep out", and four lines later assigned it to a value
+   * that is PERSISTED to the cache and RENDERED in the VS Code tooltip. The guard existed on the
+   * telemetry path and not on this one.
+   */
+  test('all seven fetch failure paths produce a surfaceable message', async () => {
+    const cases: Array<[string, () => void, string]> = [
+      ['401', () => mockFetch(async () => json(401)), 'Authentication failed (401)'],
+      ['429', () => mockFetch(async () => json(429)), 'Rate limited (429)'],
+      ['5xx', () => mockFetch(async () => json(503)), 'Server error (503)'],
+      ['unexpected', () => mockFetch(async () => json(418)), 'Unexpected status 418'],
+      ['network', () => mockFetch(async () => { throw new TypeError('fetch failed: getaddrinfo ENOTFOUND some.host'); }), 'Network error'],
+      ['malformed', () => mockFetch(async () => new Response('not json', { status: 200 })), 'Malformed response'],
+    ];
+
+    // Collected and asserted as one array rather than per-case: bun's `expect` takes no label
+    // argument, and a whole-array toEqual names the failing case in its diff anyway.
+    const got: Array<[string, string, boolean]> = [];
+    for (const [name, arrange] of cases) {
+      arrange();
+      const result = await fetchUsage('sk-ant-oat01-FAKE', FAST);
+      expect(result.ok).toBe(false);
+      if (!result.ok) got.push([name, result.message, isSurfaceableMessage(result.message)]);
+    }
+    expect(got).toEqual(cases.map(([name, , expected]) => [name, expected, true]));
+
+    // Seventh: the REAL timeout. The mock honours the abort signal as real fetch does, so client's
+    // own timer fires and sets `timedOut`. A synthetic AbortError would leave that flag false and
+    // silently test the network branch instead — which is what the contract suite did for 29 loops.
+    mockFetch((_u: unknown, init: unknown) => new Promise<Response>((_res, rej) => {
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+    }));
+    const timedOut = await fetchUsage('sk-ant-oat01-FAKE', FAST);
+    expect(timedOut.ok).toBe(false);
+    if (!timedOut.ok) {
+      expect(timedOut.failureClass).toBe('timeout');
+      expect(timedOut.message).toBe('Request timed out');
+      expect(isSurfaceableMessage(timedOut.message)).toBe(true);
+    }
+
+    // Positive precondition for the negatives above: the predicate really does reject things.
+    expect(isSurfaceableMessage('Unable to connect. Is the computer able to access the url?')).toBe(false);
+  });
+
+  test('the cache-read boundary drops a message no producer emits', () => {
+    // The type closes the set at the producer; it cannot reach a value read off DISK. A cache file
+    // written before sdlc/029 holds whatever `err.message` was on that machine.
+    const envelope = makeCacheEnvelope(
+      makeTestSnapshot(), null, 'serviceUnavailable', 503,
+      'ENOENT open /home/someone/.claude/.credentials.json' as never,
+    );
+    const extracted = extractLastError(envelope);
+    expect(extracted).not.toBeNull();
+    expect(extracted!.message).toBeNull();      // free text dropped
+    expect(extracted!.httpStatus).toBe(503);    // the number survives; it carries nothing free-form
+
+    // Positive precondition: a real member survives the same path.
+    const ok = extractLastError(makeCacheEnvelope(
+      makeTestSnapshot(), null, 'serviceUnavailable', 503, 'Server error (503)',
+    ));
+    expect(ok!.message).toBe('Server error (503)');
   });
 });

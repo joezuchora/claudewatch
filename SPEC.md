@@ -724,7 +724,12 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - It does not include telemetry in v1
 - It does not transmit any data except authenticated GET requests to the Anthropic usage endpoint
 - TLS verification must never be disabled
-- It must redact sensitive values from all surfaced errors
+- It must redact sensitive values from all surfaced errors — enforced since `sdlc/029` by
+  narrowing `FetchFailure.message` to the closed `SurfaceableMessage` union (a compile error
+  for a free-text producer, frozen by `typefixtures/free-text-message.expect-error.ts`) and by
+  `isSurfaceableMessage` at the cache-read boundary. Checked by
+  `packages/core/src/security.test.ts` → "§12: every surfaceable error message is a literal
+  this repo wrote". Before that, the clause held only by accident and nothing tested it.
 - It must not include tokens in issue templates, screenshots, or debug output
 - It must not shell out with token values in process arguments
 - Cache files must never contain the access token

@@ -100,7 +100,7 @@ describe('type fixture harness', () => {
     // ("this file produced no diagnostics") is VACUOUS for a file tsc never opened. So this
     // reads `--listFiles` output and matches it against the directory. (sdlc/014 review.)
     const onDisk = readdirSync(FIXTURE_DIR).filter(f => f.endsWith('.ts'));
-    expect(onDisk.length).toBe(4);
+    expect(onDisk.length).toBe(5);   // sdlc/029 added free-text-message.expect-error.ts
 
     const compiled = compiledFiles();
     for (const f of onDisk) {
@@ -130,6 +130,17 @@ describe('the guards fail when their subject is missing', () => {
     const errors = diagnosticsFor('real-union-omission.expect-error.ts');
     expect(errors.join('\n')).toContain('error TS2322');
     expect(errors.join('\n')).toContain('"timeout"');
+  });
+
+  test('a free-text fetch-failure message fails typecheck', () => {
+    // sdlc/029. DECLARED FENCE EXCURSION: plan.md listed the fixture but not this file. A fixture
+    // with no assertion is a fixture that proves nothing — the harness above only checks that each
+    // file on disk compiles, not that it errors for the right reason. Recorded rather than slipped
+    // in, because an unasserted guard is the exact vacuity this repo keeps catching.
+    const errors = diagnosticsFor('free-text-message.expect-error.ts');
+    expect(errors.join('\n')).toContain('error TS2322');
+    // Names the offending shape, so the failure is actionable rather than merely red.
+    expect(errors.join('\n')).toContain('SurfaceableMessage');
   });
 });
 
