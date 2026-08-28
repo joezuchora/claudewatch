@@ -862,3 +862,58 @@ especially when the pass that found it was reviewing the fix for its twin.
 Six mutations, six predictions right — including one predicted to fail nothing. `M5` widened the
 narrowed type back: typecheck 0, 824 pass, not one test red. That green was the finding, recorded as
 such in advance, and it is what made the grep's weakness worth chasing rather than shrugging at.
+
+## Loop 031 — a rationale that cites a function is not valid until you check it is called
+
+Loop 030 validated one field at the cache-read boundary. Loop 031 finished the job for five more —
+and was wrong in public three times doing it. Each error was the same error in a new place, and each
+was caught by a reviewer who re-ran a measurement instead of reading a table.
+
+**A table is not a counter-measure if its rows come from one grep.** The spec tabulated the closed
+set of warning strings, said seven, and said explicitly that the table existed because loops 028 and
+029 had miscounted. It was built by grepping `warnings.push`. Two producers pass literal arrays to
+`makeMalformed` and never call `push`. The real answer is nine, and a filter built from that table
+would have **deleted the headline diagnostic of the malformed-response path on read** — from the one
+cache file where diagnostics matter. The counter-measure failed on its own stated terms.
+
+**"Which surfaces read this field" cannot be complete.** The spec's surface enumeration said one:
+`--debug`. It missed `--json`, which serialises the entire snapshot, is a documented contract, and is
+the more likely paste-into-an-issue surface of the two. It missed it for a structural reason worth
+keeping: the search was for readers of three field **names**, and `--json` names no field. Ask what
+gets **serialised**, never what gets read.
+
+**Then the same rule failed one step further out.** Having switched to "what gets serialised", the
+loop stopped at stdout — and `snapshot.tier` was going to a **file** the whole time, copied verbatim
+by `renderEvent` into a metrics-spool payload leaf. Measured: a home directory and a hostname on
+disk. The full question is **what leaves the process** — stdout, a file, a socket, a payload. A
+surface enumeration that stops at the terminal is the same incompleteness in better clothes.
+
+**A guard can be defeated by object identity.** `freshness` and `rawMetadata` were rebuilt only when
+a degradation actually fired, so an envelope whose known fields were all *valid* passed both objects
+through by reference and any unknown sibling key rode along to stdout. The comment beside the code
+had the premise right — *"`freshness` is emitted whole by `printDebug`"* — and drew the narrower
+conclusion, *"so both its **fields** are surfaces"*. Emitted whole means every **key** is a surface.
+Loop 030's rule (return what you constructed, never what you read) applies to objects, not just
+scalars.
+
+**And the new rule, which is the best thing this loop produced.** The spec argued against clamping a
+far-future `fetchedAt` because *"that is exactly what `detectClockSkew` reports; clamping would
+delete the signal"*. `detectClockSkew` has **zero production callers** — it has been dead since it
+was written. There was no signal. And the claim that a far-future timestamp "suppresses one fetch"
+was false too: `isCacheFresh` returned `true`, and the fresh-cache branch returns without rewriting
+the file, so one byte pinned the tool on stale data permanently.
+
+> **A rationale that cites a function is not valid until you have checked the function is called.**
+> Dead code is worse than absent code in exactly this way: it looks like a reason. Grep for callers
+> before citing behaviour.
+
+Nine mutations, **five predictions right**, and all four misses in the same direction — a systematic
+bias, not four slips. The cause: predictions made against `plan.md`'s thirteen-row test *mapping*
+rather than the twenty-two tests actually written. The auditor then corrected that diagnosis too —
+it covers three of the four, while one miss was a plain reasoning error about a row that *was* in the
+mapping. Even the account of the mistake was made by reading.
+
+Four consecutive loops have now broken a rule recorded in this file by the loop that recorded it. The
+honest conclusion is not "try harder". It is that these rules are not self-enforcing, and the
+reviewers are the enforcement: every one of the three errors above was found by an agent that ran the
+measurement again.
