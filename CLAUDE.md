@@ -76,12 +76,24 @@ is also available on its own (`bun run typecheck`, `bun run lint`, `bun run test
 
 CI runs this exact command, so a green `verify` locally means a green CI.
 
-Two things it does not check for you:
+Since loop 033 it also enforces two things that used to be prose in a review document:
+
+- **`lintBudget`** — the `oxlint` warning set is recorded in `.oxlint-budget.json` and compared
+  in both directions. A new warning fails; so does a removed one, until you update the record in
+  the same commit. There is no `--write` flag: the failure output is the corrected file.
+- **`fenceCheck`** — every loop's `spec.md` requirement headings are compared against its
+  `plan.md` scope fence, so a spec that asks for a file the plan forbids is a failure rather
+  than a silence. Known contradictions live in `sdlc/fence-baseline.json`.
+
+One thing it still does not check for you:
 
 1. **VS Code bundle format.** For extension changes, confirm the built bundle is still
    CommonJS by grepping it for `require` / `module.exports`. An ESM bundle builds fine and
    then fails at activation.
-2. **Whether the change matches its plan.** That is the plan-to-diff audit in Stage 5.
+
+And one it checks only half of. `fenceCheck` covers spec-to-plan; the **plan-to-diff** direction
+is still the Stage 5 audit, because only a human or an agent reading the diff can tell whether a
+file inside the fence was changed for the reason the plan gave.
 
 Only commit once `verify` exits 0. If it fails, fix and re-run the whole thing — a partial
 pass is a fail.

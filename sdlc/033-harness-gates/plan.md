@@ -50,6 +50,25 @@ The shell and PowerShell helpers under `scripts` are untouched as well.
 > catching a mistake I had written one paragraph after warning myself about it. That is the point
 > of A13.
 
+> **Fence amended during implementation (2026-08-28).** Two paths were added, both forced by
+> `scripts/env.test.ts` going red — the sandbox from loop 021 that spawns the real `verify.ts`
+> against a temp directory.
+>
+> The plan said the two steps would be invoked as `['bun', 'run', 'scripts/lint-budget.ts']`,
+> *"direct script paths, so no new `package.json` scripts are needed"*. That is wrong, and the
+> sandbox is what proved it: `makeFixture` stubs **every step by script name** in a fixture
+> `package.json`, so a step named by a repo-relative path cannot be stubbed and all four of loop
+> 021's cases exited 1. The steps are now package scripts, which means:
+>
+> - `package.json` — gains `lintBudget` and `fenceCheck` alongside the `oxlint` pin. Same file the
+>   fence already listed, wider change than it described.
+> - `scripts/env.test.ts` — **was on the negative fence** ("the tests beside those four") and is
+>   now changed: two `noop` entries in the fixture's script list. This is a real fence violation,
+>   recorded rather than quietly absorbed, and unavoidable — the alternative is a gate that
+>   silently skips a step whose script is missing.
+>
+> Thirteen paths, not eleven.
+
 **On `sdlc/README.md`:** Stage 6's retrospective is written after `review.md` and is not in this
 fence. It lands in its own commit, as every prior loop's has.
 

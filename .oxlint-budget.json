@@ -1,0 +1,56 @@
+[
+  {
+    "code": "eslint(no-shadow)",
+    "filename": "packages/core/src/security.test.ts",
+    "message": "'cleanup' is already declared in the upper scope.",
+    "count": 1
+  },
+  {
+    "code": "eslint(no-useless-concat)",
+    "filename": "packages/metrics/src/agent.test.ts",
+    "message": "Unexpected string concatenation of literals.",
+    "count": 1
+  },
+  {
+    "code": "oxc(no-map-spread)",
+    "filename": "packages/metrics/src/anomaly.test.ts",
+    "message": "Spreading to modify object properties in `map` calls is inefficient",
+    "count": 1
+  },
+  {
+    "code": "unicorn(consistent-function-scoping)",
+    "filename": "packages/core/src/call-sites.test.ts",
+    "message": "Function `mockFetch` does not capture any variables from its parent scope",
+    "count": 1
+  },
+  {
+    "code": "unicorn(consistent-function-scoping)",
+    "filename": "packages/core/src/format.test.ts",
+    "message": "Function `withOpus` does not capture any variables from its parent scope",
+    "count": 1
+  },
+  {
+    "code": "unicorn(consistent-function-scoping)",
+    "filename": "packages/core/src/security.test.ts",
+    "message": "Function `spool` does not capture any variables from its parent scope",
+    "count": 1
+  },
+  {
+    "code": "unicorn(no-array-sort)",
+    "filename": "packages/metrics/src/agent.ts",
+    "message": "Use `Array#toSorted()` instead of `Array#sort()`.",
+    "count": 1
+  },
+  {
+    "code": "unicorn(no-array-sort)",
+    "filename": "packages/metrics/src/anomaly.ts",
+    "message": "Use `Array#toSorted()` instead of `Array#sort()`.",
+    "count": 2
+  },
+  {
+    "code": "unicorn(prefer-array-find)",
+    "filename": "packages/core/src/call-sites.test.ts",
+    "message": "Prefer `find` over filtering and accessing the first result.",
+    "count": 2
+  }
+]

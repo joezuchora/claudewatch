@@ -1,0 +1,13 @@
+{
+  "uncheckable": 13,
+  "unresolvedTokens": 22,
+  "findings": [
+    {
+      "loop": "030-cache-read-validation",
+      "specToken": "extractLastError",
+      "file": "packages/core/src/snapshot.ts",
+      "fenceEntry": "snapshot.ts",
+      "note": "spec.md B3 asked for this gate to be KEPT and relabelled; plan.md then fenced snapshot.ts. The contradiction between two committed artifacts is permanent, so this entry is permanent. The underlying defect is NOT open: loop 031 commit 2 (3000564) implemented the relabel. Loop 030's review.md:220 still lists it OPEN and is stale; historic review documents are not amended, so the correction lives here and in sdlc/033-harness-gates/."
+    }
+  ]
+}

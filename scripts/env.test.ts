@@ -134,7 +134,9 @@ function makeFixture(failing: boolean): { dir: string; home: string } {
   const noop = 'true';
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'fixture',
-    scripts: { typecheck: noop, lint: noop, build: noop, perf: noop },
+    // lintBudget and fenceCheck joined the gate in sdlc/033. Stubbed like the rest: this
+    // fixture is about the metrics switch, not about either gate's own behaviour.
+    scripts: { typecheck: noop, lint: noop, lintBudget: noop, fenceCheck: noop, build: noop, perf: noop },
   }), 'utf-8');
   writeFileSync(join(dir, 'fixture.test.ts'), [
     "import { test, expect } from 'bun:test';",

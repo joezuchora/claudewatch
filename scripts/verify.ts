@@ -36,6 +36,20 @@ interface StepResult {
 const STEPS: Array<{ name: string; cmd: string[]; junit?: boolean }> = [
   { name: 'typecheck', cmd: ['bun', 'run', 'typecheck'] },
   { name: 'lint', cmd: ['bun', 'run', 'lint'] },
+  // Both AFTER `lint`, which is what makes "oxlint errors are unaffected" true rather than
+  // aspirational: the run short-circuits on the first failure, so a lint ERROR stops the gate
+  // before `lintBudget` parses anything.
+  //
+  // camelCase, NOT hyphenated. Line 136 builds the metrics payload key as `${s.name}Ms`, so
+  // `lint-budget` would spool `lint-budgetMs`. Both are cheap (oxlint --format=json ~85ms, the
+  // fence walk ~57ms) plus one Bun cold start each — under 2% of a ~14s gate. See sdlc/033.
+  //
+  // Invoked as PACKAGE SCRIPTS, not as `scripts/*.ts` paths. sdlc/033's plan said paths, "so no
+  // new package.json scripts are needed" — which was wrong, and `env.test.ts` is what proved it:
+  // its sandbox stubs every step by SCRIPT NAME in a fixture package.json, so a step named by a
+  // repo-relative path cannot be stubbed and the four sandbox cases went red.
+  { name: 'lintBudget', cmd: ['bun', 'run', 'lintBudget'] },
+  { name: 'fenceCheck', cmd: ['bun', 'run', 'fenceCheck'] },
   // `junit: true` makes runStep append --reporter=junit --reporter-outfile=<temp>. The report
   // names WHICH test failed; before sdlc/020 the spool recorded only that this step did.
   { name: 'test', cmd: ['bun', 'test'], junit: true },
