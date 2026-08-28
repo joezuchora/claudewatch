@@ -24,14 +24,31 @@ Eleven paths — counted against the table, not asserted. The table below has **
 | `sdlc/033-harness-gates/review.md` | Stage 5 | all |
 
 **Explicitly not touched:** `packages/core`, `packages/statusline`, `packages/vscode`,
-`packages/metrics`, `SPEC.md`, `REVIEW.md`, `.oxlintrc.json`, `.github/workflows`, and every
-existing file under `scripts/` other than `verify.ts`.
+`packages/metrics`, `SPEC.md`, `REVIEW.md`, `.oxlintrc.json`, `.github/workflows`, `scripts/env.ts`,
+`scripts/junit.ts`, `scripts/perf.ts`, `scripts/mock-topology.ts`, and the tests beside those four.
+The shell and PowerShell helpers under `scripts` are untouched as well.
 
-> **The fence deliberately does not say `scripts/`.** Loops 029, 030, 031 and 032 all fence it as
-> house style. This loop adds four files there, so copying that style would make `fence-check` report
-> a finding against its own loop — spec heading `` `scripts/fence-check.ts` `` inside fence entry
-> `scripts/` — and A13 would fail. The exclusion is enumerated file-by-file instead. This is the
-> first time the gate has constrained the plan that builds it, which is the point of A13.
+> **The fence must not contain the token `scripts/`, and the first draft of it did.** Loops 029–032
+> all fence `scripts/` as house style. This loop adds four files there, so that entry would make
+> `fence-check` report a finding against its own loop — spec heading `` `scripts/fence-check.ts` ``
+> inside fence entry `scripts/` — and A13 would fail.
+>
+> The first version of this paragraph tried to have it both ways, writing *"every existing file
+> under `scripts/` other than `verify.ts`"*. **Measured against the real extractor** (commit
+> `f30f20a`), that paragraph yields ten tokens including **`scripts/`** and **`verify.ts`** — the
+> one entry the plan forbids, and the one script the plan actually changes, fenced. The prose said
+> the opposite of what the parser reads.
+>
+> Two things follow. The exclusion is now enumerated file-by-file with no bare directory and no
+> exception clause. And the parser has a real limitation to record: **a fence sentence of the form
+> "everything under X except Y" inverts both terms** — X is read as fenced when it is not, and Y is
+> read as fenced when it is the change itself. `spec.md`'s Edge cases gain this at Stage 5; it is
+> not fixed here, because "except" phrasing is open-ended and the fix belongs with the structured
+> fence that the Rejected alternatives already defer.
+>
+> This is the first time the gate has constrained the plan that builds it, and it constrained it by
+> catching a mistake I had written one paragraph after warning myself about it. That is the point
+> of A13.
 
 **On `sdlc/README.md`:** Stage 6's retrospective is written after `review.md` and is not in this
 fence. It lands in its own commit, as every prior loop's has.
@@ -150,6 +167,22 @@ Code bundle item is untouched.
   paths that will exist and `verify`, which is not a symbol) and 0 findings, so 21 and 13 should
   hold with checkable going 12 → 13. If that prediction is wrong the spec's A3/A4 numbers change
   and the spec gets amended, not the measurement.
+
+  > **Measured immediately after committing this file: the prediction was wrong.** Findings held at
+  > 1 and checkable went 12 → 13 as predicted, but `unresolvedTokens` went **21 → 24**, not 21. The
+  > reason is timing, not resolution: at Stage 3 `scripts/fence-check.ts` and `scripts/lint-budget.ts`
+  > **do not exist yet**, so all three of this loop's heading tokens are unresolved. The prediction
+  > described the world after Stage 4 and was checked against the world at Stage 3.
+  >
+  > Revised prediction for the committed baseline, written before the files exist: once Stage 4
+  > lands both scripts, 033 contributes exactly **1** unresolved (`verify`, which is not a symbol
+  > and never will be), giving `unresolvedTokens: 22`, `uncheckable: 13`, `checkable: 13`, one
+  > finding. `spec.md` A4 says 21 and will need amending to 22 at Stage 5 — recorded here so the
+  > amendment is traceable to a measurement rather than appearing in the spec unexplained.
+  >
+  > The general lesson, and it is the same one loop 032 closed on: **a number measured at one stage
+  > of the loop is not the number the next stage will see.** The baseline is written at Stage 4, so
+  > it must be measured at Stage 4.
 - **`git ls-files` in a shallow CI checkout.** CI clones the repo; `git ls-files` reads the index,
   not history, so depth does not matter. Confirmed by the fact that `verify` already runs git-free
   steps — but the first CI run is the real check, and A1 is not met until CI is green.
