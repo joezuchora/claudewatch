@@ -441,10 +441,20 @@ describe('smoke: 26 poisoned values reach neither --debug nor --json (sdlc/032)'
       expect(typeof out.cacheAgeSec).toBe('number');
       expect(out.freshness).toBeDefined();
 
-      expect(SNAPSHOT_KEYS.filter((k) => r.stdout.includes(M(k)))).toEqual([]);
-      // lastHttpStatus is an ENVELOPE field and DOES reach --debug, so it is asserted here and
-      // deliberately NOT in T3.
-      expect(r.stdout).not.toContain(M('httpStatus'));
+      // WHAT --debug CAN ACTUALLY SEE, and no more. `printDebug` (main.ts:124-152) emits a FIXED
+      // key list: from the snapshot it copies only `fetchedAt`, `classify()` (a closed enum),
+      // `rawMetadata.normalizationWarnings` and `freshness`. The 24 SNAPSHOT_KEYS asserted here
+      // originally could not reach this surface AT ALL — proved by the audit: under a mutation that
+      // makes sanitizeSnapshot a total no-op and turns 22 other tests red, this test stayed GREEN.
+      // Asserting them was theatre, and worse, it was promoted into SPEC.md as evidence.
+      //
+      // `--json` is the whole-snapshot leg. This one covers the envelope field and the three
+      // snapshot values printDebug genuinely emits.
+      expect(r.stdout).not.toContain(M('httpStatus'));           // envelope, and the reason T2 exists
+      expect(r.stdout).not.toContain(M('fetchedAt'));
+      for (const k of ['sevenPct', 'opusPct']) void k;           // not reachable here; see --json
+      expect(out.stateClassification).toBe('Healthy');           // classify() is a closed enum
+      expect(Array.isArray((out as { normalizationWarnings?: unknown[] }).normalizationWarnings)).toBe(true);
     } finally {
       rmSync(seedP.home, { recursive: true, force: true });
     }

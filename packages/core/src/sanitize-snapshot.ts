@@ -41,6 +41,35 @@ const _fieldsCovered: never = null as unknown as Exclude<
 >;
 void _fieldsCovered;
 
+/**
+ * The same guarantee for every NESTED shape.
+ *
+ * `SANITIZED_FIELDS` names eleven top-level keys. Fifteen of the boundary's validated leaves live
+ * in `source`, `display`, `freshness`, `rawMetadata`, `UsageWindow` and `EnterpriseUsage` — and
+ * until sdlc/032's Stage 5 audit none of those had an equivalent list. Measured: adding
+ * `newNestedField?: string` to `EnterpriseUsage` typechecked clean and passed all 870 tests, the
+ * field silently dropped by the rebuild. A11's headline — "one place names every validated field"
+ * — was true of eleven of twenty-six.
+ *
+ * These are type-level only; each `Exclude<...> = never` fails to compile the moment a shape gains
+ * a key no rule here handles.
+ */
+const _sourceCovered: never = null as unknown as Exclude<
+  keyof UsageSnapshot['source'], 'usageEndpoint'>;
+const _displayCovered: never = null as unknown as Exclude<
+  keyof UsageSnapshot['display'], 'primaryWindow' | 'primaryUtilizationPct' | 'primaryResetsAt'>;
+const _freshnessCovered: never = null as unknown as Exclude<
+  keyof UsageSnapshot['freshness'], 'isStale' | 'staleReason'>;
+const _rawMetadataCovered: never = null as unknown as Exclude<
+  keyof UsageSnapshot['rawMetadata'], 'normalizationWarnings'>;
+const _windowCovered: never = null as unknown as Exclude<
+  keyof UsageWindow, 'utilizationPct' | 'resetsAt'>;
+const _enterpriseCovered: never = null as unknown as Exclude<
+  keyof EnterpriseUsage,
+  'utilizationPct' | 'monthlyLimitCredits' | 'usedCredits' | 'currency' | 'isEnabled' | 'disabledReason'>;
+void _sourceCovered; void _displayCovered; void _freshnessCovered;
+void _rawMetadataCovered; void _windowCovered; void _enterpriseCovered;
+
 /** A finite number, or null. Rejects strings, NaN, Infinity — none of which `typeof` catches. */
 function finiteOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;

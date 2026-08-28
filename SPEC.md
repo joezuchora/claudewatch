@@ -754,8 +754,12 @@ ClaudeWatch is a local companion utility, not a credential manager.
   bounded string — and **no unknown key at any depth survives**. Measured before it existed: 26 of
   26 poisoned values reached a surface, 24 of them inside the snapshot. Checked by
   `packages/core/src/sanitize-snapshot.test.ts`, `security.test.ts` → "§12: no value off a cache
-  file survives unvalidated", and end to end against the compiled binary on **both** `--debug` and
-  `--json` by `packages/statusline/src/smoke.test.ts`.
+  file survives unvalidated", and end to end against the compiled binary by
+  `packages/statusline/src/smoke.test.ts`. **`--json` is the whole-snapshot leg; `--debug` is not.**
+  `printDebug` emits a fixed key list — from the snapshot only `fetchedAt`, `classify()`,
+  `normalizationWarnings` and `freshness` — so most snapshot fields cannot reach it. `sdlc/032`
+  first claimed two equivalent legs here; its Stage 5 audit proved the `--debug` leg green under a
+  mutation that turned 22 other tests red.
   A whitelist fails by DROPPING a field rather than leaking one, so the guard that matters is the
   strict round-trip in `cache.test.ts` plus its companion asserting the fixture is not vacuous —
   `makeTestSnapshot`'s defaults are, for six leaves, identical to their own degraded values.

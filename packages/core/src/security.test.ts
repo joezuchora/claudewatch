@@ -574,3 +574,99 @@ describe('§12: no value off a cache file survives unvalidated (sdlc/032)', () =
     expect(readCacheResult().envelope!.lastHttpStatus).toBe(503);
   });
 });
+
+/**
+ * A second poisoned envelope whose enterprise NUMERICS ARE VALID.
+ *
+ * `poisonedEnvelope` poisons `enterprise.utilizationPct`, which makes `sanitizeEnterprise` return
+ * `null` and **masks every other enterprise rule** — so `currency`, `disabledReason` and `isEnabled`
+ * were untestable by the fixture that claimed to test them. sdlc/032's Stage 5 audit proved the
+ * consequence: dropping the `currency` check, deleting either `disabledReason` rule, or hardcoding
+ * `isEnabled: false` each passed all 870 tests. The `isEnabled` one is a live behaviour bug —
+ * `format.ts:373` gates on `!e.isEnabled`, so every enterprise account with extra usage ENABLED
+ * would read back disabled after one cache read.
+ *
+ * This is the reviewer's `currency` argument reproduced on fields the first fixture could not reach.
+ */
+function poisonedEnterpriseEnvelope(): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.tier = 'enterprise';
+  s.enterprise = {
+    utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,   // VALID — no masking
+    currency: M('currency2'),
+    isEnabled: false,                                               // VALID — see the split below
+    disabledReason: `${M('disabledReason2')} /home/someone`,
+  };
+  return { ...makeTestEnvelope({}), snapshot: s };
+}
+
+/** An enterprise envelope with valid numerics and a caller-chosen disabledReason. */
+function mk(reason: string): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.tier = 'enterprise';
+  s.enterprise = {
+    utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+    currency: 'EUR', isEnabled: false, disabledReason: reason,
+  };
+  return { ...makeTestEnvelope({}), snapshot: s };
+}
+
+describe('§12: the enterprise rules the first fixture could not reach (sdlc/032 audit)', () => {
+  test('currency, disabledReason and isEnabled are each validated', () => {
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnterpriseEnvelope()), { mode: 0o600 });
+    const ent = readCacheResult().envelope!.snapshot.enterprise;
+
+    // Precondition: the object SURVIVED. If a numeric had been poisoned it would be null and this
+    // whole test would pass while checking nothing — which is exactly the defect being fixed.
+    expect(ent).not.toBeNull();
+    expect(ent!.utilizationPct).toBe(12);
+
+    expect(ent!.currency).toBe('USD');            // a non-ISO currency degrades in place
+    expect(ent!.disabledReason).toBeNull();       // a path-shaped reason is REDACTED, not truncated
+    expect(JSON.stringify(ent)).not.toContain('MARK_');
+  });
+
+  test('a non-boolean isEnabled nulls the whole object, it does not degrade in place', () => {
+    // My first version of the test above asserted `isEnabled` degrades to `false`. It does not —
+    // `sanitizeEnterprise` returns null, per the spec's "any failing field nulls the whole object",
+    // because a half-degraded enterprise block is what renders `$NaN`. The precondition caught the
+    // misreading of my own rule immediately, which is the argument for writing one.
+    const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+    s.tier = 'enterprise';
+    s.enterprise = {
+      utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+      currency: 'EUR', isEnabled: M('entEnabled2'), disabledReason: null,
+    };
+    writeFileSync(getCachePath(), JSON.stringify({ ...makeTestEnvelope({}), snapshot: s }), { mode: 0o600 });
+
+    const out = readCacheResult().envelope!.snapshot;
+    expect(out.enterprise).toBeNull();
+    expect(out.tier).toBe('unknown');   // and the coupling rule fires
+    expect(JSON.stringify(out)).not.toContain('MARK_');
+  });
+
+  test('isEnabled is READ, not hardcoded', () => {
+    // The audit hardcoded `isEnabled: false` and all 870 tests passed. makeRichTestSnapshot sets
+    // false, so the round-trip could not see it. Both booleans are asserted here.
+    for (const isEnabled of [true, false]) {
+      const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+      s.tier = 'enterprise';
+      s.enterprise = {
+        utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+        currency: 'EUR', isEnabled, disabledReason: null,
+      };
+      writeFileSync(getCachePath(), JSON.stringify({ ...makeTestEnvelope({}), snapshot: s }), { mode: 0o600 });
+      expect(readCacheResult().envelope!.snapshot.enterprise!.isEnabled).toBe(isEnabled);
+    }
+  });
+
+  test('a legitimate disabledReason survives, and an oversized one is bounded', () => {
+    // The redact-then-bound rule's two halves, both previously uncovered.
+    writeFileSync(getCachePath(), JSON.stringify(mk('Disabled by your administrator')), { mode: 0o600 });
+    expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason)
+      .toBe('Disabled by your administrator');
+
+    writeFileSync(getCachePath(), JSON.stringify(mk('x'.repeat(5000))), { mode: 0o600 });
+    expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason).toHaveLength(200);
+  });
+});
