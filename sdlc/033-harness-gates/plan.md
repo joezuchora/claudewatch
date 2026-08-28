@@ -67,7 +67,10 @@ The shell and PowerShell helpers under `scripts` are untouched as well.
 >   recorded rather than quietly absorbed, and unavoidable — the alternative is a gate that
 >   silently skips a step whose script is missing.
 >
-> Thirteen paths, not eleven.
+> **Twelve distinct paths, not eleven — and not thirteen.** The first version of this amendment
+> said thirteen by counting `package.json` twice: it was already row 8, and widening an
+> already-fenced file is not a new path. `scripts/env.test.ts` is the only genuinely new one.
+> The Stage 5 audit caught the arithmetic; the fence was honest about *what* it permits.
 
 **On `sdlc/README.md`:** Stage 6's retrospective is written after `review.md` and is not in this
 fence. It lands in its own commit, as every prior loop's has.

@@ -55,8 +55,15 @@ const INDEX_EXCLUDE = 'packages/core/src/typefixtures/';
 
 const ticks = (md: string): string[] => [...md.matchAll(TOKEN)].map((m) => m[1]!.trim());
 
-/** Windows separators, so a `readdir` corpus does not make every finding silently vanish. */
-const toPosix = (p: string): string => p.split('\\').join('/');
+/**
+ * Windows separators, so a `readdir` corpus does not make every finding silently vanish.
+ *
+ * Applied at the ENTRY of `buildIndex` and `checkLoop`, not only in `gitFiles`. The first version
+ * normalised in `gitFiles` alone, which made the portability test unable to fail: it built a
+ * backslash corpus and then converted it back to POSIX before calling anything, so the assertion
+ * held with `toPosix` replaced by the identity function. sdlc/033's audit proved that by mutation.
+ */
+export const toPosix = (p: string): string => p.split('\\').join('/');
 
 /**
  * `null` means the plan has no machine-readable fence: reported UNCHECKABLE, never reported as
@@ -96,11 +103,12 @@ const bareSymbol = (t: string): string => t.replace(/\(.*$/, '').replace(/:.*$/,
 
 export function buildIndex(corpus: readonly string[], read = readFileSync): SymbolIndex {
   const index = new Map<string, string[]>();
-  for (const f of corpus) {
+  for (const raw of corpus) {
+    const f = toPosix(raw);
     if (!f.endsWith('.ts')) continue;
     if (!f.startsWith('packages/') && !f.startsWith('scripts/')) continue;
     if (f.startsWith(INDEX_EXCLUDE)) continue;
-    for (const m of String(read(f, 'utf8')).matchAll(EXPORTED)) {
+    for (const m of String(read(raw, 'utf8')).matchAll(EXPORTED)) {
       const k = m[1]!;
       const at = index.get(k);
       if (at) at.push(f);
@@ -139,8 +147,9 @@ function inFence(file: string, entry: string): boolean {
 
 /**
  * `unresolved` is returned, not swallowed. Zero false positives across twelve loops is easy to
- * achieve by understanding almost nothing, so the check publishes what it could not read: only 26
- * of 50 heading tokens resolve. Type members (`MetricEvent.payload` — the very token loop 020's
+ * achieve by understanding almost nothing, so the check publishes what it could not read: only 28
+ * of 50 heading tokens resolve (measured at sdlc/033 Stage 5; the 26-of-47 in that loop's spec.md
+ * was the Stage-2 figure, before loop 033's own artifacts became checkable). Type members (`MetricEvent.payload` — the very token loop 020's
  * fence protects as the telemetry security boundary), non-exported symbols, and flags all fall
  * through. Baselining the count turns that silence into a ratcheted number.
  */
@@ -149,10 +158,11 @@ export function checkLoop(
   specMd: string,
   planMd: string,
   index: SymbolIndex,
-  corpus: readonly string[],
+  rawCorpus: readonly string[],
 ): { findings: Finding[]; unresolved: string[] } | null {
   const fence = extractFence(planMd);
   if (fence === null) return null;
+  const corpus = rawCorpus.map(toPosix);
 
   const findings: Finding[] = [];
   const unresolved: string[] = [];
@@ -210,6 +220,51 @@ export function parseBaseline(text: string): Baseline {
 
 const keyOf = (f: Finding): string => `${f.loop}|${f.specToken}|${f.file}|${f.fenceEntry}`;
 
+/**
+ * The four ways this gate fails, extracted from `main` so each one has a test.
+ *
+ * The first version lived inline in `main`, unexported, and sdlc/033's audit caught that every
+ * branch here had ZERO coverage — including the NEW CONTRADICTION message, which is the intent's
+ * first done-criterion ("naming both the file and the two artifacts"). A gate whose failure paths
+ * have never been executed is loop 032's lesson wearing a new hat.
+ *
+ * `skipped` is deliberately not a parameter: a loop mid-flight has `spec.md` and no `plan.md`, so
+ * asserting it would make `verify` red for the first two commits of every future loop.
+ */
+export function compareToBaseline(
+  actual: { findings: readonly Finding[]; uncheckable: number; unresolved: number },
+  baseline: Baseline,
+): string[] {
+  const problems: string[] = [];
+  const known = new Set(baseline.findings.map(keyOf));
+  const seen = new Set(actual.findings.map(keyOf));
+  for (const f of actual.findings) {
+    if (!known.has(keyOf(f))) {
+      problems.push(
+        `fence-check: NEW CONTRADICTION  ${f.loop}: spec.md requires \`${f.specToken}\` (${f.file}) ` +
+          `but plan.md fences \`${f.fenceEntry}\``,
+      );
+    }
+  }
+  for (const f of baseline.findings) {
+    if (!seen.has(keyOf(f))) {
+      problems.push(
+        `fence-check: baselined contradiction no longer found — ${f.loop}: ${f.specToken}. ` +
+          `Remove it from ${BASELINE_PATH}.`,
+      );
+    }
+  }
+  if (actual.uncheckable !== baseline.uncheckable) {
+    problems.push(`fence-check: uncheckable is ${actual.uncheckable}, baseline says ${baseline.uncheckable}`);
+  }
+  if (actual.unresolved !== baseline.unresolvedTokens) {
+    problems.push(
+      `fence-check: unresolved heading tokens is ${actual.unresolved}, baseline says ${baseline.unresolvedTokens}`,
+    );
+  }
+  return problems;
+}
+
 export async function gitFiles(): Promise<string[]> {
   const proc = Bun.spawn(['git', 'ls-files'], { stdout: 'pipe', stderr: 'pipe' });
   const out = await new Response(proc.stdout).text();
@@ -264,33 +319,7 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const problems: string[] = [];
-  const known = new Set(baseline.findings.map(keyOf));
-  const seen = new Set(findings.map(keyOf));
-  for (const f of findings) {
-    if (!known.has(keyOf(f))) {
-      problems.push(
-        `fence-check: NEW CONTRADICTION  ${f.loop}: spec.md requires \`${f.specToken}\` (${f.file}) ` +
-          `but plan.md fences \`${f.fenceEntry}\``,
-      );
-    }
-  }
-  for (const f of baseline.findings) {
-    if (!seen.has(keyOf(f))) {
-      problems.push(`fence-check: baselined contradiction no longer found — ${f.loop}: ${f.specToken}. Remove it from ${BASELINE_PATH}.`);
-    }
-  }
-  // Skipped is reported, never asserted: a loop mid-flight has spec.md and no plan.md, so asserting
-  // it would make verify red for the first two commits of every future loop.
-  if (uncheckable !== baseline.uncheckable) {
-    problems.push(`fence-check: uncheckable is ${uncheckable}, baseline says ${baseline.uncheckable}`);
-  }
-  if (unresolved.length !== baseline.unresolvedTokens) {
-    problems.push(
-      `fence-check: unresolved heading tokens is ${unresolved.length}, baseline says ${baseline.unresolvedTokens}`,
-    );
-  }
-
+  const problems = compareToBaseline({ findings, uncheckable, unresolved: unresolved.length }, baseline);
   if (problems.length === 0) return 0;
   console.error('');
   for (const p of problems) console.error(p);

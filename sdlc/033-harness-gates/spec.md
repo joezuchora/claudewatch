@@ -134,8 +134,11 @@ entries first.
 ### B2 — the fence baseline, and the silence it makes visible
 
 Zero false positives across 12 loops is easy to achieve by checking almost nothing, so the check
-must publish how much it does not understand. Measured: of **47** heading tokens across the
-fence-bearing loops, **26 resolve (55%)** and **21 do not**. The unresolved ones cluster:
+must publish how much it does not understand. Measured at Stage 2, with loop 033 not yet
+checkable: of **47** heading tokens, **26 resolved** and **21 did not**. **Amended at Stage 5**,
+once loop 033's own `plan.md` and its two new scripts existed: **50** tokens, **28 resolve (56%)**,
+**22 do not**. The Stage-3 plan predicted exactly this shift and named 22 before the files were
+written; `sdlc/fence-baseline.json` is the authority. The unresolved ones cluster:
 
 - **Type members** — `MetricEvent.payload`, `enterprise.utilizationPct`, `anomaly.fingerprint`, and
   the field names `fetchedAt`, `disabledReason`, `lastHttpStatus`, `normalizationWarnings`,
@@ -149,7 +152,7 @@ fence-bearing loops, **26 resolve (55%)** and **21 do not**. The unresolved ones
 
 ```
 { "uncheckable": 13,
-  "unresolvedTokens": 21,
+  "unresolvedTokens": 22,
   "findings": [ { loop, specToken, file, fenceEntry, note } ] }
 ```
 
@@ -160,7 +163,7 @@ immutable and the contradiction between them is permanent, not because the defec
 
 The check exits non-zero when the finding set, the `uncheckable` count, or the `unresolvedTokens`
 count differs from the baseline, **in either direction**, and prints the symmetric difference.
-Baselining `unresolvedTokens` converts a silent 45% miss rate into a ratcheted number: the next loop
+Baselining `unresolvedTokens` converts a silent 44% miss rate into a ratcheted number: the next loop
 that writes a heading the check cannot read shows up as a delta rather than as silence.
 
 The **skipped** count is reported but **not** asserted. A loop mid-flight has `spec.md` and no
@@ -255,9 +258,11 @@ which it does, so the gates run in CI.
 
 ### B5 — the checks must be seen to fail
 
-`fence-check.ts` exports the pure seam
-`checkLoop(specMd: string, planMd: string, index: SymbolIndex, corpus: string[]): Finding[]`;
-the CLI is a thin wrapper that walks `sdlc/`. `lint-budget.ts` exports
+`fence-check.ts` exports the pure seams `checkLoop(loop, specMd, planMd, index, corpus)`, returning
+`{ findings, unresolved } | null` with `null` as the `UNCHECKABLE` channel, and
+`compareToBaseline(actual, baseline): string[]`, which carries the four ways the gate fails so each
+one has a test. `buildIndex(corpus, read = readFileSync)` takes an injectable reader so fixtures
+need no files on disk. The CLI is a thin wrapper that walks `sdlc/`. `lint-budget.ts` exports
 `diffBudget(actual: Row[], budget: Row[]): { added: Row[]; removed: Row[] }` and a pure
 `rowsFrom(diagnostics: Diagnostic[]): Row[]`. Both test files drive those functions over fixture
 inputs — no fixture directories under `sdlc/`, no dependence on the live tree:
@@ -337,11 +342,12 @@ Failure classes, each with a stated outcome:
 - [ ] **A2** — `fence-check` over the committed `sdlc/` tree reports exactly one finding: loop 030's
       `extractLastError` → `packages/core/src/snapshot.ts`. Evidence: the command's own output
       pasted into `review.md`.
-- [ ] **A3** — the same run reports **zero** findings for the other eleven checkable loops and
-      **13** `UNCHECKABLE`, both asserted against the baseline. Checkable and skipped counts are
-      printed, not asserted.
-- [ ] **A4** — `unresolvedTokens` is **21**, asserted against the baseline, and the run prints the
-      per-loop unresolved list.
+- [ ] **A3** — the same run reports **zero** findings for the other **twelve** checkable loops
+      (13 checkable in total, loop 033 included) and **13** `UNCHECKABLE`, both asserted against the
+      baseline. Checkable and skipped counts are printed, not asserted.
+- [ ] **A4** — `unresolvedTokens` is **22**, asserted against the baseline, and the run prints the
+      per-loop unresolved list. The Stage-2 draft said 21, measured before loop 033 was itself
+      checkable; the plan predicted the correction and the tool confirmed it.
 - [ ] **A5** — seeding a twelfth lint warning makes `verify` exit non-zero with a message naming the
       rule, the file and the message. Evidence: the seeded diff and the failure output.
 - [ ] **A6** — deleting one of the 11 warnings without updating `.oxlint-budget.json` also makes

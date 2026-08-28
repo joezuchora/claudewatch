@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildIndex,
   checkLoop,
+  compareToBaseline,
   extractFence,
   gitFiles,
   headingTokens,
@@ -162,17 +163,83 @@ describe('checkLoop — symbol resolution', () => {
 });
 
 describe('checkLoop — portability', () => {
+  /**
+   * The FIRST version of this test converted the backslash corpus back to POSIX before calling
+   * anything, so it held with `toPosix` replaced by the identity function — sdlc/033's audit proved
+   * that by mutation. The backslash array is now passed straight in, which is what forced `toPosix`
+   * to move to the entry of `buildIndex` and `checkLoop` rather than living only in `gitFiles`.
+   */
   test('a backslash corpus yields the same findings as a POSIX one', () => {
     const winCorpus = CORPUS.map((f) => f.split('/').join('\\'));
-    const posix = winCorpus.map((f) => f.split('\\').join('/'));
+    const winSources: Record<string, string> = {};
+    for (const [k, v] of Object.entries(SOURCES)) winSources[k.split('/').join('\\')] = v;
+    const winRead = ((f: string): string => winSources[f] ?? '') as unknown as typeof import('fs').readFileSync;
+
     const res = checkLoop(
       'fixture',
       '### B3 — `extractLastError` is relabelled\n',
       '**Explicitly not touched:** `snapshot.ts`\n\n',
-      buildIndex(posix, read),
-      posix,
+      buildIndex(winCorpus, winRead),
+      winCorpus,
     );
-    expect(res?.findings).toHaveLength(1);
+    expect(res?.findings).toEqual([
+      { loop: 'fixture', specToken: 'extractLastError', file: 'packages/core/src/snapshot.ts', fenceEntry: 'snapshot.ts' },
+    ]);
+  });
+
+  test('a path-shaped heading token resolves against a backslash corpus too', () => {
+    const winCorpus = CORPUS.map((f) => f.split('/').join('\\'));
+    const res = checkLoop(
+      'fixture',
+      '### B1 — `snapshot.ts` is rewritten\n',
+      '**Explicitly not touched:** `snapshot.ts`\n\n',
+      buildIndex([], read),
+      winCorpus,
+    );
+    expect(res?.findings.map((f) => f.file)).toEqual(['packages/core/src/snapshot.ts']);
+  });
+});
+
+describe('compareToBaseline — the four ways this gate fails', () => {
+  const FINDING = {
+    loop: '030-cache-read-validation',
+    specToken: 'extractLastError',
+    file: 'packages/core/src/snapshot.ts',
+    fenceEntry: 'snapshot.ts',
+  };
+  const BASE = { uncheckable: 13, unresolvedTokens: 22, findings: [{ ...FINDING, note: 'known' }] };
+  const MATCH = { findings: [FINDING], uncheckable: 13, unresolved: 22 };
+
+  test('a matching run reports nothing', () => {
+    expect(compareToBaseline(MATCH, BASE)).toEqual([]);
+  });
+
+  test('a NEW contradiction names the spec token, the file and the fence entry', () => {
+    const extra = { loop: '034-next', specToken: 'formatTooltip', file: 'packages/core/src/format.ts', fenceEntry: 'format.ts' };
+    const out = compareToBaseline({ ...MATCH, findings: [FINDING, extra] }, BASE);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('NEW CONTRADICTION');
+    expect(out[0]).toContain('034-next');
+    expect(out[0]).toContain('formatTooltip');
+    expect(out[0]).toContain('packages/core/src/format.ts');
+    expect(out[0]).toContain('format.ts');
+  });
+
+  test('a baselined contradiction that disappeared must be removed from the record', () => {
+    const out = compareToBaseline({ ...MATCH, findings: [] }, BASE);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('no longer found');
+    expect(out[0]).toContain('sdlc/fence-baseline.json');
+  });
+
+  test('the uncheckable count moves in either direction', () => {
+    expect(compareToBaseline({ ...MATCH, uncheckable: 14 }, BASE)[0]).toContain('uncheckable is 14');
+    expect(compareToBaseline({ ...MATCH, uncheckable: 12 }, BASE)[0]).toContain('uncheckable is 12');
+  });
+
+  test('the unresolved-token count moves in either direction, so the silence cannot grow quietly', () => {
+    expect(compareToBaseline({ ...MATCH, unresolved: 23 }, BASE)[0]).toContain('unresolved heading tokens is 23');
+    expect(compareToBaseline({ ...MATCH, unresolved: 21 }, BASE)[0]).toContain('unresolved heading tokens is 21');
   });
 });
 
