@@ -174,3 +174,60 @@ describe('smoke: the compiled binary exits on every stdin state', () => {
     expect(r.stdout.trim()).toMatch(/^claudewatch \d+\.\d+\.\d+$/);
   }, SPAWN_TIMEOUT_MS);
 });
+
+describe('smoke: --debug never prints free text off a cache file', () => {
+  test('a pre-sdlc/029 lastErrorMessage is nulled before the binary can print it', async () => {
+    // Its own HOME: the shared seed's envelope is clean and this case needs a poisoned one.
+    // Network-inert by the same two independent mechanisms every case in this file relies on —
+    // the seeded credential is deliberately expired, AND `--debug` without `--refresh` returns
+    // at main.ts:203-206, before `resolveCredentials` and before any fetch is reachable.
+    const poisoned = seedSandboxHome({
+      prefix: 'cw-smoke-debug-',
+      accessToken: 'sk-ant-oat01-SMOKE-TEST-NOT-REAL',
+      envelope: {
+        lastErrorClass: 'serviceUnavailable',
+        lastHttpStatus: 503,
+        // `as never` is load-bearing. sdlc/030 narrowed the field to SurfaceableMessage, and the
+        // whole point of this case is to test the runtime guard from OUTSIDE the type system —
+        // a cache file on disk was written by some earlier build and never saw this compiler.
+        // It is not a smell to tidy away.
+        lastErrorMessage: 'connect ECONNREFUSED /home/someone/.claude on someones-nuc.local' as never,
+      },
+    });
+
+    try {
+      const r = await new Promise<RunResult>((res) => {
+        const started = Date.now();
+        const child = spawn(BIN, ['--debug'], {
+          env: { ...process.env, ...poisoned.env }, stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        let stdout = '';
+        child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 20000);
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          res({ code, stdout, timedOut, ms: Date.now() - started });
+        });
+      });
+      expect(r.timedOut).toBe(false);
+      expect(r.code).toBe(0);
+
+      const out = JSON.parse(r.stdout) as Record<string, unknown>;
+      // Preconditions in the SAME block, not a separate case. `printDebug` omits every cache key
+      // on a miss, so an envelope rejected as versionMismatch / invalidShape / corruptJson would
+      // leave `lastErrorMessage` absent and the assertion below could go green while proving
+      // nothing at all. These two say the cache was read, and that it was THIS envelope.
+      expect(typeof out.cacheAgeSec).toBe('number');
+      expect(out.lastHttpStatus).toBe(503);
+
+      expect(out.lastErrorMessage).toBeNull();
+      // Belt and braces on the raw bytes: the field could be dropped and the text still reach
+      // stdout through some other key.
+      expect(r.stdout).not.toContain('/home/someone');
+      expect(r.stdout).not.toContain('someones-nuc.local');
+    } finally {
+      rmSync(poisoned.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

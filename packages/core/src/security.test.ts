@@ -14,13 +14,13 @@ import {
   emit, getSpoolPath, fetchResultEvent, cacheEvent, renderEvent, schemaDriftEvent,
   categorizeWarning, utilizationBucket,
 } from './telemetry.js';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { normalize } from './normalize.js';
 import { fetchUsage, isSurfaceableMessage } from './client.js';
 import { extractLastError } from './snapshot.js';
 import { shouldCooldown, failurePolicy } from './cooldown.js';
-import { makeCacheEnvelope, writeCache, getCachePath } from './cache.js';
-import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { makeCacheEnvelope, writeCache, getCachePath, readCacheResult } from './cache.js';
+import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
 const TOKEN = 'sk-ant-oat01-FAKE-SECRET-TOKEN-1234567890';
 let cleanup: () => void;
@@ -364,5 +364,37 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
       makeTestSnapshot(), null, 'serviceUnavailable', 503, 'Server error (503)',
     ));
     expect(ok!.message).toBe('Server error (503)');
+  });
+
+  test('free text read off DISK is nulled at the parse boundary', () => {
+    // The case above constructs its envelope in memory, so it can only reach the ONE consumer
+    // that calls `extractLastError`. This one goes through the file, which is the only way a
+    // pre-sdlc/029 envelope actually arrives: back then the network path assigned `err.message`
+    // verbatim, so a cache written by that build holds whatever the OS said — an absolute path,
+    // a hostname, a username. `--debug` (main.ts:143) and the VS Code tooltip read the field
+    // straight off the envelope and never see `extractLastError` at all.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+      lastErrorClass: 'serviceUnavailable',
+      lastHttpStatus: 503,
+      lastErrorMessage: 'connect ECONNREFUSED /home/someone/.claude on someones-nuc.local' as never,
+    })), { mode: 0o600 });
+
+    const result = readCacheResult();
+    // Degraded, not rejected: discarding the envelope would cost a live token-bearing fetch.
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope!.lastErrorMessage).toBeNull();
+    // The fields beside it are untouched — the message is dropped, the envelope is not.
+    expect(result.envelope!.lastHttpStatus).toBe(503);
+    expect(result.envelope!.lastErrorClass).toBe('serviceUnavailable');
+
+    // Positive precondition. Without it every assertion above passes just as well if the branch
+    // nulls the field unconditionally, which is a different (and useless) guard.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+      lastErrorClass: 'serviceUnavailable',
+      lastHttpStatus: 503,
+      lastErrorMessage: 'Server error (503)',
+    })), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastErrorMessage).toBe('Server error (503)');
   });
 });

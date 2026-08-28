@@ -165,23 +165,55 @@ layer of coverage.
 
 ## What is NOT done
 
+Each bullet was re-checked at the close of **sdlc/030-cache-read-validation** and carries its status.
+Three kinds appear. `CLOSED by 030` means the code changed and a named test now fails without it.
+`OPEN` means it is still true of the tree. Bullets 1–3 are records of *this loop's own* process
+failures: nothing a later change can edit makes them untrue, so they are marked `OPEN (record)` and
+their value is the rule they produced, not a fix.
+
 - **A6 is UNMET, and worse than I recorded.** It permitted three expectation changes. **Seven**
   changed. I self-declared six; the auditor found the seventh — `contract.test.ts`'s timeout
   `failureClass` edit, distinct from the message edit A6 licensed.
+  → **OPEN (record).** Unfixable by construction. Its output is the rule loop 030 wrote its own A6
+  and A7 to obey: an expectation-change budget is only a budget if the count is *measured against a
+  diff*, not self-declared. Loop 030 changed zero existing expectations.
 - **A8's record is incomplete and misquotes itself.** `ed0b709`'s body says "nine mutations" over a
   ten-row plan (one literal form never run — the auditor ran it: 1 failure, as predicted), and claims
   M8 was "predicted 2" when `plan.md:119` predicts **1**.
+  → **OPEN (record).** Its output is loop 030's A8, which requires the prediction column to be
+  committed in `plan.md` *before* the run and the commit body to quote that file rather than memory.
 - **A2 arm (b) yields two failures, not "exactly one".**
+  → **OPEN (record).** Loop 030's A2 asks for a *named* failing test rather than a count, which is
+  what the criterion was actually trying to buy.
 - **The `--debug` bypass stays open** (`main.ts:143`, `:171`), as does `printLiveDebug`'s
   `fetchError.message: string`, which the producer type does not reach.
+  → **Both `--debug` sites CLOSED by 030; `fetchError.message` OPEN.** `main.ts:143` and `:171` both
+  read `lastErrorMessage` off the *cache envelope*, and 030's B1 validates it in `readCacheResult`
+  before either can see it — which is why neither line had to be edited. Proved end to end by
+  `smoke.test.ts`'s `--debug` case against the compiled binary. `printLiveDebug`'s `fetchError`
+  parameter is a different value: the *live* fetch result, still typed `string`, still unnarrowed.
+  It is unreachable from a cache file and remains open.
 - **`CacheEnvelope.lastErrorMessage` is still `string | null`.** The type closes the set on
   `FetchFailure.message` only; the field actually persisted and printed is unnarrowed, and both
   writers accept `string | null`. The reviewer compiled a leak through it cleanly.
+  → **CLOSED by 030 (B2).** The field, `makeCacheEnvelope`'s parameter, `enterCooldown`'s
+  `errorMessage`, and `format.ts`'s `LastErrorInfo.message` all narrowed to
+  `SurfaceableMessage | null` in one commit. The same leak now needs an `as never` to compile, and
+  the two places 030 writes one are annotated as load-bearing.
 - **The type and the predicate disagree at the edges** — `` `Server error (${number})` `` accepts
   `-1`, `NaN`, `1e5`; the regex rejects all three. Unreachable today; the predicate is the tighter.
+  → **OPEN, and re-measured — the original claim was half wrong.** `-1` and `1e5` are accepted by the
+  template type (`1e5` renders `100000`); `NaN` and `Infinity` are *rejected* by it with TS2322. So
+  the disagreement is narrower than recorded: two values, not three. Still unreachable, since no
+  producer constructs a status outside 100–599.
 - **`ok: false, statusClass: '2xx'`** is newly reachable via `malformedResponse` and asserted nowhere.
+  → **OPEN.** Out of 030's scope fence (`client.ts` is explicitly not touched). Still unasserted.
 - **`commands.ts:26` and `enterprise.disabledReason`** remain uncovered, both deferred by name.
+  → **DEFERRED.** `packages/vscode/src` is explicitly outside 030's fence; `enterprise.disabledReason`
+  is a display concern with no §12 exposure.
 - **`metrics.db` is mode 0644, not 0600** — outside this diff entirely, reported as an observation.
+  → **DEFERRED.** Outside 030's fence too (`packages/metrics` is named in it). Carried as a standing
+  observation, not a finding against either loop.
 
 ## Retrospective
 
