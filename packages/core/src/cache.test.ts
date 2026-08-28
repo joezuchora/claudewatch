@@ -592,4 +592,22 @@ describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
     }
     expect(got).toEqual(cases);
   });
+
+  test("T9b — the two `!== 'fetchFailed'` guards keep their answers too", () => {
+    // A5 named `classify` AND the two guards at main.ts:250 / extension.ts:175; the first version
+    // of T9 drove only `classify`, which the Stage 5 audit flagged as PARTIAL. Both files are
+    // outside this loop's fence, so the guard EXPRESSION is evaluated here against the validated
+    // snapshot rather than by calling into them — same predicate, same operand, no fence excursion.
+    const guard = (staleReason: string): boolean => {
+      seed(makeTestEnvelope({
+        snapshot: makeTestSnapshot({ freshness: { isStale: true, staleReason: staleReason as never } }),
+      }));
+      return readCacheResult().envelope!.snapshot.freshness.staleReason !== 'fetchFailed';
+    };
+    // A poisoned value answers exactly as 'none' does — which is why the fallback is safe.
+    expect(guard('POISON /home/someone')).toBe(true);
+    expect(guard('none')).toBe(true);
+    // Positive control: the guard still distinguishes the member it exists for.
+    expect(guard('fetchFailed')).toBe(false);
+  });
 });

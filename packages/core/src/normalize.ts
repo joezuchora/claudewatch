@@ -5,6 +5,8 @@ import { emitProcess, schemaDriftEvent, categorizeWarning } from './telemetry.js
 // where a real warning is silently dropped on read.
 import {
   WINDOW_NAMES, resetsAtWarning, WARNING_NOT_AN_OBJECT, WARNING_NO_VALID_WINDOWS,
+  WARNING_EXTRA_USAGE_MISSING, WARNING_EXTRA_USAGE_RANGE, WARNING_EXTRA_USAGE_LIMIT,
+  WARNING_CURRENCY_DEFAULTED,
 } from './closed-sets.js';
 
 const ISO_CURRENCY_RE = /^[A-Z]{3}$/;
@@ -88,24 +90,24 @@ function parseExtraUsage(raw: unknown, warnings: string[]): EnterpriseUsage | nu
     typeof usedCredits !== 'number' || !isFinite(usedCredits) ||
     typeof isEnabled !== 'boolean'
   ) {
-    warnings.push('extra_usage present but missing required fields');
+    warnings.push(WARNING_EXTRA_USAGE_MISSING);
     return null;
   }
 
   if (utilization < 0 || utilization > 100 || usedCredits < 0 || monthlyLimit < 0) {
-    warnings.push('extra_usage present but has out-of-range values');
+    warnings.push(WARNING_EXTRA_USAGE_RANGE);
     return null;
   }
 
   if (isEnabled && monthlyLimit <= 0) {
-    warnings.push('extra_usage present but has invalid enabled monthly limit');
+    warnings.push(WARNING_EXTRA_USAGE_LIMIT);
     return null;
   }
 
   const rawCurrency = typeof obj.currency === 'string' ? obj.currency.trim().toUpperCase() : 'USD';
   const currency = ISO_CURRENCY_RE.test(rawCurrency) ? rawCurrency : 'USD';
   if (currency === 'USD' && rawCurrency !== 'USD') {
-    warnings.push('extra_usage.currency invalid; defaulted to USD');
+    warnings.push(WARNING_CURRENCY_DEFAULTED);
   }
   const disabledReason = typeof obj.disabled_reason === 'string' ? obj.disabled_reason : null;
 

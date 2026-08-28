@@ -191,6 +191,16 @@ describe("a count stated in a comment is a claim, and this one has been wrong tw
     // Positive precondition: the extraction found a real function body, not an empty string.
     expect(actual).toBeGreaterThan(0);
     expect(claimed).toBe(actual);
+
+    // And against the UNION, which is the drift direction that matters. The first version of this
+    // test compared the docstring only to the function body, so adding a ninth `SurfaceableMessage`
+    // member with no check and no docstring change left it green — demonstrated by the Stage 5
+    // audit, which did exactly that. A new message class arrives as a union member first.
+    const types = readFileSync(join(REPO_ROOT, 'packages/core/src/types.ts'), 'utf-8');
+    const union = types.slice(types.indexOf('export type SurfaceableMessage'));
+    const members = (union.slice(0, union.indexOf(';')).match(/\|/g) ?? []).length;
+    expect(members).toBeGreaterThan(0);
+    expect(claimed).toBe(members);
   });
 });
 

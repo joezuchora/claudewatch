@@ -60,6 +60,18 @@ export function resetsAtWarning(name: string): string {
   return `${name}.resets_at is not a valid ISO timestamp`;
 }
 
+// Every warning string, named, so `normalize.ts` references them instead of respelling them.
+// Commit 1 of sdlc/031 claimed all nine were sourced this way and only five were — the four below
+// were still inline literals in normalize.ts, which the Stage 5 audit caught. The property held
+// anyway because closed-sets.test.ts re-derives the set by running normalize(), but a structural
+// guarantee two artefacts asserted did not exist.
+export const WARNING_NOT_AN_OBJECT = 'Response is not an object';
+export const WARNING_NO_VALID_WINDOWS = 'No valid usage windows found';
+export const WARNING_EXTRA_USAGE_MISSING = 'extra_usage present but missing required fields';
+export const WARNING_EXTRA_USAGE_RANGE = 'extra_usage present but has out-of-range values';
+export const WARNING_EXTRA_USAGE_LIMIT = 'extra_usage present but has invalid enabled monthly limit';
+export const WARNING_CURRENCY_DEFAULTED = 'extra_usage.currency invalid; defaulted to USD';
+
 /**
  * Every string `normalize()` can put into `rawMetadata.normalizationWarnings`.
  *
@@ -73,20 +85,16 @@ export function resetsAtWarning(name: string): string {
  * `closed-sets.test.ts` re-derives this set from `normalize()` on every run, so the next producer
  * added without a row here is a red test rather than silent data loss.
  */
-/** The two `makeMalformed` warnings. Named so the call sites reference them rather than respell them. */
-export const WARNING_NOT_AN_OBJECT = 'Response is not an object';
-export const WARNING_NO_VALID_WINDOWS = 'No valid usage windows found';
-
 export const NORMALIZATION_WARNINGS: readonly string[] = [
   // From makeMalformed's literal-array arguments — NOT from warnings.push. These two are the rows
   // the spec's first table lost, because it was built from a `warnings.push` grep.
   WARNING_NOT_AN_OBJECT,
   WARNING_NO_VALID_WINDOWS,
   // From warnings.push.
-  'extra_usage present but missing required fields',
-  'extra_usage present but has out-of-range values',
-  'extra_usage present but has invalid enabled monthly limit',
-  'extra_usage.currency invalid; defaulted to USD',
+  WARNING_EXTRA_USAGE_MISSING,
+  WARNING_EXTRA_USAGE_RANGE,
+  WARNING_EXTRA_USAGE_LIMIT,
+  WARNING_CURRENCY_DEFAULTED,
   ...WINDOW_NAMES.map(resetsAtWarning),
 ];
 

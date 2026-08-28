@@ -160,11 +160,18 @@ export function readCacheResult(): CacheReadResult {
   // throttles one.
   //
   // **This does not make the envelope fully validated, and saying so was a defect in sdlc/031's own
-  // draft.** `--json` (main.ts:241, :256 -> :371) serialises the WHOLE snapshot, so
+  // draft.** `--json` serialises the WHOLE snapshot, at THREE cache-derived call sites of `output()`
+  // (main.ts:241, :256 and :310 -> :371; :291 alone is a fresh `normalize()` result), so
   // `source.usageEndpoint`, `authState`, `tier`, `display.*` and every window field still reach
   // stdout verbatim. That surface was missed for a structural reason worth remembering: a search
   // for readers of a field BY NAME cannot find a caller that stringifies the whole object. The
   // question is what gets serialised, not what gets read. Snapshot-level validation is sdlc/032.
+  //
+  // The same reference-passthrough hole is still open ONE LEVEL UP and one level down, measured
+  // rather than assumed: an unknown key on the envelope itself, on `snapshot`, on `display`, or on
+  // any window object survives this function and reaches `--json`. Only `freshness` and
+  // `rawMetadata` — the two objects this loop claims to validate — are rebuilt from known keys.
+  // Whitelisting the rest is sdlc/032's job and needs its own tests.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -223,27 +230,45 @@ export function readCacheResult(): CacheReadResult {
   // change and recorded in sdlc/031's plan.md, with positive controls showing the classifier does
   // distinguish real members. `isStale` is left alone when it is a boolean: inventing a cause for a
   // staleness we cannot explain is worse than recording none.
+  //
+  // REBUILT UNCONDITIONALLY, not only when a field is bad. The first version reconstructed the
+  // object only when a degradation fired, so an envelope whose two known fields were both valid
+  // passed `freshness` through BY REFERENCE — and any unknown sibling key on it survived to
+  // `--debug` and `--json`. Measured: a `freshness.evil` key reached stdout verbatim. The comment
+  // here already said "`freshness` is emitted whole by `printDebug`" and then drew the narrower
+  // conclusion "so both its FIELDS are surfaces". Emitted whole means every KEY is a surface.
+  // Found by sdlc/031's Stage 5 audit; it is this loop's own rule — return what you constructed,
+  // never what you read — applied to an object instead of a scalar.
   {
     const f = parsed.snapshot.freshness;
-    const staleReason = isStaleReason(f.staleReason) ? f.staleReason : 'none';
-    const isStale = typeof f.isStale === 'boolean' ? f.isStale : false;
-    if (staleReason !== f.staleReason || isStale !== f.isStale) {
-      parsed = { ...parsed, snapshot: { ...parsed.snapshot, freshness: { isStale, staleReason } } };
-    }
+    parsed = {
+      ...parsed,
+      snapshot: {
+        ...parsed.snapshot,
+        freshness: {
+          isStale: typeof f.isStale === 'boolean' ? f.isStale : false,
+          staleReason: isStaleReason(f.staleReason) ? f.staleReason : 'none',
+        },
+      },
+    };
   }
 
   // `normalizationWarnings` is printed by `--debug` and serialised by `--json`. Filtered rather than
   // emptied, so a poisoned entry costs only itself: a real warning beside it survives, which is the
   // whole value of the field on the path where it appears.
+  // Rebuilt unconditionally too, for the reason above: `rawMetadata` leaked unknown sibling keys
+  // whenever every warning happened to be valid.
   {
     const w: unknown = parsed.snapshot.rawMetadata?.normalizationWarnings;
-    const kept = Array.isArray(w) ? w.filter(isNormalizationWarning) : [];
-    if (!Array.isArray(w) || kept.length !== w.length) {
-      parsed = {
-        ...parsed,
-        snapshot: { ...parsed.snapshot, rawMetadata: { normalizationWarnings: kept } },
-      };
-    }
+    parsed = {
+      ...parsed,
+      snapshot: {
+        ...parsed.snapshot,
+        rawMetadata: {
+          normalizationWarnings: Array.isArray(w) ? w.filter(isNormalizationWarning) : [],
+        },
+      },
+    };
   }
 
   parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };

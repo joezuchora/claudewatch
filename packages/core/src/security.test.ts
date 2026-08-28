@@ -470,6 +470,28 @@ describe('§12: no value off a cache file reaches a surface unvalidated (sdlc/03
     expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual([]);
   });
 
+  test('unknown SIBLING keys on freshness and rawMetadata are stripped', () => {
+    // Found by sdlc/031's Stage 5 audit, and it is this loop's own rule one level up: the first
+    // version rebuilt these objects only when a field was bad, so an envelope whose known fields
+    // were all VALID passed them through by reference and any extra key rode along to `--debug`
+    // (which emits `freshness` whole) and `--json` (which emits everything).
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({}),
+      snapshot: {
+        ...makeTestSnapshot(),
+        freshness: { isStale: false, staleReason: 'none', evil: `f ${POISON}` },
+        rawMetadata: { normalizationWarnings: [], evil: `r ${POISON}` },
+      },
+    }), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    // Both known fields are VALID here on purpose — that is the case the first version missed.
+    expect(result.envelope!.snapshot.freshness).toEqual({ isStale: false, staleReason: 'none' });
+    expect(result.envelope!.snapshot.rawMetadata).toEqual({ normalizationWarnings: [] });
+    expect(JSON.stringify(result.envelope)).not.toContain(POISON);
+  });
+
   test('an honest envelope is untouched — the positive control for all six above', () => {
     // Without this, every assertion above passes just as well for a reader that blanks these
     // fields unconditionally, which is a different and useless guard.
