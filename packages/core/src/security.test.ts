@@ -254,18 +254,24 @@ describe('security: telemetry never leaks secrets or environment', () => {
   });
 });
 
+// Hoisted to module scope, not nested in the describe: `unicorn(consistent-function-scoping)` fires
+// on a helper that captures nothing from its parent, and sdlc/029's A7 pins the warning count. The
+// first version of this block nested both and pushed the count 11 -> 13 — the exact trap loop 028's
+// own A6 named in writing ("a test written with a nested helper would trip this"), walked into one
+// loop later. Found by the sdlc/029 plan-to-diff audit.
+const mockSurfaceFetch = (impl: (...a: unknown[]) => Promise<Response>): void => {
+  globalThis.fetch = impl as unknown as typeof fetch;
+};
+const jsonResponse = (status: number): Response =>
+  new Response('{}', { status, headers: { 'Content-Type': 'application/json' } });
+
 // === SPEC.md §12: "It must redact sensitive values from all surfaced errors" ===
 
 describe('§12: every surfaceable error message is a literal this repo wrote', () => {
   const realFetch = globalThis.fetch;
   afterEach(() => { globalThis.fetch = realFetch; });
 
-  const mockFetch = (impl: (...a: unknown[]) => Promise<Response>): void => {
-    globalThis.fetch = impl as unknown as typeof fetch;
-  };
   const FAST = { retryDelayMs: 0, timeoutMs: 25 } as const;
-  const json = (status: number): Response =>
-    new Response('{}', { status, headers: { 'Content-Type': 'application/json' } });
 
   /**
    * All SEVEN failure paths `fetchUsage` can take, asserted individually.
@@ -282,12 +288,12 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
    */
   test('all seven fetch failure paths produce a surfaceable message', async () => {
     const cases: Array<[string, () => void, string]> = [
-      ['401', () => mockFetch(async () => json(401)), 'Authentication failed (401)'],
-      ['429', () => mockFetch(async () => json(429)), 'Rate limited (429)'],
-      ['5xx', () => mockFetch(async () => json(503)), 'Server error (503)'],
-      ['unexpected', () => mockFetch(async () => json(418)), 'Unexpected status 418'],
-      ['network', () => mockFetch(async () => { throw new TypeError('fetch failed: getaddrinfo ENOTFOUND some.host'); }), 'Network error'],
-      ['malformed', () => mockFetch(async () => new Response('not json', { status: 200 })), 'Malformed response'],
+      ['401', () => mockSurfaceFetch(async () => jsonResponse(401)), 'Authentication failed (401)'],
+      ['429', () => mockSurfaceFetch(async () => jsonResponse(429)), 'Rate limited (429)'],
+      ['5xx', () => mockSurfaceFetch(async () => jsonResponse(503)), 'Server error (503)'],
+      ['unexpected', () => mockSurfaceFetch(async () => jsonResponse(418)), 'Unexpected status 418'],
+      ['network', () => mockSurfaceFetch(async () => { throw new TypeError('fetch failed: getaddrinfo ENOTFOUND some.host'); }), 'Network error'],
+      ['malformed', () => mockSurfaceFetch(async () => new Response('not json', { status: 200 })), 'Malformed response'],
     ];
 
     // Collected and asserted as one array rather than per-case: bun's `expect` takes no label
@@ -304,7 +310,7 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
     // Seventh: the REAL timeout. The mock honours the abort signal as real fetch does, so client's
     // own timer fires and sets `timedOut`. A synthetic AbortError would leave that flag false and
     // silently test the network branch instead — which is what the contract suite did for 29 loops.
-    mockFetch((_u: unknown, init: unknown) => new Promise<Response>((_res, rej) => {
+    mockSurfaceFetch((_u: unknown, init: unknown) => new Promise<Response>((_res, rej) => {
       const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
       signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
     }));

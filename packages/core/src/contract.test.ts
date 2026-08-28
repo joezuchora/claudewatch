@@ -296,7 +296,7 @@ describe('contract: valid JSON with missing required fields', () => {
 });
 
 describe('contract: network timeout', () => {
-  test('aborted fetch returns serviceUnavailable', async () => {
+  test('a real timeout returns failureClass TIMEOUT, not serviceUnavailable', async () => {
     // Drives the REAL timeout: a fetch that never settles, so client.ts's own timer fires and sets
     // `timedOut`. The previous version threw a synthetic AbortError from the mock, which leaves
     // `timedOut` FALSE — so a test named "network timeout" never entered the timeout branch and

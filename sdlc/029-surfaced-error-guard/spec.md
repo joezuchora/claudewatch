@@ -134,7 +134,23 @@ passing while testing the wrong branch.
 ## The redactor decision, unchanged and now actually true
 
 **No redactor is built.** After B1/B1b every produced message is a literal this repo wrote, and after
-B3 every consumed message is checked against that set. A `sk-ant-` stripper would defend a path no
+B3 every message consumed **through `extractLastError`** is checked against that set.
+
+CORRECTED after the Stage 5 audit: an earlier revision said "every consumed message is checked", full
+stop. That is false. `packages/statusline/src/main.ts:143` and `:171` read `lastErrorMessage` off the
+envelope **directly**, never through `extractLastError`, so a pre-029 cache file's free text still
+reaches `--debug` stdout verbatim. `grep -rn "isSurfaceableMessage\|extractLastError"
+packages/statusline/src` returns nothing. The Risks section mentioned `--debug` but framed it as a
+§17 documentation gap, not as a hole in the very gate B3 exists to close.
+
+**Not fixed here, and queued.** Closing it means importing the predicate into `packages/statusline`,
+which this plan's fence explicitly excludes — and widening a fence to cover a hole found in Stage 5
+is how loops start eating each other. `--json` is clean: it dumps the snapshot, not the envelope.
+
+Also unpropagated: `printLiveDebug`'s `fetchError` parameter is typed `{ …; message: string }`
+(`main.ts:158`), not `SurfaceableMessage`, so the producer-side type does not reach that surface.
+Harmless today — its only caller passes a real `FetchResult` — but it is a hole in the "compile error
+for a free-text producer" story, not a completion of it. A `sk-ant-` stripper would defend a path no
 message travels — loop 028's characterization-test error one level up.
 
 Two facts make it actively wrong, not merely redundant:

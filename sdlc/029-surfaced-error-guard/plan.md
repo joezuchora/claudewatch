@@ -10,7 +10,9 @@ Implements B1, B1b, B2, B3, B4 against A1–A9.
 
 ## Scope fence
 
-Eight paths. Two are new.
+**Nine paths** — corrected after the Stage 5 audit, which found the prose said "eight" over a
+nine-row table. Loop 028's plan made the identical miscount ("nine" over eleven rows) and its audit
+caught that too; writing the lesson down did not prevent the repeat. Two are new.
 
 | Path | Change | Criterion |
 |---|---|---|
@@ -23,6 +25,13 @@ Eight paths. Two are new.
 | `packages/core/src/client.test.ts` | `:92` assertion changes | A6 |
 | `packages/core/src/contract.test.ts` | `:303` and `:317` assertions change | A6 |
 | `SPEC.md` | §12 gains a pointer to the enforcing test | A5 |
+
+**Excursions, recorded after the fact:**
+
+| Path | Why necessary | Declared where |
+|---|---|---|
+| `packages/core/src/exhaustive-guard.test.ts` | the typefixture needs an assertion, and the harness pins the fixture count | `ed0b709`'s commit body, at the time |
+| `packages/core/src/snapshot.test.ts` | B3's gate nulls two fixtures seeding strings no producer emits | **nowhere** until now — it appears in `706dac4` only as evidence in the A6 discussion, never labelled an excursion |
 
 **Explicitly not touched:** `packages/statusline`, `packages/vscode`, `packages/metrics`,
 `format.ts`, `tooltip.ts`, `normalize.ts`, `cache.ts`, `scripts/`, `.oxlintrc.json`, `CLAUDE.md`.
