@@ -267,6 +267,44 @@ describe('smoke: --debug never prints free text off a cache file', () => {
 
 const p = (n: number): string => String(n).padStart(2, '0');
 
+// Hoisted to module scope so BOTH describe blocks can use them — and because a helper that
+// captures nothing trips unicorn(consistent-function-scoping), the trap loop 028 named in
+// writing and loops 029 and 031 each walked into.
+
+/**
+ * A `fetchedAt` that is poisoned AND parses to roughly now.
+ *
+ * This matters for --json and took a measurement to get right. `--debug` returns before any
+ * freshness check, so it takes any seed; `--json` only reaches `output()` at main.ts:241 when
+ * `isCacheFresh` is true. An ISO string with a suffix does not parse at all, and a bare date
+ * parses to midnight — both leave the cache stale and route --json somewhere else entirely.
+ * Date.parse's legacy path ignores parenthesised text, so a full local date-time plus a
+ * parenthesised suffix parses to ~now and stays fresh.
+ */
+function poisonedButFresh(marker: string): string {
+  const d = new Date();
+  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+  return `${mon} ${d.getDate()} ${d.getFullYear()} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} (${marker})`;
+}
+
+function runFlag(flag: string, env: Record<string, string>): Promise<RunResult> {
+  return new Promise((res) => {
+    const started = Date.now();
+    const child = spawn(BIN, [flag], {
+      env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let stdout = '';
+    child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 20000);
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      res({ code, stdout, timedOut, ms: Date.now() - started });
+    });
+  });
+}
+
 describe('smoke: neither --debug nor --json prints free text off a cache file', () => {
   // Four DISTINGUISHABLE poisons, one per validated field, in one envelope. A single-check
   // mutation then fails with a message naming which field leaked, rather than a bare "output
@@ -278,51 +316,19 @@ describe('smoke: neither --debug nor --json prints free text off a cache file', 
     warning: 'LEAK-WARNING-/home/someone',
   };
 
-  /**
-   * A `fetchedAt` that is poisoned AND parses to roughly now.
-   *
-   * This matters for --json and took a measurement to get right. `--debug` returns before any
-   * freshness check, so it takes any seed; `--json` only reaches `output()` at main.ts:241 when
-   * `isCacheFresh` is true. An ISO string with a suffix does not parse at all, and a bare date
-   * parses to midnight — both leave the cache stale and route --json somewhere else entirely.
-   * Date.parse's legacy path ignores parenthesised text, so a full local date-time plus a
-   * parenthesised suffix parses to ~now and stays fresh.
-   */
-  function poisonedButFresh(): string {
-    const d = new Date();
-    const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
-    return `${mon} ${d.getDate()} ${d.getFullYear()} `
-      + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} (${P.fetchedAt})`;
-  }
 
   function seedPoisoned(): SandboxSeed {
     return seedSandboxHome({
       prefix: 'cw-smoke-poison-',
       accessToken: FAKE_TOKEN,
       snapshot: makeTestSnapshot({
-        fetchedAt: poisonedButFresh(),
+        fetchedAt: poisonedButFresh(P.fetchedAt),
         freshness: { isStale: P.isStale, staleReason: P.staleReason },
         rawMetadata: { normalizationWarnings: [P.warning, 'Response is not an object'] },
       } as never),
     });
   }
 
-  function runFlag(flag: string, env: Record<string, string>): Promise<RunResult> {
-    return new Promise((res) => {
-      const started = Date.now();
-      const child = spawn(BIN, [flag], {
-        env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      let stdout = '';
-      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 20000);
-      child.on('exit', (code) => {
-        clearTimeout(timer);
-        res({ code, stdout, timedOut, ms: Date.now() - started });
-      });
-    });
-  }
 
   test('T5 — --debug', async () => {
     // Network-inert twice over: --debug without --refresh returns at main.ts:204-207 before
@@ -368,6 +374,95 @@ describe('smoke: neither --debug nor --json prints free text off a cache file', 
         expect(`${field}: ${r.stdout}`).not.toContain(poison);
       }
       expect(r.stdout).toContain('Response is not an object');
+    } finally {
+      rmSync(seedP.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+const M = (k: string): string => `MARK_${k}`;
+
+describe('smoke: 26 poisoned values reach neither --debug nor --json (sdlc/032)', () => {
+
+  const SNAPSHOT_KEYS = [
+    'tier', 'authState', 'usageEndpoint', 'sourceExtra',
+    'primaryWindow', 'primaryPct', 'primaryResetsAt', 'displayExtra',
+    'fiveResetsAt', 'fiveExtra', 'sevenPct', 'sevenResetsAt', 'sevenExtra',
+    'opusPct', 'opusResetsAt', 'opusExtra',
+    'entPct', 'entLimit', 'entUsed', 'currency', 'entEnabled', 'disabledReason', 'entExtra',
+    'snapshotExtra',
+  ];
+
+  function poisonedSnapshot(): Record<string, unknown> {
+    const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+    // fetchedAt is poisoned but stays FRESH — see poisonedButFresh above. A poisoned-unparseable
+    // fetchedAt degrades to the sentinel, isCacheFresh goes false, and --json routes to an expired
+    // credential and exit 2, where every not.toContain assertion would hold against a snapshot the
+    // cache never produced.
+    s.fetchedAt = poisonedButFresh(M('fetchedAt'));
+    s.tier = M('tier');
+    s.authState = M('authState');
+    s.source = { usageEndpoint: M('usageEndpoint'), extra: M('sourceExtra') };
+    // fiveHour keeps a real utilizationPct so the fresh-cache path renders a normal line; its
+    // resetsAt and an unknown key still carry markers.
+    s.fiveHour = { utilizationPct: 42, resetsAt: M('fiveResetsAt'), extra: M('fiveExtra') };
+    s.sevenDay = { utilizationPct: M('sevenPct'), resetsAt: M('sevenResetsAt'), extra: M('sevenExtra') };
+    s.sevenDayOpus = { utilizationPct: M('opusPct'), resetsAt: M('opusResetsAt'), extra: M('opusExtra') };
+    s.display = {
+      primaryWindow: M('primaryWindow'), primaryUtilizationPct: M('primaryPct'),
+      primaryResetsAt: M('primaryResetsAt'), extra: M('displayExtra'),
+    };
+    s.enterprise = {
+      utilizationPct: M('entPct'), monthlyLimitCredits: M('entLimit'), usedCredits: M('entUsed'),
+      currency: M('currency'), isEnabled: M('entEnabled'), disabledReason: M('disabledReason'),
+      extra: M('entExtra'),
+    };
+    s.extraSnapshotKey = M('snapshotExtra');
+    return s;
+  }
+
+  function seedPoisoned26(): SandboxSeed {
+    return seedSandboxHome({
+      prefix: 'cw-smoke-26-',
+      accessToken: FAKE_TOKEN,
+      snapshot: poisonedSnapshot() as never,
+      envelope: { lastHttpStatus: M('httpStatus') as never },
+    });
+  }
+
+  test('T2 — --debug', async () => {
+    const seedP = seedPoisoned26();
+    try {
+      const r = await runFlag('--debug', seedP.env);
+      expect(r.timedOut).toBe(false);
+      expect(r.code).toBe(0);
+      const out = JSON.parse(r.stdout) as Record<string, unknown>;
+      // Preconditions: the cache was READ, and it was THIS envelope.
+      expect(typeof out.cacheAgeSec).toBe('number');
+      expect(out.freshness).toBeDefined();
+
+      expect(SNAPSHOT_KEYS.filter((k) => r.stdout.includes(M(k)))).toEqual([]);
+      // lastHttpStatus is an ENVELOPE field and DOES reach --debug, so it is asserted here and
+      // deliberately NOT in T3.
+      expect(r.stdout).not.toContain(M('httpStatus'));
+    } finally {
+      rmSync(seedP.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('T3 — --json, which serialises the whole snapshot', async () => {
+    const seedP = seedPoisoned26();
+    try {
+      const r = await runFlag('--json', seedP.env);
+      expect(r.timedOut).toBe(false);
+      expect(r.code).toBe(0);
+      const snap = JSON.parse(r.stdout) as { fetchedAt: string; freshness: unknown };
+      // Precondition: this is the fresh-cache path serialising the CACHED snapshot. An error path
+      // exits 2, and a stale path would rewrite freshness.
+      expect(snap.freshness).toBeDefined();
+      expect(snap.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      expect(SNAPSHOT_KEYS.filter((k) => r.stdout.includes(M(k)))).toEqual([]);
     } finally {
       rmSync(seedP.home, { recursive: true, force: true });
     }

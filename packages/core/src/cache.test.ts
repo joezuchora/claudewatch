@@ -4,7 +4,10 @@ import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope
 import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
 import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 import { classify } from './state.js';
+import { formatStatusLine } from './format.js';
 import { UNKNOWN_FETCHED_AT, NORMALIZATION_WARNINGS, MAX_NORMALIZATION_WARNINGS } from './closed-sets.js';
+import { makeRichTestSnapshot } from './test-helpers.js';
+import { sanitizeSnapshot } from './sanitize-snapshot.js';
 
 describe('cache', () => {
   let tempDir: string;
@@ -681,5 +684,97 @@ describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
     expect(guard('none')).toBe(true);
     // Positive control: the guard still distinguishes the member it exists for.
     expect(guard('fetchFailed')).toBe(false);
+  });
+});
+
+describe('the whitelist rebuild fails by DROPPING, so the round-trip is the net (sdlc/032)', () => {
+  let cleanup3: () => void;
+  beforeEach(() => { ({ cleanup: cleanup3 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup3(); });
+
+  test('T5 — a rich envelope round-trips STRICTLY', () => {
+    const envelope = makeTestEnvelope({ snapshot: makeRichTestSnapshot() });
+    writeFileSync(getCachePath(), JSON.stringify(envelope), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    // toStrictEqual, not toEqual. Measured in bun 1.3.11:
+    //   expect({x:1, y:undefined}).toEqual({x:1})       -> PASSES
+    //   expect({x:1, y:undefined}).toStrictEqual({x:1}) -> fails
+    // so a rebuild that set a field to `undefined` would round-trip green under toEqual.
+    expect(result.envelope).toStrictEqual(envelope);
+  });
+
+  test('T6 — the round-trip fixture is not vacuous', () => {
+    // THE criterion. A whitelist's failure mode is a dropped field, and a round-trip only catches
+    // that if the fixture's value DIFFERS from what the rebuild would substitute. sdlc/032's Stage 2
+    // reviewer showed a rebuild that drops `currency` and hardcodes 'USD' passing both the
+    // round-trip and the `'zz' -> 'USD'` edge case — while formatting every non-USD account with
+    // the wrong symbol and the wrong minor-unit divisor.
+    //
+    // Six of makeTestSnapshot's defaults ARE their own degraded values, which is why
+    // makeRichTestSnapshot exists. This asserts leaf by leaf that it still does its job.
+    const rich = makeRichTestSnapshot();
+    const degraded = sanitizeSnapshot({});   // every field at its substitute value
+
+    const same: string[] = [];
+    const check = (label: string, a: unknown, b: unknown): void => {
+      if (JSON.stringify(a) === JSON.stringify(b)) same.push(label);
+    };
+    check('source', rich.source, degraded.source);
+    check('authState', rich.authState, degraded.authState);
+    check('tier', rich.tier, degraded.tier);
+    check('fiveHour', rich.fiveHour, degraded.fiveHour);
+    check('sevenDay', rich.sevenDay, degraded.sevenDay);
+    check('sevenDayOpus', rich.sevenDayOpus, degraded.sevenDayOpus);
+    check('enterprise', rich.enterprise, degraded.enterprise);
+    check('display', rich.display, degraded.display);
+    check('freshness', rich.freshness, degraded.freshness);
+    check('rawMetadata', rich.rawMetadata, degraded.rawMetadata);
+    check('fetchedAt', rich.fetchedAt, degraded.fetchedAt);
+    expect(same).toEqual([]);
+
+    // Positive precondition: `degraded` really is the substitute set, not another rich snapshot.
+    expect(degraded.tier).toBe('unknown');
+    expect(degraded.enterprise).toBeNull();
+    // And the two the reviewer named specifically.
+    expect(rich.enterprise!.currency).not.toBe('USD');
+    expect(rich.enterprise!.disabledReason).not.toBeNull();
+  });
+
+  test('T8 — a poisoned snapshot keeps the envelope and the cooldown', () => {
+    const cooldownUntil = new Date(Date.now() + 120_000).toISOString();
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({ cooldownUntil }),
+      snapshot: { ...makeTestSnapshot(), authState: 'POISON', tier: 'POISON' },
+    }), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(isInCooldown(result.envelope!)).toBe(true);
+    // "resolves to the same instant", not byte-identical: sanitizeCooldownUntil canonicalises.
+    expect(new Date(result.envelope!.cooldownUntil!).getTime())
+      .toBe(new Date(cooldownUntil).getTime());
+  });
+
+  test('T10 — a poisoned enterprise.utilizationPct no longer throws', () => {
+    // Before sdlc/032 this reached format.ts as a string and threw `pct.toFixed is not a function`
+    // — out of main(), into the top-level catch, exit 3, with the cache file never deleted, so
+    // every render repeated it forever. A §9 stuck-failure loop that no artefact in this loop
+    // claimed until the Stage 2 review found it.
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({}),
+      snapshot: {
+        ...makeRichTestSnapshot(),
+        enterprise: { ...makeRichTestSnapshot().enterprise, utilizationPct: 'POISON' },
+      },
+    }), { mode: 0o600 });
+
+    const snapshot = readCacheResult().envelope!.snapshot;
+    expect(snapshot.enterprise).toBeNull();
+    // The render that used to throw now runs. This is the assertion, not the absence of a throw:
+    // a test that merely does not throw passes when the code under it is never reached.
+    expect(() => formatStatusLine(snapshot, 120)).not.toThrow();
+    expect(typeof formatStatusLine(snapshot, 120)).toBe('string');
   });
 });

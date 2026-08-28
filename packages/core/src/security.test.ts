@@ -506,3 +506,71 @@ describe('§12: no value off a cache file reaches a surface unvalidated (sdlc/03
     expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual(['No valid usage windows found']);
   });
 });
+
+/** The 26 poisoned values sdlc/032 measured leaking, one marker each. */
+const M = (k: string): string => `MARK_${k}`;
+
+function poisonedEnvelope(): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.fetchedAt = M('fetchedAt');
+  s.tier = M('tier');
+  s.authState = M('authState');
+  s.source = { usageEndpoint: M('usageEndpoint'), extra: M('sourceExtra') };
+  s.display = {
+    primaryWindow: M('primaryWindow'), primaryUtilizationPct: M('primaryPct'),
+    primaryResetsAt: M('primaryResetsAt'), extra: M('displayExtra'),
+  };
+  for (const [w, t] of [['fiveHour', 'five'], ['sevenDay', 'seven'], ['sevenDayOpus', 'opus']]) {
+    s[w!] = { utilizationPct: M(`${t}Pct`), resetsAt: M(`${t}ResetsAt`), extra: M(`${t}Extra`) };
+  }
+  s.enterprise = {
+    utilizationPct: M('entPct'), monthlyLimitCredits: M('entLimit'), usedCredits: M('entUsed'),
+    currency: M('currency'), isEnabled: M('entEnabled'), disabledReason: M('disabledReason'),
+    extra: M('entExtra'),
+  };
+  s.extraSnapshotKey = M('snapshotExtra');
+  return { ...makeTestEnvelope({}), snapshot: s, lastHttpStatus: M('httpStatus') };
+}
+
+const POISON_KEYS = [
+  'fetchedAt', 'tier', 'authState', 'usageEndpoint', 'sourceExtra',
+  'primaryWindow', 'primaryPct', 'primaryResetsAt', 'displayExtra',
+  'fivePct', 'fiveResetsAt', 'fiveExtra', 'sevenPct', 'sevenResetsAt', 'sevenExtra',
+  'opusPct', 'opusResetsAt', 'opusExtra',
+  'entPct', 'entLimit', 'entUsed', 'currency', 'entEnabled', 'disabledReason', 'entExtra',
+  'snapshotExtra',
+];
+
+describe('§12: no value off a cache file survives unvalidated (sdlc/032)', () => {
+  test('T1 — all 26 measured values, none survives', () => {
+    // 26, and the first count taken was 14. That probe poisoned fiveHour but not the other two
+    // windows, three of enterprise's six fields but not the rest, and never seeded an unknown key
+    // at the enterprise level — a level the spec's own edge-case table asserted. An enumeration
+    // presented as the counter-measure against a miscount, built from an incomplete probe.
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnvelope()), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');   // degraded, not discarded
+    const out = JSON.stringify(result.envelope);
+
+    // Collected, so a failure names WHICH values leaked rather than just that one did.
+    expect(POISON_KEYS.filter((k) => out.includes(`MARK_${k}`))).toEqual([]);
+
+    // Positive precondition: the fixture really carried all 26, so the assertion above is not
+    // passing because the markers were never there.
+    const seeded = JSON.stringify(poisonedEnvelope());
+    expect(POISON_KEYS.filter((k) => !seeded.includes(`MARK_${k}`))).toEqual([]);
+  });
+
+  test('T14 — a non-integer lastHttpStatus is nulled', () => {
+    // An ENVELOPE field: sanitizeSnapshot cannot reach it, and it reaches `--debug` verbatim while
+    // NOT reaching `--json`, which serialises the snapshot. That asymmetry is why the two
+    // end-to-end cases differ on this field.
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnvelope()), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastHttpStatus).toBeNull();
+
+    // Positive control: a real status survives.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({ lastHttpStatus: 503 })), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastHttpStatus).toBe(503);
+  });
+});

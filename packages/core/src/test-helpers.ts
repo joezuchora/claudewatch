@@ -10,6 +10,7 @@ import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 import type { UsageSnapshot, CacheEnvelope, CredentialFile } from './types.js';
 import { setCacheBaseDir, makeCacheEnvelope } from './cache.js';
+import { NORMALIZATION_WARNINGS } from './closed-sets.js';
 
 /**
  * Create a valid UsageSnapshot with sensible defaults.
@@ -31,6 +32,49 @@ export function makeTestSnapshot(overrides?: Partial<UsageSnapshot>): UsageSnaps
     rawMetadata: { normalizationWarnings: [] },
     ...overrides,
   };
+}
+
+/**
+ * A snapshot in which EVERY leaf differs from that leaf's own degraded value.
+ *
+ * `makeTestSnapshot`'s defaults are, for six leaves, identical to what `sanitizeSnapshot` would
+ * substitute: `sevenDayOpus` is `null/null`, `enterprise` is `null`, `isStale` is `false`,
+ * `staleReason` is `'none'`, and `normalizationWarnings` is `[]`. A round-trip test built on those
+ * defaults passes for a rebuild that DROPS those fields and hardcodes the substitute — the Stage 2
+ * reviewer of sdlc/032 demonstrated it with `currency`, where dropping the field and hardcoding
+ * `'USD'` satisfies both the round-trip and the `'zz' -> 'USD'` edge case while formatting every
+ * non-USD account with the wrong symbol and divisor.
+ *
+ * A whitelist rebuild fails by DROPPING a field, not by leaking one, so this fixture is the only
+ * thing standing between that failure mode and silence. `cache.test.ts` asserts leaf-by-leaf that
+ * every value here differs from its degraded counterpart, so the fixture cannot go vacuous
+ * silently the way its predecessor did.
+ */
+export function makeRichTestSnapshot(): UsageSnapshot {
+  return makeTestSnapshot({
+    fetchedAt: '2026-08-01T12:34:56.000Z',      // canonical, and NOT the current time
+    source: { usageEndpoint: 'success' },        // degrade is 'unavailable'
+    authState: 'valid',                          // degrade is 'unknown'
+    tier: 'enterprise',                          // degrade is 'unknown'; coherent with `enterprise`
+    fiveHour: { utilizationPct: 42, resetsAt: '2026-03-07T17:00:00.000Z' },
+    sevenDay: { utilizationPct: 18, resetsAt: '2026-03-14T07:00:00.000Z' },
+    sevenDayOpus: { utilizationPct: 7, resetsAt: '2026-03-21T09:00:00.000Z' },
+    enterprise: {
+      utilizationPct: 12.5,
+      monthlyLimitCredits: 200000,
+      usedCredits: 25000,
+      currency: 'EUR',                           // degrade is 'USD' — the reviewer's example
+      isEnabled: false,                          // degrade is "nulls the object"
+      disabledReason: 'Disabled by your administrator',   // degrade is null
+    },
+    display: {
+      primaryWindow: 'enterprise',               // degrade is 'unknown'
+      primaryUtilizationPct: 12.5,
+      primaryResetsAt: '2026-03-07T17:00:00.000Z',
+    },
+    freshness: { isStale: true, staleReason: 'malformedResponse' },  // degrades: false, 'none'
+    rawMetadata: { normalizationWarnings: [...NORMALIZATION_WARNINGS] },  // degrade is []
+  });
 }
 
 /**

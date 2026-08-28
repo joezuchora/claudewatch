@@ -100,7 +100,7 @@ describe('type fixture harness', () => {
     // ("this file produced no diagnostics") is VACUOUS for a file tsc never opened. So this
     // reads `--listFiles` output and matches it against the directory. (sdlc/014 review.)
     const onDisk = readdirSync(FIXTURE_DIR).filter(f => f.endsWith('.ts'));
-    expect(onDisk.length).toBe(6);   // 029 added free-text-message; 030 added widened-cache-message
+    expect(onDisk.length).toBe(7);   // 029 free-text-message; 030 widened-cache-message; 032 payload-string
 
     const compiled = compiledFiles();
     for (const f of onDisk) {
@@ -130,6 +130,18 @@ describe('the guards fail when their subject is missing', () => {
     const errors = diagnosticsFor('real-union-omission.expect-error.ts');
     expect(errors.join('\n')).toContain('error TS2322');
     expect(errors.join('\n')).toContain('"timeout"');
+  });
+
+  test('T9 — a string payload leaf fails typecheck', () => {
+    // sdlc/032. SPEC §17 required this as prose for six loops and renderEvent's own comment
+    // asserted it. Narrowing renderEvent's two PARAMETERS does not deliver it: the Stage 2 reviewer
+    // added a `newFreeText?: string`, passed it into the payload, and typecheck exited 0 — because
+    // MetricEvent.payload was Record<string, string | number | boolean | null> and `string` was
+    // structurally legal. Narrowing the payload's VALUE type is what closes it.
+    const errors = diagnosticsFor('payload-string.expect-error.ts');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.join('\n')).toContain('error TS2322');
+    expect(errors.join('\n')).toContain('PayloadLeaf');
   });
 
   test('re-widening any of the four narrowed message sites fails typecheck', () => {
