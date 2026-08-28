@@ -221,16 +221,21 @@ describe('contract: 5xx response', () => {
 });
 
 describe('contract: malformed JSON response', () => {
-  test('non-JSON response body causes network error on json()', async () => {
+  test('non-JSON response body is a MALFORMED RESPONSE, not a network error', async () => {
+    // Renamed and re-asserted by sdlc/029. This test previously asserted `serviceUnavailable` and
+    // was named "causes network error on json()" — so the seventh failure path was not undiscovered,
+    // it was ENSHRINED: a contract test documented the misclassification as correct behaviour.
+    // SPEC.md §7.2 has always defined "Malformed response"; nothing constructed it until now.
     mockFetch(async () => new Response('not json at all', {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
     const result = await fetchUsage('test-token', FAST);
-    // response.json() will throw on invalid JSON
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failureClass).toBe('serviceUnavailable');
+      expect(result.failureClass).toBe('malformedResponse');
+      expect(result.message).toBe('Malformed response');
+      expect(result.status).toBe(200);          // a 200 that is still a failure
     }
   });
 
@@ -292,15 +297,27 @@ describe('contract: valid JSON with missing required fields', () => {
 
 describe('contract: network timeout', () => {
   test('aborted fetch returns serviceUnavailable', async () => {
-    mockFetch(async () => {
-      // Simulate abort
-      throw new DOMException('The operation was aborted', 'AbortError');
-    });
-    const result = await fetchUsage('test-token', FAST);
+    // Drives the REAL timeout: a fetch that never settles, so client.ts's own timer fires and sets
+    // `timedOut`. The previous version threw a synthetic AbortError from the mock, which leaves
+    // `timedOut` FALSE — so a test named "network timeout" never entered the timeout branch and
+    // would now assert 'Network error'. sdlc/029's plan named this trap in advance; running it
+    // confirmed it. This is the SPEC.md §15.2 "Network timeout (>5s)" scenario, finally testing it.
+    mockFetch((_url: unknown, init: unknown) => new Promise<Response>((_resolve, reject) => {
+      // The mock must HONOUR the abort signal, as real fetch does. A promise that merely never
+      // settles hangs until bun's own 5s per-test cap — measured, on the first version of this
+      // edit. Honouring it is also what makes this different from the synthetic AbortError it
+      // replaces: client.ts's real timer fires FIRST and sets `timedOut`, then the abort arrives.
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      signal?.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted', 'AbortError')));
+    }));
+    // timeoutMs must be small: a never-settling fetch is retried once, so the default 5000ms would
+    // cost 2 x 5s and blow bun's own 5s per-test cap. Measured — the first version of this edit did.
+    const result = await fetchUsage('test-token', { retryDelayMs: 0, timeoutMs: 25 });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failureClass).toBe('serviceUnavailable');
-      expect(result.message).toContain('aborted');
+      expect(result.failureClass).toBe('timeout');
+      expect(result.message).toBe('Request timed out');
     }
   });
 });
@@ -314,7 +331,9 @@ describe('contract: DNS resolution failure', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
-      expect(result.message).toContain('DNS');
+      // No longer asserts on the platform's DNS wording: the message is now a constant this repo
+      // produces. The DNS-ness of the failure is the mock's business, not the message's. (sdlc/029)
+      expect(result.message).toBe('Network error');
     }
   });
 });

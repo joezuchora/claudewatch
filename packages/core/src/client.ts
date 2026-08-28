@@ -1,4 +1,4 @@
-import type { FailureClass, FetchResult } from './types.js';
+import type { FailureClass, FetchResult, SurfaceableMessage } from './types.js';
 import { failurePolicy } from './cooldown.js';
 import { emitProcess, fetchResultEvent } from './telemetry.js';
 import type { StatusClass } from './telemetry.js';
@@ -83,7 +83,17 @@ async function singleFetch(token: string, signal?: AbortSignal): Promise<FetchRe
   });
 
   if (response.status === 200) {
-    const data: unknown = await response.json();
+    // `response.json()` gets its own try. Unguarded, a 200 with an unparseable body propagated to
+    // fetchUsage's catch and became a status-less `serviceUnavailable` carrying err.message — a
+    // SEVENTH failure path, found by sdlc/029's spec review. It is also the only path whose message
+    // could be influenced by remote data (the body). `malformedResponse` is the class SPEC.md §7.2
+    // already defines for exactly this, and which cooldown.ts noted was never constructed anywhere.
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      return { ok: false, status: 200, failureClass: 'malformedResponse', message: 'Malformed response' };
+    }
     return { ok: true, status: 200, data };
   }
 
@@ -145,6 +155,27 @@ function statusClassOf(result: FetchResult): StatusClass {
   return '2xx';
 }
 
+/**
+ * Is this string one of the messages this repo produces?
+ *
+ * The type closes the set at the PRODUCER; this closes it at the CONSUMER, where a type cannot
+ * reach: `extractLastError` reads `lastErrorMessage` off disk, and a cache file written by an older
+ * version may hold free text. Exactly seven literal forms, one per `SurfaceableMessage` member —
+ * sdlc/029's mutation table has one row per form, so the shape is load-bearing.
+ */
+export function isSurfaceableMessage(m: string | null | undefined): m is SurfaceableMessage {
+  if (typeof m !== 'string') return false;
+  return (
+    m === 'Authentication failed (401)' ||
+    m === 'Rate limited (429)' ||
+    m === 'Network error' ||
+    m === 'Request timed out' ||
+    m === 'Malformed response' ||
+    /^Server error \(\d+\)$/.test(m) ||
+    /^Unexpected status \d+$/.test(m)
+  );
+}
+
 export async function fetchUsage(
   token: string,
   options: FetchOptions = {},
@@ -194,10 +225,18 @@ export async function fetchUsage(
     let result: FetchResult;
     try {
       result = await singleFetch(token, controller.signal);
-    } catch (err) {
+    } catch {
+      // No binding: nothing from the platform's error object is read any more, and the linter
+      // enforces that. The class comes from `timedOut`, the message from a constant. (sdlc/029)
       clearTimeout(timeout);
       fetchedMs += Date.now() - attemptStarted;
-      const message = err instanceof Error ? err.message : 'Unknown network error';
+      // A constant, chosen by the same flag that picks failureClass — for the reason the comment
+      // above already gives. `err` is deliberately unread: its message is free text, and this is
+      // the value that gets persisted to the cache and rendered in the tooltip. Measured on bun
+      // 1.3.11: connection-refused/TLS/DNS give "Unable to connect...", a timeout gives "The
+      // operation was aborted." (a DOMException, which IS instanceof Error). Both generic today;
+      // neither is a property this repo controls. (sdlc/029)
+      const message: SurfaceableMessage = timedOut ? 'Request timed out' : 'Network error';
       lastError = {
         ok: false,
         status: null,

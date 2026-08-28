@@ -88,19 +88,19 @@ describe('extractLastError', () => {
 
   test('extracts httpStatus and message when present', () => {
     const snapshot = makeTestSnapshot();
-    const envelope = makeCacheEnvelope(snapshot, null, 'serviceUnavailable', 429, 'Rate limited');
+    const envelope = makeCacheEnvelope(snapshot, null, 'serviceUnavailable', 429, 'Rate limited (429)');
     const error = extractLastError(envelope);
     expect(error).not.toBeNull();
     expect(error!.httpStatus).toBe(429);
-    expect(error!.message).toBe('Rate limited');
+    expect(error!.message).toBe('Rate limited (429)');
   });
 
   test('returns error info when only message is present', () => {
     const snapshot = makeTestSnapshot();
-    const envelope = makeCacheEnvelope(snapshot, null, 'serviceUnavailable', null, 'Network timeout');
+    const envelope = makeCacheEnvelope(snapshot, null, 'serviceUnavailable', null, 'Request timed out');
     const error = extractLastError(envelope);
     expect(error).not.toBeNull();
     expect(error!.httpStatus).toBeNull();
-    expect(error!.message).toBe('Network timeout');
+    expect(error!.message).toBe('Request timed out');
   });
 });

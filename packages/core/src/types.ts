@@ -130,11 +130,35 @@ export interface FetchSuccess {
   data: unknown;
 }
 
+/**
+ * Every message a fetch failure may carry, as a closed set.
+ *
+ * SPEC.md §12 requires redaction from all surfaced errors. Before sdlc/029 that clause held by
+ * accident: the HTTP messages happened to be constants, and the one uncontrolled string —
+ * `err.message` on the network path — happened to be generic on this runtime. `client.ts:180`
+ * already called that string "exactly the free text the telemetry allowlist exists to keep out",
+ * and four lines later it was assigned here, persisted to the cache as `lastErrorMessage`, and
+ * rendered in the VS Code tooltip. The guard existed on one path and not the other.
+ *
+ * Narrowing this field makes a free-text producer a COMPILE error rather than something a test has
+ * to remember to catch. `typefixtures/free-text-message.expect-error.ts` freezes the negative
+ * control. `isSurfaceableMessage` re-checks the same set at the cache-read boundary, where a type
+ * cannot help because the value comes off disk.
+ */
+export type SurfaceableMessage =
+  | 'Authentication failed (401)'
+  | 'Rate limited (429)'
+  | 'Network error'
+  | 'Request timed out'
+  | 'Malformed response'
+  | `Server error (${number})`
+  | `Unexpected status ${number}`;
+
 export interface FetchFailure {
   ok: false;
   status: number | null; // null for network errors
   failureClass: FailureClass;
-  message: string;
+  message: SurfaceableMessage;
 }
 
 export type FetchResult = FetchSuccess | FetchFailure;

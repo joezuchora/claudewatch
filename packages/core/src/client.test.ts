@@ -1,5 +1,6 @@
 import { describe, expect, test, mock, afterEach } from 'bun:test';
 import {
+  isSurfaceableMessage,
   fetchUsage,
   resolveFetchTiming,
   DEFAULT_TIMEOUT_MS,
@@ -89,7 +90,8 @@ describe('client', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
-      expect(result.message).toContain('DNS resolution failed');
+      expect(result.message).toBe('Network error');
+        expect(isSurfaceableMessage(result.message)).toBe(true);
     }
   });
 

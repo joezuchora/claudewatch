@@ -119,7 +119,9 @@ export function failurePolicy(fc: FailureClass): FailurePolicy {
       return { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
 
     // `unexpectedFailure` IS constructed — client.ts returns it for any status that is not
-    // 200/401/429/5xx. `malformedResponse` is not constructed anywhere. Both rows match the
+    // 200/401/429/5xx. `malformedResponse` is constructed by client.ts's response.json() guard since sdlc/029;
+    // before that it was defined in types.ts, handled here, and specified in SPEC.md §7.2 while
+    // no code path produced it — a third guarantee that existed only on paper. Both rows match the
     // default bucket they used to fall into, so neither changes behaviour; the review that
     // caught this comment claiming both were unreachable is recorded in sdlc/014.
     case 'malformedResponse':

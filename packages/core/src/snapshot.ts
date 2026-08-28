@@ -1,5 +1,6 @@
 import type { UsageSnapshot, StaleReason, CacheEnvelope } from './types.js';
 import type { LastErrorInfo } from './format.js';
+import { isSurfaceableMessage } from './client.js';
 
 /**
  * Return a copy of the snapshot with freshness marked as stale.
@@ -54,5 +55,10 @@ export function makeErrorSnapshot(
  */
 export function extractLastError(envelope: CacheEnvelope | null): LastErrorInfo | null {
   if (!envelope?.lastHttpStatus && !envelope?.lastErrorMessage) return null;
-  return { httpStatus: envelope.lastHttpStatus, message: envelope.lastErrorMessage };
+  // The type closes the set at the producer; this closes it here, where a type cannot reach — the
+  // value comes off DISK, and a cache file written before sdlc/029 may hold free text from
+  // `err.message`. A rejected message becomes null; the status is still returned, because it is a
+  // number and carries nothing free-form. (SPEC.md §12, sdlc/029 B3)
+  const message = isSurfaceableMessage(envelope.lastErrorMessage) ? envelope.lastErrorMessage : null;
+  return { httpStatus: envelope.lastHttpStatus, message };
 }
