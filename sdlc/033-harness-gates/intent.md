@@ -19,8 +19,16 @@ Loop 030's `spec.md` asked for the gate in `snapshot.ts` to be *"KEPT, **and rel
 Loop 030's `plan.md` then listed `snapshot.ts` on its **Explicitly not touched** fence
 (`sdlc/030-cache-read-validation/plan.md:29`). The two artifacts directly contradict each other.
 The loop ran all six stages, the plan-to-diff auditor reported the diff inside the fence — because
-it was — and the loop shipped with its acceptance criterion recorded as met. The unimplemented half
-of that spec item is still open today, three loops later.
+it was — and the loop shipped with its acceptance criterion recorded as met.
+
+**Correction, made during Design.** The first draft of this file said that half of the spec item was
+"still open today, three loops later". It is not. `git log -L 58,62:packages/core/src/snapshot.ts`
+shows loop 031 commit 2 (`3000564`) rewrote the comment — it now reads *"Claiming it was the boundary
+— as this comment did until sdlc/031 — overstated it"* — as a planned row of loop 031's own fence.
+Loop 030's `review.md:220` still lists it as **OPEN** and is stale. The claim was made by reading a
+review document instead of the code, which is the exact failure this repo has recorded four loops
+running. The real cost is smaller and still real: a requirement shipped unimplemented, was caught by
+hand rather than by a gate, and took an extra loop to close.
 
 The auditor compares **plan to diff**. Nothing compares **spec to plan**. A fence that silently
 drops a spec requirement is worse than no fence: it converts a missed requirement into a passing
@@ -33,10 +41,12 @@ sorted diff empty"*. It is written in `spec.md`, evaluated by hand at Stage 5, a
 `review.md`. `bun run verify` runs `oxlint` and passes as long as it emits **no errors** — the
 warning count is not read by anything.
 
-The criterion has been broken five times across four loops, always mid-loop, always found by hand:
-11→12 and 11→19 in loop 031, and 11→13 and 11→12 twice more in loop 032. Loop 030's own review
-already concluded that *a criterion the gate cannot run is a note, not a check* — and loops 031 and
-032 then carried it as a note again. Two rules account for every one of those five regressions:
+The criterion has been broken five times, always mid-loop, always found by hand: 11→12 and 11→19 in
+loop 031's commits 1 and 2, and 11→13, 11→12 and 11→12 again across loop 032's commits. That is two
+regressions in one loop and three in the next — not, as this file first said, "across four loops";
+the count of five is right and the spread was wrong. Loop 030's own review already concluded that
+*a criterion the gate cannot run is a note, not a check* — and loops 031 and 032 then carried it as
+a note again. Two rules account for every one of those five regressions:
 `unicorn(consistent-function-scoping)` on a nested helper that captures nothing, and
 `unicorn(no-array-sort)` where `toSorted()` was meant.
 
@@ -47,9 +57,9 @@ The current tree is at **11 warnings across 6 rules**: 3 × `no-array-sort`,
 ## Who is affected
 
 Anyone running this loop — today that is one maintainer and the agents working the stages, on every
-change. The cost is not hypothetical: it is one shipped-and-still-open requirement (loop 030), and
-five hand-caught lint regressions that each cost a remediation commit inside a loop that was
-otherwise finished.
+change. The cost is not hypothetical: it is one requirement that shipped unimplemented and cost an extra
+loop to notice (loop 030 → 031), plus five hand-caught lint regressions that each cost a remediation
+commit inside a loop that was otherwise finished.
 
 The second cost is subtler and worse. A criterion that only a careful reader enforces teaches every
 later loop that criteria are aspirational. Loop 032's retrospective named the pattern in the product
@@ -94,9 +104,10 @@ the strongest form the plan-to-diff check can take.
   tell whether the gate works.
 - **Any change under `packages/*/src`** other than what a lint-budget fixture demands, and ideally
   not even that.
-- **The unimplemented half of loop 030's spec** (`snapshot.ts:58-62`'s stale relabel). This loop
-  builds the check that would have caught it; using the check to fix the defect is product work and
-  belongs to a later loop. It stays on the open list.
+- **Correcting loop 030's stale `review.md` open list.** Loop 031 closed that item without marking
+  it closed. Historic review documents are the record of what was known at the time and this loop
+  does not amend them; the correction is recorded here and in `spec.md` instead. Deciding the
+  general policy on amending historic artifacts is its own question, and not this loop's.
 - **Making the mutation-prediction discipline mechanical** (loop 032's A6, where predictions must
   name a specific `file:testname`). It is the obvious third gate and it is deliberately not here —
   two gates in one fence is already the limit of what a plan-to-diff audit can meaningfully police.
