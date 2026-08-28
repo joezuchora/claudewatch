@@ -6,10 +6,9 @@ import { emitProcess, schemaDriftEvent, categorizeWarning } from './telemetry.js
 import {
   WINDOW_NAMES, resetsAtWarning, WARNING_NOT_AN_OBJECT, WARNING_NO_VALID_WINDOWS,
   WARNING_EXTRA_USAGE_MISSING, WARNING_EXTRA_USAGE_RANGE, WARNING_EXTRA_USAGE_LIMIT,
-  WARNING_CURRENCY_DEFAULTED,
+  WARNING_CURRENCY_DEFAULTED, ISO_CURRENCY_RE,
 } from './closed-sets.js';
 
-const ISO_CURRENCY_RE = /^[A-Z]{3}$/;
 
 
 function isRawWindow(val: unknown): val is { utilization: number; resets_at: string | null } {

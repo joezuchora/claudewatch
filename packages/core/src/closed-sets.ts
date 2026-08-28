@@ -11,7 +11,7 @@
  * `state.ts` was considered as a home for the StaleReason members and rejected: warning strings are
  * not a classification concern, and splitting them across two modules would be worse than either.
  */
-import type { AccountTier, StaleReason } from './types.js';
+import type { AccountTier, StaleReason, UsageSnapshot } from './types.js';
 
 /**
  * What `readCacheResult` substitutes for a `fetchedAt` it cannot parse.
@@ -84,6 +84,68 @@ export const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
  * bounds what a hand-edited file can make `--debug` and `--json` print.
  */
 export const MAX_NORMALIZATION_WARNINGS = 16;
+
+/**
+ * The remaining closed sets on `UsageSnapshot`, for sdlc/032.
+ *
+ * **Anchored to INDEXED ACCESS, not to the named types.** `usageEndpoint` and `primaryWindow` are
+ * anonymous unions with no named type to exclude from; and `authState` is spelled TWICE — inline at
+ * `types.ts:30` and as `AuthState` at `:118` — so a guard anchored to `AuthState` would miss a
+ * member added to the inline spelling, which is the one `UsageSnapshot` actually uses. Collapsing
+ * that duplication is a `types.ts` edit with its own blast radius and is recorded as open rather
+ * than smuggled in here.
+ */
+type UsageEndpointState = UsageSnapshot['source']['usageEndpoint'];
+type AuthStateInline = UsageSnapshot['authState'];
+type PrimaryWindow = UsageSnapshot['display']['primaryWindow'];
+
+export const USAGE_ENDPOINT_STATES = [
+  'success', 'failed', 'unavailable',
+] as const satisfies readonly UsageEndpointState[];
+
+export const AUTH_STATES = [
+  'valid', 'invalid', 'missing', 'unknown',
+] as const satisfies readonly AuthStateInline[];
+
+export const PRIMARY_WINDOWS = [
+  'fiveHour', 'sevenDay', 'sevenDayOpus', 'enterprise', 'unknown',
+] as const satisfies readonly PrimaryWindow[];
+
+// One `never` guard per set: a member added to the union that nobody adds here is a compile error.
+const _endpointCovered: never = null as unknown as Exclude<UsageEndpointState, (typeof USAGE_ENDPOINT_STATES)[number]>;
+const _authCovered: never = null as unknown as Exclude<AuthStateInline, (typeof AUTH_STATES)[number]>;
+const _windowCovered: never = null as unknown as Exclude<PrimaryWindow, (typeof PRIMARY_WINDOWS)[number]>;
+void _endpointCovered; void _authCovered; void _windowCovered;
+
+const ENDPOINT_SET: ReadonlySet<string> = new Set(USAGE_ENDPOINT_STATES);
+const AUTH_SET: ReadonlySet<string> = new Set(AUTH_STATES);
+const WINDOW_SET: ReadonlySet<string> = new Set(PRIMARY_WINDOWS);
+
+export function isUsageEndpointState(v: unknown): v is UsageEndpointState {
+  return typeof v === 'string' && ENDPOINT_SET.has(v);
+}
+export function isAuthState(v: unknown): v is AuthStateInline {
+  return typeof v === 'string' && AUTH_SET.has(v);
+}
+export function isPrimaryWindow(v: unknown): v is PrimaryWindow {
+  return typeof v === 'string' && WINDOW_SET.has(v);
+}
+
+/**
+ * ISO 4217, moved here from `normalize.ts` where it was a module-private const.
+ *
+ * `cache.ts` needs it and importing from `normalize.ts` would close the
+ * `cache -> normalize -> telemetry -> cache` cycle this module exists to avoid. `normalize.ts`
+ * imports it back.
+ */
+export const ISO_CURRENCY_RE = /^[A-Z]{3}$/;
+
+/**
+ * A ceiling on `enterprise.disabledReason`, the ONE snapshot field that is neither enumerable nor
+ * canonicalisable — the API chooses the text. See sanitize-snapshot.ts for the redact-then-bound
+ * rule and its stated limit.
+ */
+export const MAX_DISABLED_REASON = 200;
 
 /** The window names `normalize` passes to `parseWindow`. All three are literals at the call sites. */
 export const WINDOW_NAMES = ['five_hour', 'seven_day', 'seven_day_opus'] as const;
