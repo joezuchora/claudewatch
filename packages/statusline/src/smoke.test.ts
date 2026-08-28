@@ -11,7 +11,7 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
 import { spawnSync, spawn } from 'child_process';
-import { rmSync, existsSync } from 'fs';
+import { rmSync, existsSync, statSync, readdirSync } from 'fs';
 import { resolve } from 'path';
 import * as net from 'net';
 import { seedSandboxHome, type SandboxSeed } from '@claudewatch/core/test-helpers';
@@ -21,8 +21,40 @@ const REPO = resolve(import.meta.dir, '..', '..', '..');
 
 let seed: SandboxSeed;
 
+/**
+ * One structurally-invalid placeholder, referenced twice. Two hand-rolled copies of a
+ * token-shaped literal is how a real one eventually gets pasted into the second. (sdlc/030
+ * security pass, finding 5.)
+ */
+const FAKE_TOKEN = 'sk-ant-oat01-SMOKE-TEST-NOT-REAL';
+
+/** Newest mtime among the .ts sources compiled into the binary. */
+function newestSourceMtime(): number {
+  const roots = [
+    resolve(REPO, 'packages', 'core', 'src'),
+    resolve(REPO, 'packages', 'statusline', 'src'),
+  ];
+  let newest = 0;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!entry.name.endsWith('.ts')) continue;
+      const m = statSync(full).mtimeMs;
+      if (m > newest) newest = m;
+    }
+  };
+  for (const r of roots) walk(r);
+  return newest;
+}
+
 beforeAll(() => {
-  if (!existsSync(BIN)) {
+  // STALE, not merely ABSENT. This used to rebuild only when the binary was missing, and
+  // `scripts/verify.ts` runs `test` BEFORE `build` — so every case here asserted against a binary
+  // compiled from some earlier source state. Deleting a guard in `cache.ts` left this file green
+  // while the core suite went red, which made the end-to-end case the weaker of the two exactly
+  // where it was supposed to be the stronger. Found by sdlc/030's security pass, finding 3.
+  if (!existsSync(BIN) || statSync(BIN).mtimeMs < newestSourceMtime()) {
     const built = spawnSync('bun', ['run', '--filter', '@claudewatch/statusline', 'build'],
       { cwd: REPO, stdio: 'ignore' });
     if (built.status !== 0) throw new Error('could not build the statusline binary for smoke tests');
@@ -32,7 +64,7 @@ beforeAll(() => {
   seed = seedSandboxHome({
     prefix: 'cw-smoke-',
     utilizationPct: 42,
-    accessToken: 'sk-ant-oat01-SMOKE-TEST-NOT-REAL',
+    accessToken: FAKE_TOKEN,
   });
 });
 
@@ -180,10 +212,10 @@ describe('smoke: --debug never prints free text off a cache file', () => {
     // Its own HOME: the shared seed's envelope is clean and this case needs a poisoned one.
     // Network-inert by the same two independent mechanisms every case in this file relies on —
     // the seeded credential is deliberately expired, AND `--debug` without `--refresh` returns
-    // at main.ts:203-206, before `resolveCredentials` and before any fetch is reachable.
+    // at main.ts:204-207, before `resolveCredentials` and before any fetch is reachable.
     const poisoned = seedSandboxHome({
       prefix: 'cw-smoke-debug-',
-      accessToken: 'sk-ant-oat01-SMOKE-TEST-NOT-REAL',
+      accessToken: FAKE_TOKEN,
       envelope: {
         lastErrorClass: 'serviceUnavailable',
         lastHttpStatus: 503,
@@ -214,10 +246,11 @@ describe('smoke: --debug never prints free text off a cache file', () => {
       expect(r.code).toBe(0);
 
       const out = JSON.parse(r.stdout) as Record<string, unknown>;
-      // Preconditions in the SAME block, not a separate case. `printDebug` omits every cache key
-      // on a miss, so an envelope rejected as versionMismatch / invalidShape / corruptJson would
-      // leave `lastErrorMessage` absent and the assertion below could go green while proving
-      // nothing at all. These two say the cache was read, and that it was THIS envelope.
+      // Preconditions in the SAME block, not a separate case. On a miss `printDebug` omits
+      // `lastErrorMessage` and `lastHttpStatus` entirely and reports `cacheAgeSec: null`, so an
+      // envelope rejected as versionMismatch / invalidShape / corruptJson would leave the
+      // assertion below asserting on `undefined` and it could go green while proving nothing at
+      // all. These two say the cache was read, and that it was THIS envelope.
       expect(typeof out.cacheAgeSec).toBe('number');
       expect(out.lastHttpStatus).toBe(503);
 

@@ -347,7 +347,7 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
     expect(shouldCooldown('unexpectedFailure')).toBe(false);
   });
 
-  test('the cache-read boundary drops a message no producer emits', () => {
+  test('extractLastError drops a message no producer emits, in memory', () => {
     // The type closes the set at the producer; it cannot reach a value read off DISK. A cache file
     // written before sdlc/029 holds whatever `err.message` was on that machine.
     const envelope = makeCacheEnvelope(

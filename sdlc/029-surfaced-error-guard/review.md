@@ -202,10 +202,21 @@ their value is the rule they produced, not a fix.
   the two places 030 writes one are annotated as load-bearing.
 - **The type and the predicate disagree at the edges** — `` `Server error (${number})` `` accepts
   `-1`, `NaN`, `1e5`; the regex rejects all three. Unreachable today; the predicate is the tighter.
-  → **OPEN, and re-measured — the original claim was half wrong.** `-1` and `1e5` are accepted by the
-  template type (`1e5` renders `100000`); `NaN` and `Infinity` are *rejected* by it with TS2322. So
-  the disagreement is narrower than recorded: two values, not three. Still unreachable, since no
-  producer constructs a status outside 100–599.
+  → **OPEN, and re-measured — ONE value, not three.** Measured both sides independently
+  (`tsc` on a four-line probe; the regex in a `bun -e` one-liner):
+
+  | value | template type | `/^Server error \(\d+\)$/` | diverges? |
+  |---|---|---|---|
+  | `-1` | accepted | rejected | **yes** |
+  | `1e5` (renders `100000`) | accepted | accepted | no |
+  | `NaN` | TS2322 | rejected | no |
+  | `Infinity` | TS2322 | rejected | no |
+
+  The divergence set is `{-1}`. `sdlc/030/spec.md:89-94` had already measured this and called `-1`
+  "the only divergence"; the first version of this marker said "two, not three" because it counted
+  *values the template type accepts* and labelled that count "the disagreement", and sdlc/030's
+  commit body repeated it. Corrected by that loop's plan-to-diff audit, which re-measured rather
+  than reading. Still unreachable, since no producer constructs a status outside 100–599.
 - **`ok: false, statusClass: '2xx'`** is newly reachable via `malformedResponse` and asserted nowhere.
   → **OPEN.** Out of 030's scope fence (`client.ts` is explicitly not touched). Still unasserted.
 - **`commands.ts:26` and `enterprise.disabledReason`** remain uncovered, both deferred by name.

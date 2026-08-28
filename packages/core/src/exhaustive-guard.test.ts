@@ -100,7 +100,7 @@ describe('type fixture harness', () => {
     // ("this file produced no diagnostics") is VACUOUS for a file tsc never opened. So this
     // reads `--listFiles` output and matches it against the directory. (sdlc/014 review.)
     const onDisk = readdirSync(FIXTURE_DIR).filter(f => f.endsWith('.ts'));
-    expect(onDisk.length).toBe(5);   // sdlc/029 added free-text-message.expect-error.ts
+    expect(onDisk.length).toBe(6);   // 029 added free-text-message; 030 added widened-cache-message
 
     const compiled = compiledFiles();
     for (const f of onDisk) {
@@ -130,6 +130,20 @@ describe('the guards fail when their subject is missing', () => {
     const errors = diagnosticsFor('real-union-omission.expect-error.ts');
     expect(errors.join('\n')).toContain('error TS2322');
     expect(errors.join('\n')).toContain('"timeout"');
+  });
+
+  test('re-widening any of the four narrowed message sites fails typecheck', () => {
+    // sdlc/030 row 9 of the fence, whose condition ("only if the grep proves weak in practice")
+    // fired during the Stage 5 audit: A3's grep is defeated by writing `null | string`, and was
+    // never wired into `verify` or CI. This fixture is spelling-independent and runs in the gate.
+    const errors = diagnosticsFor('widened-cache-message.expect-error.ts');
+    // FOUR, not "at least one": four sites were narrowed together, and a floor assertion stays
+    // green while three of them widen back. The count is the whole point.
+    expect(errors.length).toBe(4);
+    for (const e of errors) {
+      expect(e).toContain('error TS2322');
+      expect(e).toContain('SurfaceableMessage');
+    }
   });
 
   test('a free-text fetch-failure message fails typecheck', () => {

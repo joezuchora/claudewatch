@@ -413,14 +413,36 @@ describe('sanitizeCooldownUntil (sdlc/014 security pass)', () => {
       .toBe(new Date(NOW + COOLDOWN_DURATION_MS).toISOString());
   });
 
-  test('a legitimate cooldown we just wrote passes through untouched', () => {
+  test('a legitimate cooldown we just wrote comes back identical', () => {
+    // Identical because it was already canonical, not because it was echoed. Since sdlc/030 the
+    // return value is always constructed; for a round-trippable ISO string the two coincide.
     const ours = new Date(NOW + COOLDOWN_DURATION_MS).toISOString();
     expect(sanitizeCooldownUntil(ours, NOW)).toBe(ours);
   });
 
-  test('a past cooldown passes through — isInCooldown already handles it', () => {
+  test('a past cooldown survives — isInCooldown already handles it', () => {
     const past = new Date(NOW - 1000).toISOString();
     expect(sanitizeCooldownUntil(past, NOW)).toBe(past);
+  });
+
+  test('a parseable string carrying free text is canonicalised, not echoed', () => {
+    // sdlc/030 security pass, finding 1. `Date.parse` accepts far more than ISO-8601 and the
+    // legacy parser ignores parenthesised trailing text entirely, so this string parses finite,
+    // sits below the ceiling, and was returned VERBATIM — straight to `--debug` stdout via
+    // main.ts:140 and :168. The clamp branch always constructed its result; only the in-range
+    // passthrough echoed its input.
+    const poisoned = '2026-08-26 (/home/someone/.claude sk-ant-oat01-SECRET on someones-nuc.local)';
+    // Precondition: without this the test passes for the wrong reason if the parser ever
+    // starts REJECTING the string, which would null it rather than canonicalise it.
+    expect(Number.isFinite(Date.parse(poisoned))).toBe(true);
+
+    const out = sanitizeCooldownUntil(poisoned, NOW);
+    // Asserted as a shape, not an exact instant: the legacy parser reads a bare date-with-suffix
+    // as LOCAL time, so the exact value is TZ-dependent while the property under test is not.
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(out).not.toContain('/home/someone');
+    expect(out).not.toContain('sk-ant');
+    expect(out).not.toContain('someones-nuc.local');
   });
 
   test('null stays null', () => {

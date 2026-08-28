@@ -6,7 +6,11 @@ import type { CacheEnvelope, SurfaceableMessage } from './types.js';
 import { emitProcess, cacheEvent } from './telemetry.js';
 import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
 // Mirrors the isFailureClass import above: the module that OWNS a policy also owns its predicate.
-// No cycle — client.ts does not import cache.ts (measured, sdlc/030).
+// No cycle THROUGH client.ts — it does not import cache.ts. It does import telemetry.ts, which
+// imports getCacheDir from here, so cache -> client -> telemetry -> cache is a cycle; but that
+// arm is the pre-existing cache <-> telemetry cycle, unchanged by this edge. Benign because
+// everything crossing it is a hoisted function declaration. A module-level `const` added to
+// client.ts and read at cache.ts load time would TDZ. (sdlc/030 security pass, finding 4.)
 import { isSurfaceableMessage } from './client.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
@@ -64,6 +68,10 @@ export interface CacheReadResult {
  * right there for the mirror reason: `8.64e15` would otherwise pin the tool on stale data
  * forever, and no honest writer of this file ever sets a longer backoff than we do.
  *
+ * Everything that survives is CANONICALISED — the return value is always a string this function
+ * constructed, never the one it read. See the comment on the return statement for the §12 leak
+ * that made the difference matter.
+ *
  * `now` is injectable for the reason sdlc/019 made `isCacheFresh`'s injectable: a clamp test
  * that reads ambient time can only assert the side it has slack on.
  */
@@ -72,7 +80,14 @@ export function sanitizeCooldownUntil(value: unknown, now: number = Date.now()):
   const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return null;
   const ceiling = now + COOLDOWN_DURATION_MS;
-  return ms > ceiling ? new Date(ceiling).toISOString() : value;
+  // CANONICALISED, never echoed. Returning `value` verbatim on the in-range path was a §12 leak
+  // found by sdlc/030's security pass: `Date.parse` accepts far more than ISO-8601, and the
+  // legacy parser ignores parenthesised trailing text entirely. `Date.parse('2026-01-01
+  // (/home/someone/.claude sk-ant-…)')` is finite and below the ceiling, so the whole string —
+  // path, hostname and all — was returned and printed by `--debug` (main.ts:140, :168). The clamp
+  // branch already returned a constructed ISO string; only the passthrough echoed its input.
+  // Every consumer reads this through `new Date(...)`, so canonicalising costs nothing.
+  return new Date(Math.min(ms, ceiling)).toISOString();
 }
 
 export function readCacheResult(): CacheReadResult {
@@ -126,14 +141,21 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'invalidShape' };
   }
 
-  // THREE fields cross the `as CacheEnvelope` assertion unchecked, in two idioms: `lastErrorClass`
-  // and `lastErrorMessage` are nulled on failure, `cooldownUntil` is sanitised and clamped. All are
-  // degraded rather than rejected: none says anything about the snapshot beside it, and discarding a
-  // good snapshot would cost a live token-bearing fetch on every read.
+  // Three fields are VALIDATED below, in two idioms: `lastErrorClass` and `lastErrorMessage` are
+  // nulled on failure, `cooldownUntil` is sanitised, clamped and canonicalised. All three are
+  // degraded rather than rejected: none says anything about the snapshot beside it, and discarding
+  // a good snapshot would cost a live token-bearing fetch on every read.
   //
-  // It said "Two" until sdlc/030. `lastErrorMessage` was the third all along — sdlc/029 closed the
-  // message set at the producer and at ONE consumer (`extractLastError`) while the pattern for
-  // doing it properly sat six lines below, in this function.
+  // At least three more cross the `as CacheEnvelope` assertion and are NOT validated —
+  // `snapshot.fetchedAt` (checked for `typeof === 'string'` above, nothing more),
+  // `snapshot.freshness.staleReason` (presence of `freshness` only), and
+  // `snapshot.rawMetadata.normalizationWarnings` (not checked at all). All three reach `--debug`
+  // stdout verbatim. They are closed-set at every writer today, which is exactly the posture
+  // sdlc/029 left `lastErrorMessage` in and sdlc/030 declared insufficient — so this is a known
+  // open gap, not a cleared one. sdlc/030's security pass measured it; see that review.md.
+  //
+  // The count said "Two" until sdlc/030 and named the wrong set. `lastErrorMessage` was validated
+  // nowhere on this path, while the pattern for doing it properly sat ten lines below.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -142,6 +164,16 @@ export function readCacheResult(): CacheReadResult {
   // than that was a review finding against this very change (sdlc/014).
   if (parsed.lastErrorClass !== null && !isFailureClass(parsed.lastErrorClass)) {
     parsed = { ...parsed, lastErrorClass: null };
+  }
+
+  // `lastErrorMessage` is printed by `--debug` (main.ts:140, :168) and rendered in the VS Code
+  // tooltip. Before sdlc/030 those sites read it straight off the envelope, so a cache file written
+  // before sdlc/029 — when the network path assigned `err.message` verbatim — still surfaced free
+  // text. Validating HERE fixes every consumer at once, including the two that never call
+  // `extractLastError`. SPEC.md §12 already claimed this check ran "at the cache-read boundary";
+  // this is the commit that makes that sentence true.
+  if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMessage)) {
+    parsed = { ...parsed, lastErrorMessage: null };
   }
 
   // `cooldownUntil` is the live one, and it guards a security property: the 5-minute backoff
@@ -153,18 +185,9 @@ export function readCacheResult(): CacheReadResult {
   // every single prompt render. A far-future value wedges the opposite way, pinning the tool
   // on stale data indefinitely.
   //
-  // Nulled on garbage (fail open, one fetch, then a real cooldown is written), and clamped on
-  // magnitude (fail closed, never longer than the backoff we would have set ourselves).
-  // `lastErrorMessage` is printed by `--debug` (main.ts:143, :171) and rendered in the VS Code
-  // tooltip. Before sdlc/030 those sites read it straight off the envelope, so a cache file written
-  // before sdlc/029 — when the network path assigned `err.message` verbatim — still surfaced free
-  // text. Validating HERE fixes every consumer at once, including the two that never call
-  // `extractLastError`. SPEC.md §12 already claimed this check ran "at the cache-read boundary";
-  // this is the commit that makes that sentence true.
-  if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMessage)) {
-    parsed = { ...parsed, lastErrorMessage: null };
-  }
-
+  // Nulled on garbage (fail open, one fetch, then a real cooldown is written), clamped on
+  // magnitude (fail closed, never longer than the backoff we would have set ourselves), and
+  // canonicalised so the string that comes out is one we constructed rather than one we read.
   parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
 
   return { envelope: parsed, reason: 'hit' };

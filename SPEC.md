@@ -732,6 +732,19 @@ ClaudeWatch is a local companion utility, not a credential manager.
   bypassed it). Checked by
   `packages/core/src/security.test.ts` → "§12: every surfaceable error message is a literal
   this repo wrote". Before that, the clause held only by accident and nothing tested it.
+- Every value `readCacheResult` returns from a cache file is either validated against a closed set
+  or reconstructed by us — never echoed. `lastErrorClass` and `lastErrorMessage` are nulled when
+  they fail their predicate; `cooldownUntil` is nulled on garbage, clamped on magnitude, and since
+  `sdlc/030` **canonicalised** through `new Date(...).toISOString()`. The canonicalisation is not
+  cosmetic: `Date.parse` accepts far more than ISO-8601 and its legacy parser ignores parenthesised
+  trailing text, so `2026-01-01 (/home/someone/.claude sk-ant-…)` parsed finite and was returned
+  verbatim to `--debug` stdout. Checked by `packages/core/src/cache.test.ts` → "a parseable string
+  carrying free text is canonicalised, not echoed".
+- **Known gap, recorded rather than implied.** Three further fields cross the `as CacheEnvelope`
+  assertion unvalidated and reach `--debug` stdout verbatim: `snapshot.fetchedAt` (type-checked
+  only), `snapshot.freshness.staleReason`, and `snapshot.rawMetadata.normalizationWarnings`. Each is
+  closed-set at every writer today — which is exactly the posture `sdlc/029` left `lastErrorMessage`
+  in, and which `sdlc/030` demonstrated is not a guarantee. Measured by `sdlc/030`'s security pass.
 - It must not include tokens in issue templates, screenshots, or debug output
 - It must not shell out with token values in process arguments
 - Cache files must never contain the access token
