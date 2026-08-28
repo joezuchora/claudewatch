@@ -628,7 +628,7 @@ Priority of truncation: remove secondary reset time first, then primary reset ti
 | Flag | Behavior |
 |---|---|
 | `--version` | Print version string and exit |
-| `--json` | Output the full UsageSnapshot as JSON instead of formatted text. When the snapshot came from the cache, `fetchedAt` may be the literal `unknown` — see §12. |
+| `--json` | Output the full UsageSnapshot as JSON instead of formatted text. A snapshot read from the CACHE may carry degraded values for any field — `fetchedAt: "unknown"`, a closed-set fallback, `enterprise: null`, a truncated `disabledReason` — see §12. |
 | `--refresh` | Force a fresh API call, bypassing cache TTL (still respects cooldown) |
 | `--debug` | Print diagnostic info: cache age, state classification, cooldown status, credential path, normalization warnings. No secrets. |
 
@@ -748,16 +748,34 @@ ClaudeWatch is a local companion utility, not a credential manager.
   "§12: no value off a cache file reaches a surface unvalidated", by
   `packages/core/src/closed-sets.test.ts`, and end to end against the compiled binary by
   `packages/statusline/src/smoke.test.ts` on **both** `--debug` and `--json`.
-- **Known gap, restated because `sdlc/030`'s version of it was incomplete in two ways.** It named
-  `--debug` as the surface; the surface set is `{--debug, --json}`, and `--json`
-  (`main.ts:241`, `:256` → `:371`) serialises the **entire** snapshot. It also named three fields;
-  what remains after `sdlc/031` is everything else in `UsageSnapshot` — `source.usageEndpoint`,
-  `authState`, `tier`, `display.*`, and every window field — all of which reach `--json` verbatim.
-  Each is closed-set at every writer today, which is the posture `sdlc/029` left `lastErrorMessage`
-  in and `sdlc/030` disproved as a guarantee. Snapshot-level validation is `sdlc/032`.
-  The reason the old paragraph missed `--json` is worth keeping: it was written from a search for
-  readers of three field **names**, and `--json` names no field. A "which surfaces read this field"
-  search cannot find a caller that serialises the whole object.
+- **Since `sdlc/032` the SNAPSHOT is rebuilt from known keys, not patched field by field.**
+  `sanitizeSnapshot` constructs a fresh `UsageSnapshot` naming every field, so every value is a
+  member of a closed set, a number this repo checked, a timestamp this repo constructed, or a
+  bounded string — and **no unknown key at any depth survives**. Measured before it existed: 26 of
+  26 poisoned values reached a surface, 24 of them inside the snapshot. Checked by
+  `packages/core/src/sanitize-snapshot.test.ts`, `security.test.ts` → "§12: no value off a cache
+  file survives unvalidated", and end to end against the compiled binary on **both** `--debug` and
+  `--json` by `packages/statusline/src/smoke.test.ts`.
+  A whitelist fails by DROPPING a field rather than leaking one, so the guard that matters is the
+  strict round-trip in `cache.test.ts` plus its companion asserting the fixture is not vacuous —
+  `makeTestSnapshot`'s defaults are, for six leaves, identical to their own degraded values.
+- **Degradation is coupled, not per-field.** Degrading each field independently would manufacture
+  states no producer can emit: `normalize()` sets `tier: 'enterprise'` only inside its
+  `enterprise !== null` branch, so a poisoned enterprise number would otherwise leave
+  `tier: 'enterprise'` beside `enterprise: null` and render a plausible line with nothing
+  indicating corruption. A nulled `enterprise` forces `tier` and `display` to `'unknown'`; a nulled
+  primary window forces `display.primaryWindow` to `'unknown'`.
+- **`enterprise.disabledReason` is redact-then-bound, and it is the weakest rule in the boundary.**
+  Its text is chosen by the API, so it is the one snapshot field that is neither enumerable nor
+  canonicalisable. Strings matching path or host shapes are rejected; the rest is truncated to 200
+  characters. **This does not stop a short poisoned string that avoids those shapes.** Stated rather
+  than implied, because the alternative — nulling it on every cache read — would delete a real
+  user-facing explanation from every render except the one immediately after a fetch.
+- **What remains open at this boundary**, named rather than implied: an unknown key on the
+  **envelope** survives `readCacheResult`. It is inert at every current surface — `output()`
+  serialises the snapshot and `printDebug` copies named keys — which makes it the least of the gaps,
+  not the greatest. `lastHttpStatus` is an envelope field and IS validated (`Number.isInteger`),
+  because it reached `--debug` verbatim.
 - **A `fetchedAt` in the future beyond `CLOCK_SKEW_TOLERANCE_MS` is not fresh.** `isCacheFresh`
   compares an age, and a negative age means the file claims to come from the future. Treating that
   as fresh pinned the tool on stale data permanently: `main.ts:240` returns the cached snapshot
@@ -771,6 +789,12 @@ ClaudeWatch is a local companion utility, not a credential manager.
   is real and open; closing it needs `cooldownUntil` stored separably from the snapshot. Pinned by
   `packages/core/src/cache.test.ts` → "a structurally broken envelope still rejects, and still loses
   the cooldown".
+- **Telemetry payload leaves are enforced by the compiler since `sdlc/032`, not by prose.**
+  `MetricEvent.payload` is `Record<string, PayloadLeaf>` where `PayloadLeaf` admits numbers,
+  booleans, `null` and the closed enums telemetry carries — **no bare `string`**. Narrowing
+  `renderEvent`'s two parameters alone did not achieve this: a new `string` field could still be
+  added, measured at 0 typecheck errors, because `string` was structurally legal in the payload.
+  Frozen by `typefixtures/payload-string.expect-error.ts`.
 - It must not include tokens in issue templates, screenshots, or debug output
 - It must not shell out with token values in process arguments
 - Cache files must never contain the access token
@@ -811,12 +835,20 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - Given a narrow terminal width (< 60 columns), the status line collapses to the compact format
 - Given multiple refresh triggers at once, only one network fetch occurs
 - Given stale data, the user can distinguish it from fresh data in the tooltip or status context
-- Given a corrupt or unparseable cache file, the file is deleted and a fresh fetch is performed
+- Given a STRUCTURALLY corrupt cache file — unparseable JSON, a version mismatch, or a missing
+  `snapshot`, `display` or `freshness` — the file is deleted and a fresh fetch is performed. Given a
+  file that is structurally sound but carries bad VALUES, the envelope is kept and the values are
+  degraded: deleting it would discard `cooldownUntil`, which is §9.4's only throttle on
+  token-bearing requests. The distinction has been load-bearing since `sdlc/030` and this bullet
+  did not draw it until `sdlc/032`.
 - Given `resets_at` in the past, the display shows "resets soon" rather than a negative duration
 - The compiled binary meets the performance targets in §11.7, measured by that section's stated method
-- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema, with one documented
-  exception since `sdlc/031`: a snapshot read from the cache may carry `fetchedAt: "unknown"`
-  (`UNKNOWN_FETCHED_AT`) where the stored value could not be parsed. Substituting a sentinel is
+- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema. Since `sdlc/032` a
+  snapshot read from the CACHE may carry a degraded value for **any** field, not only `fetchedAt`:
+  a closed-set fallback (`'unavailable'`, `'unknown'`), `null` for an unparseable timestamp or a
+  non-numeric percentage, `enterprise: null`, `currency: 'USD'`, or a truncated `disabledReason`.
+  The shape is unchanged; the values may be substitutions this repo constructed. `sdlc/031`
+  documented the `fetchedAt` sentinel alone and that is no longer the whole exception. Substituting a sentinel is
   preferred over deleting the envelope, which would discard the §9.4 cooldown, and over the epoch,
   which would render a confident "Fresh as of 12:00 AM" for a snapshot of unknowable age.
 - `claudewatch --debug` outputs diagnostic info without any secrets
