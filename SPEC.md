@@ -758,6 +758,13 @@ ClaudeWatch is a local companion utility, not a credential manager.
   The reason the old paragraph missed `--json` is worth keeping: it was written from a search for
   readers of three field **names**, and `--json` names no field. A "which surfaces read this field"
   search cannot find a caller that serialises the whole object.
+- **A `fetchedAt` in the future beyond `CLOCK_SKEW_TOLERANCE_MS` is not fresh.** `isCacheFresh`
+  compares an age, and a negative age means the file claims to come from the future. Treating that
+  as fresh pinned the tool on stale data permanently: `main.ts:240` returns the cached snapshot
+  without rewriting the file, so every render repeated it, escapable only with `--refresh`. The
+  stored value is bounded at the comparison rather than clamped, so the skew stays visible. Note
+  `detectClockSkew` (`time.ts:79`) has no production caller today; `sdlc/031` cited it as a reason
+  not to act before measuring that.
 - **`readCacheResult` still rejects — and still discards the cooldown with the file — when
   `snapshot`, `snapshot.display` or `snapshot.freshness` is missing or not an object.** There is
   nothing coherent to substitute for those, so they are not degraded. The §9.4 exposure on that path

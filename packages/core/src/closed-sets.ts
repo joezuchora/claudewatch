@@ -11,7 +11,7 @@
  * `state.ts` was considered as a home for the StaleReason members and rejected: warning strings are
  * not a classification concern, and splitting them across two modules would be worse than either.
  */
-import type { StaleReason } from './types.js';
+import type { AccountTier, StaleReason } from './types.js';
 
 /**
  * What `readCacheResult` substitutes for a `fetchedAt` it cannot parse.
@@ -51,6 +51,39 @@ const STALE_REASON_SET: ReadonlySet<string> = new Set(STALE_REASONS);
 export function isStaleReason(value: unknown): value is StaleReason {
   return typeof value === 'string' && STALE_REASON_SET.has(value);
 }
+
+/**
+ * Every member of `AccountTier`, as values.
+ *
+ * `tier` is the only unvalidated snapshot leaf that reaches a PERSISTED FILE rather than stdout:
+ * `renderEvent` (telemetry.ts:229) copies it verbatim into a payload leaf, and `emit` appends that
+ * to the metrics spool. Measured — a seeded `tier` carrying a home directory and a hostname landed
+ * on disk. `telemetry.ts`'s own header forbids an unconstrained string in a payload, and justifies
+ * this one by "constrained by their producing unions", which is exactly the argument sdlc/029 and
+ * sdlc/030 established is void for a value read off a cache file. Found by sdlc/031's security pass.
+ */
+export const ACCOUNT_TIERS = ['standard', 'enterprise', 'unknown'] as const satisfies readonly AccountTier[];
+
+const TIER_SET: ReadonlySet<string> = new Set(ACCOUNT_TIERS);
+
+export function isAccountTier(value: unknown): value is AccountTier {
+  return typeof value === 'string' && TIER_SET.has(value);
+}
+
+/**
+ * How far into the future a `fetchedAt` may sit before the cache stops counting as fresh.
+ *
+ * Matches `detectClockSkew`'s threshold so the two agree on what "skewed" means.
+ */
+export const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
+
+/**
+ * A ceiling on how many warnings survive a cache read.
+ *
+ * `normalize()` emits at most five in one pass, so this cannot truncate an honest envelope. It
+ * bounds what a hand-edited file can make `--debug` and `--json` print.
+ */
+export const MAX_NORMALIZATION_WARNINGS = 16;
 
 /** The window names `normalize` passes to `parseWindow`. All three are literals at the call sites. */
 export const WINDOW_NAMES = ['five_hour', 'seven_day', 'seven_day_opus'] as const;

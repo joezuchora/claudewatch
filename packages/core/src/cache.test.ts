@@ -4,7 +4,7 @@ import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope
 import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
 import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 import { classify } from './state.js';
-import { UNKNOWN_FETCHED_AT, NORMALIZATION_WARNINGS } from './closed-sets.js';
+import { UNKNOWN_FETCHED_AT, NORMALIZATION_WARNINGS, MAX_NORMALIZATION_WARNINGS } from './closed-sets.js';
 
 describe('cache', () => {
   let tempDir: string;
@@ -591,6 +591,60 @@ describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
       got.push([isStale, staleReason, classify(readCacheResult().envelope!.snapshot)]);
     }
     expect(got).toEqual(cases);
+  });
+
+  test('T14 — a poisoned tier is degraded, because it reaches a FILE not just stdout', () => {
+    // sdlc/031 security pass. renderEvent (telemetry.ts:229) copies `tier` verbatim into a payload
+    // leaf and `emit` appends it to the metrics spool, so this is the one snapshot leaf whose leak
+    // lands on disk rather than on a terminal. Measured before the fix: a home directory and a
+    // hostname in a spooled payload.
+    seed(makeTestEnvelope({
+      snapshot: makeTestSnapshot({ tier: 'enterprise /home/someone nuc.local' as never }),
+    }));
+    const got = readCacheResult().envelope!.snapshot.tier;
+    expect(got).toBe('unknown');
+    // Positive control: a real member is not rewritten.
+    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ tier: 'enterprise' }) }));
+    expect(readCacheResult().envelope!.snapshot.tier).toBe('enterprise');
+  });
+
+  test('T15 — a far-future fetchedAt is NOT fresh', () => {
+    // The hole the no-clamp decision left, and the rationale for that decision was false in both
+    // halves: detectClockSkew has zero production callers, and isCacheFresh returned TRUE for
+    // 2099 — main.ts:240 then returns the cached snapshot WITHOUT rewriting the file, so every
+    // render repeats it. One byte pinned the tool on stale data permanently.
+    const future = makeCacheEnvelope(makeTestSnapshot({ fetchedAt: '2099-01-01T00:00:00.000Z' }));
+    expect(isCacheFresh(future)).toBe(false);
+    // Positive controls: a normal fresh cache still is, and a small skew inside tolerance still is.
+    expect(isCacheFresh(makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date().toISOString() })))).toBe(true);
+    const slight = new Date(Date.now() + 60_000).toISOString();
+    expect(isCacheFresh(makeCacheEnvelope(makeTestSnapshot({ fetchedAt: slight })))).toBe(true);
+  });
+
+  test('T16 — a missing rawMetadata reads as a hit, not a stuck exit-3 loop', () => {
+    // sdlc/031's security pass found the unconditional rebuild INCIDENTALLY closed a §9 bug nothing
+    // in this loop claimed: a v2 file with no `rawMetadata` passed the shape gate (which never
+    // checked it) and then main.ts:144 threw a TypeError reading `.normalizationWarnings` — into
+    // the top-level catch, exit 3, file never deleted, repeating forever. Pinned here so a refactor
+    // back to a conditional rebuild cannot silently reopen it.
+    const env = makeTestEnvelope({}) as unknown as Record<string, unknown>;
+    const snap = { ...(env.snapshot as Record<string, unknown>) };
+    delete snap.rawMetadata;
+    seed({ ...env, snapshot: snap });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope!.snapshot.rawMetadata).toEqual({ normalizationWarnings: [] });
+  });
+
+  test('T17 — the warning array is capped', () => {
+    // Content was closed by the filter; length was not. A hand-edited file could make --debug and
+    // --json print an arbitrarily long array. normalize() emits at most five in one pass, so this
+    // ceiling cannot truncate an honest envelope.
+    const many = Array.from({ length: 500 }, () => 'Response is not an object');
+    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ rawMetadata: { normalizationWarnings: many } }) }));
+    expect(readCacheResult().envelope!.snapshot.rawMetadata.normalizationWarnings)
+      .toHaveLength(MAX_NORMALIZATION_WARNINGS);
   });
 
   test("T9b — the two `!== 'fetchFailed'` guards keep their answers too", () => {

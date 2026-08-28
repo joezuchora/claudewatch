@@ -15,7 +15,8 @@ import { isSurfaceableMessage } from './client.js';
 // A leaf module with no runtime imports, so this edge cannot close a cycle — unlike an import of
 // `normalize.ts`, which reaches back here through `telemetry.ts`. See closed-sets.ts's header.
 import {
-  UNKNOWN_FETCHED_AT, isStaleReason, isNormalizationWarning,
+  UNKNOWN_FETCHED_AT, isStaleReason, isNormalizationWarning, isAccountTier,
+  CLOCK_SKEW_TOLERANCE_MS, MAX_NORMALIZATION_WARNINGS,
 } from './closed-sets.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
@@ -167,11 +168,13 @@ export function readCacheResult(): CacheReadResult {
   // for readers of a field BY NAME cannot find a caller that stringifies the whole object. The
   // question is what gets serialised, not what gets read. Snapshot-level validation is sdlc/032.
   //
-  // The same reference-passthrough hole is still open ONE LEVEL UP and one level down, measured
-  // rather than assumed: an unknown key on the envelope itself, on `snapshot`, on `display`, or on
-  // any window object survives this function and reaches `--json`. Only `freshness` and
-  // `rawMetadata` — the two objects this loop claims to validate — are rebuilt from known keys.
-  // Whitelisting the rest is sdlc/032's job and needs its own tests.
+  // The same reference-passthrough hole is still open one level down, measured rather than assumed:
+  // an unknown key on `snapshot`, on `display`, or on any window object survives this function and
+  // reaches `--json`. An unknown key on the ENVELOPE also survives the read but is inert at every
+  // current surface — `output()` stringifies `snapshot`, not the envelope, and `printDebug` copies
+  // named keys — so it is the least of the four, not the most; the first version of this sentence
+  // ranked it wrong. Only `freshness`, `rawMetadata` and the leaves below are rebuilt from known
+  // keys. Whitelisting the rest is sdlc/032's job and needs its own tests.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -210,9 +213,17 @@ export function readCacheResult(): CacheReadResult {
   // replaced with a sentinel when it does not — including when it is not a string at all, which is
   // the case that used to delete the cache.
   //
-  // NOT clamped, unlike `cooldownUntil`: the hazards are opposite. A far-future cooldown suppresses
-  // fetches forever; a far-future `fetchedAt` suppresses one and is exactly what `detectClockSkew`
-  // reports. Clamping would delete that signal.
+  // NOT clamped, and the reason given here until sdlc/031's security pass was FALSE IN BOTH HALVES.
+  // It said a far-future `fetchedAt` "suppresses one [fetch] and is exactly what `detectClockSkew`
+  // reports. Clamping would delete that signal." Measured: `detectClockSkew` has ZERO production
+  // callers — there is no signal to delete — and `isCacheFresh` returns TRUE for `2099-01-01`, so
+  // nothing rewrites the cache and every subsequent render repeats it. One far-future byte pinned
+  // the tool on stale data permanently, escapable only with `--refresh`.
+  //
+  // Still not clamped, because the value is not the hazard — the comparison is. `isCacheFresh` now
+  // rejects an age below `-CLOCK_SKEW_TOLERANCE_MS`, which bounds the suppression while leaving the
+  // stored timestamp intact for whoever eventually consumes the skew signal. Citing a dead function
+  // as a reason not to act is the failure this loop is named for, arriving as a design decision.
   {
     const rawFetchedAt = parsed.snapshot.fetchedAt;
     const ms = typeof rawFetchedAt === 'string' ? Date.parse(rawFetchedAt) : NaN;
@@ -220,6 +231,13 @@ export function readCacheResult(): CacheReadResult {
     if (fetchedAt !== rawFetchedAt) {
       parsed = { ...parsed, snapshot: { ...parsed.snapshot, fetchedAt } };
     }
+  }
+
+  // `tier` is the ONE unvalidated leaf that reaches a persisted FILE rather than stdout — see
+  // ACCOUNT_TIERS. Degraded to `'unknown'`, which is a real member meaning exactly what a
+  // unrecognisable tier means, so no consumer needs a new branch.
+  if (!isAccountTier(parsed.snapshot.tier)) {
+    parsed = { ...parsed, snapshot: { ...parsed.snapshot, tier: 'unknown' } };
   }
 
   // `freshness` is emitted whole by `printDebug` (main.ts:145), so both its fields are surfaces.
@@ -265,7 +283,9 @@ export function readCacheResult(): CacheReadResult {
       snapshot: {
         ...parsed.snapshot,
         rawMetadata: {
-          normalizationWarnings: Array.isArray(w) ? w.filter(isNormalizationWarning) : [],
+          normalizationWarnings: Array.isArray(w)
+            ? w.filter(isNormalizationWarning).slice(0, MAX_NORMALIZATION_WARNINGS)
+            : [],
         },
       },
     };
@@ -314,6 +334,12 @@ export function isCacheFresh(
 ): boolean {
   const fetchedAt = new Date(envelope.snapshot.fetchedAt).getTime();
   const age = now - fetchedAt;
+  // A NEGATIVE age means the file claims to be from the future. Beyond the skew tolerance that is
+  // not freshness, it is a corrupt or hand-edited timestamp — and treating it as fresh pinned the
+  // tool on stale data forever, because this branch returns the cached snapshot WITHOUT rewriting
+  // the file, so every render repeated it. Found by sdlc/031's security pass; `2099-01-01` returned
+  // true. Bounding the comparison rather than clamping the stored value keeps the skew visible.
+  if (age < -CLOCK_SKEW_TOLERANCE_MS) return false;
   return age < ttlSeconds * 1000;
 }
 
