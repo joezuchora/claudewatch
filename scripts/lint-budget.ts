@@ -53,6 +53,7 @@ export interface Diagnostic {
 }
 
 export const BUDGET_PATH = '.oxlint-budget.json';
+export const OXLINT_BIN = 'node_modules/.bin/oxlint';
 
 /** Field separator for the composite key. Tab cannot appear in a rule code or a POSIX path. */
 const KEY_SEP = '\t';
@@ -145,6 +146,31 @@ export function report(diff: { added: readonly Row[]; removed: readonly Row[] })
 }
 
 /**
+ * Guarded, so the test and the CLI agree on what a valid oxlint payload is.
+ *
+ * The first version asserted the shape in the test with a bare `as` while the CLI narrowed it — the
+ * one unguarded `JSON.parse ... as` the diff added, against a standing item in
+ * `docs/audit-report.md`. Exported so there is one definition rather than two readings.
+ */
+export function parseOxlintOutput(raw: string): Diagnostic[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null) throw new Error('oxlint output is not an object');
+  const { diagnostics } = parsed as Record<string, unknown>;
+  if (!Array.isArray(diagnostics)) throw new Error('oxlint output has no diagnostics array');
+  return diagnostics as Diagnostic[];
+}
+
+/** See `fence-check.ts`'s copy for why record fields are scrubbed before they reach a terminal. */
+export function scrubControls(v: string): string {
+  let out = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    out += c < 0x20 || (c >= 0x7f && c <= 0x9f) ? ' ' : v[i];
+  }
+  return out;
+}
+
+/**
  * Validated, not `as`-asserted. `docs/audit-report.md` already carries `JSON.parse … as` as a
  * standing informational finding and this module must not add two more.
  */
@@ -164,7 +190,12 @@ export function parseBudget(text: string): Row[] {
     ) {
       throw new Error(`lint-budget: row ${i} is malformed`);
     }
-    return { code, filename, message, count };
+    return {
+      code: scrubControls(code),
+      filename: scrubControls(filename),
+      message: scrubControls(message),
+      count,
+    };
   });
 }
 
@@ -174,25 +205,22 @@ export function renderBudget(rows: readonly Row[]): string {
 }
 
 async function main(): Promise<number> {
-  const proc = Bun.spawn(['bunx', 'oxlint', '--format=json'], { stdout: 'pipe', stderr: 'pipe' });
+  // `node_modules/.bin/oxlint`, NOT `bunx`. bunx prefers the local bin but falls back to FETCHING
+  // from the registry when it is absent — a path on which the version pin added by this same loop
+  // is not what actually runs.
+  const proc = Bun.spawn([OXLINT_BIN, '--format=json'], { stdout: 'pipe', stderr: 'pipe' });
   const raw = await new Response(proc.stdout).text();
   await proc.exited;
 
-  let diagnostics: readonly Diagnostic[];
+  let actual: Row[];
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || !Array.isArray((parsed as { diagnostics?: unknown }).diagnostics)) {
-      throw new Error('no diagnostics array');
-    }
-    diagnostics = (parsed as { diagnostics: Diagnostic[] }).diagnostics;
+    actual = rowsFrom(parseOxlintOutput(raw));
   } catch (e) {
     // NOT treated as a clean tree. An empty warning set would silently "improve" the budget to
     // zero, which is the one failure mode a budget must never have.
     console.error(`lint-budget: could not read oxlint output (${String(e)}). This is a failure, not a clean tree.`);
     return 1;
   }
-
-  const actual = rowsFrom(diagnostics);
 
   if (!existsSync(BUDGET_PATH)) {
     console.error(`lint-budget: ${BUDGET_PATH} is missing. Create it with this content:\n`);

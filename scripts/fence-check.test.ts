@@ -5,8 +5,10 @@ import {
   compareToBaseline,
   extractFence,
   gitFiles,
+  NO_STAT,
   headingTokens,
   parseBaseline,
+  scrubControls,
   type SymbolIndex,
 } from './fence-check.js';
 
@@ -42,7 +44,9 @@ const SOURCES: Record<string, string> = {
 };
 
 const read = ((f: string): string => SOURCES[f] ?? '') as unknown as typeof import('fs').readFileSync;
-const INDEX: SymbolIndex = buildIndex(CORPUS, read);
+// NO_STAT: this corpus is string literals with no files behind it, so the lstat guard that
+// protects the live run from symlinks and huge files must be bypassed here.
+const INDEX: SymbolIndex = buildIndex(CORPUS, read, NO_STAT);
 
 const run = (spec: string, plan: string) => checkLoop('fixture', spec, plan, INDEX, CORPUS);
 
@@ -179,7 +183,7 @@ describe('checkLoop — portability', () => {
       'fixture',
       '### B3 — `extractLastError` is relabelled\n',
       '**Explicitly not touched:** `snapshot.ts`\n\n',
-      buildIndex(winCorpus, winRead),
+      buildIndex(winCorpus, winRead, NO_STAT),
       winCorpus,
     );
     expect(res?.findings).toEqual([
@@ -193,7 +197,7 @@ describe('checkLoop — portability', () => {
       'fixture',
       '### B1 — `snapshot.ts` is rewritten\n',
       '**Explicitly not touched:** `snapshot.ts`\n\n',
-      buildIndex([], read),
+      buildIndex([], read, NO_STAT),
       winCorpus,
     );
     expect(res?.findings.map((f) => f.file)).toEqual(['packages/core/src/snapshot.ts']);
@@ -240,6 +244,61 @@ describe('compareToBaseline — the four ways this gate fails', () => {
   test('the unresolved-token count moves in either direction, so the silence cannot grow quietly', () => {
     expect(compareToBaseline({ ...MATCH, unresolved: 23 }, BASE)[0]).toContain('unresolved heading tokens is 23');
     expect(compareToBaseline({ ...MATCH, unresolved: 21 }, BASE)[0]).toContain('unresolved heading tokens is 21');
+  });
+});
+
+/**
+ * Module scope, not nested inside the describe.
+ *
+ * As a nested helper capturing nothing it trips `unicorn(consistent-function-scoping)` — one of the
+ * two rules behind all five historic budget regressions. This is the first time that rule was
+ * caught by the gate instead of by a human, and it caught it in the very commit adding the gate.
+ */
+const statAs = (kind: 'file' | 'symlink' | 'huge') =>
+  ((_p: string) => ({
+    isFile: () => kind === 'file',
+    size: kind === 'huge' ? 99_000_000 : 10,
+  })) as unknown as typeof import('fs').lstatSync;
+
+describe('buildIndex — what it refuses to read', () => {
+  test('a regular file under the cap is indexed', () => {
+    const idx = buildIndex(['packages/core/src/snapshot.ts'], read, statAs('file'));
+    expect(idx.get('extractLastError')).toEqual(['packages/core/src/snapshot.ts']);
+  });
+
+  test('a SYMLINK is refused — lstat, not stat, so it is not followed out of the repo', () => {
+    const idx = buildIndex(['packages/core/src/snapshot.ts'], read, statAs('symlink'));
+    expect(idx.get('extractLastError')).toBeUndefined();
+  });
+
+  test('a file over the size cap is refused, so a tracked link to /dev/zero cannot OOM the gate', () => {
+    const idx = buildIndex(['packages/core/src/snapshot.ts'], read, statAs('huge'));
+    expect(idx.get('extractLastError')).toBeUndefined();
+  });
+
+  test('a tracked path missing from the working tree is skipped, not fatal', () => {
+    const throwing = (() => {
+      throw new Error('ENOENT');
+    }) as unknown as typeof import('fs').lstatSync;
+    expect(() => buildIndex(['packages/core/src/gone.ts'], read, throwing)).not.toThrow();
+  });
+});
+
+describe('scrubControls', () => {
+  test('a terminal escape in the baseline cannot reach stderr intact', () => {
+    const esc = String.fromCharCode(27);
+    const base = parseBaseline(
+      JSON.stringify({
+        uncheckable: 0,
+        unresolvedTokens: 0,
+        findings: [{ loop: 'l', specToken: 't', file: 'f', fenceEntry: `${esc}[31mx${esc}[0m`, note: 'n' }],
+      }),
+    );
+    expect(base.findings[0]?.fenceEntry).not.toContain(esc);
+  });
+
+  test('ordinary text is untouched', () => {
+    expect(scrubControls('packages/core/src/a.ts')).toBe('packages/core/src/a.ts');
   });
 });
 

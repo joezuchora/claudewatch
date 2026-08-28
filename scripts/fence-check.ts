@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'fs';
 
 /**
  * Compare each loop's `spec.md` against its `plan.md` scope fence.
@@ -101,14 +101,48 @@ export function headingTokens(specMd: string): string[] {
  */
 const bareSymbol = (t: string): string => t.replace(/\(.*$/, '').replace(/:.*$/, '').trim();
 
-export function buildIndex(corpus: readonly string[], read = readFileSync): SymbolIndex {
+/**
+ * A tracked path is only read when `lstat` says it is a regular file under the cap.
+ *
+ * `lstat`, not `stat`, so a SYMLINK is rejected rather than followed. sdlc/033's security pass
+ * demonstrated both halves in a scratch repo: a tracked `packages/core/src/evil.ts` symlinked
+ * outside the repo had its exports indexed, and one pointing at `/dev/zero` grew until ENOMEM and
+ * killed the gate — an unbounded OOM on any CI runner without a ulimit. A repository file's NAME
+ * must not decide what gets read.
+ *
+ * 1 MiB is ~4x the largest source file here and cannot plausibly be exceeded by hand-written TS.
+ */
+const MAX_INDEXED_BYTES = 1024 * 1024;
+
+/** Passed by tests whose corpus is string literals with no files behind it. */
+export const NO_STAT = null as unknown as typeof lstatSync;
+
+function readableSource(path: string, statFn = lstatSync): boolean {
+  try {
+    const st = statFn(path);
+    return st.isFile() && st.size <= MAX_INDEXED_BYTES;
+  } catch {
+    // A tracked path that is not present in the working tree (mid-rebase, a deleted-but-unstaged
+    // file) defines no symbol in the checked-out tree. Skipping it is correct; dying on it is not.
+    return false;
+  }
+}
+
+export function buildIndex(corpus: readonly string[], read = readFileSync, stat = lstatSync): SymbolIndex {
   const index = new Map<string, string[]>();
   for (const raw of corpus) {
     const f = toPosix(raw);
     if (!f.endsWith('.ts')) continue;
     if (!f.startsWith('packages/') && !f.startsWith('scripts/')) continue;
     if (f.startsWith(INDEX_EXCLUDE)) continue;
-    for (const m of String(read(raw, 'utf8')).matchAll(EXPORTED)) {
+    if (stat !== NO_STAT && !readableSource(raw, stat)) continue;
+    let source: string;
+    try {
+      source = String(read(raw, 'utf8'));
+    } catch {
+      continue;
+    }
+    for (const m of source.matchAll(EXPORTED)) {
       const k = m[1]!;
       const at = index.get(k);
       if (at) at.push(f);
@@ -213,9 +247,31 @@ export function parseBaseline(text: string): Baseline {
       ) {
         throw new Error(`fence-check: baseline finding ${i} is malformed`);
       }
-      return { loop, specToken, file, fenceEntry, note };
+      return {
+        loop: scrubControls(loop),
+        specToken: scrubControls(specToken),
+        file: scrubControls(file),
+        fenceEntry: scrubControls(fenceEntry),
+        note: scrubControls(note),
+      };
     }),
   };
+}
+
+/**
+ * Record files are skimmed in diff viewers, where a terminal escape is invisible; `compareToBaseline`
+ * then echoes these fields straight to stderr. The validators check TYPE, not character class, so a
+ * `fenceEntry` containing a raw CSI sequence survived them — sdlc/033's security pass demonstrated
+ * it. Scrubbed on parse, which is the same shape as loop 032's control-character rule for
+ * `disabledReason`: a positive bound at the boundary, not a blacklist at the printer.
+ */
+export function scrubControls(v: string): string {
+  let out = '';
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    out += c < 0x20 || (c >= 0x7f && c <= 0x9f) ? ' ' : v[i];
+  }
+  return out;
 }
 
 const keyOf = (f: Finding): string => `${f.loop}|${f.specToken}|${f.file}|${f.fenceEntry}`;
@@ -281,6 +337,11 @@ async function main(): Promise<number> {
   let uncheckable = 0;
   let checkable = 0;
   let skipped = 0;
+
+  if (!existsSync('sdlc')) {
+    console.error('fence-check: no `sdlc/` directory here — run me from the repository root.');
+    return 1;
+  }
 
   for (const loop of readdirSync('sdlc').filter((d) => /^\d{3}-/.test(d)).toSorted()) {
     const spec = `sdlc/${loop}/spec.md`;

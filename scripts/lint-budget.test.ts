@@ -1,5 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { diffBudget, parseBudget, renderBudget, report, rowsFrom, type Diagnostic, type Row } from './lint-budget.js';
+import {
+  diffBudget,
+  OXLINT_BIN,
+  parseBudget,
+  parseOxlintOutput,
+  renderBudget,
+  report,
+  rowsFrom,
+  scrubControls,
+  type Diagnostic,
+  type Row,
+} from './lint-budget.js';
 
 /**
  * Fixtures are string/object literals, never files on disk.
@@ -117,6 +128,29 @@ describe('report', () => {
   });
 });
 
+describe('parseOxlintOutput', () => {
+  test('a payload with no diagnostics array is a failure, never an empty warning set', () => {
+    expect(() => parseOxlintOutput('{}')).toThrow(/no diagnostics array/);
+    expect(() => parseOxlintOutput('null')).toThrow(/not an object/);
+    expect(() => parseOxlintOutput('{"diagnostics":{}}')).toThrow(/no diagnostics array/);
+  });
+});
+
+describe('scrubControls', () => {
+  test('a terminal escape in a committed record cannot reach stderr intact', () => {
+    const esc = String.fromCharCode(27);
+    const row = parseBudget(
+      JSON.stringify([{ code: 'a', filename: `${esc}[31mevil${esc}[0m`, message: 'm', count: 1 }]),
+    );
+    expect(row[0]?.filename).not.toContain(esc);
+    expect(report({ added: row, removed: [] })[0]).not.toContain(esc);
+  });
+
+  test('ordinary text is untouched', () => {
+    expect(scrubControls('packages/core/src/a.ts')).toBe('packages/core/src/a.ts');
+  });
+});
+
 describe('parseBudget', () => {
   test('round-trips what renderBudget writes', () => {
     const rows = rowsOf(BASE);
@@ -133,12 +167,10 @@ describe('parseBudget', () => {
 
 describe('the committed budget', () => {
   test('matches the current tree, and is what the gate compares', async () => {
-    const proc = Bun.spawn(['bunx', 'oxlint', '--format=json'], { stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn([OXLINT_BIN, '--format=json'], { stdout: 'pipe', stderr: 'pipe' });
     const raw = await new Response(proc.stdout).text();
     await proc.exited;
-    const parsed: unknown = JSON.parse(raw);
-    const diagnostics = (parsed as { diagnostics: Diagnostic[] }).diagnostics;
     const budget = parseBudget(await Bun.file('.oxlint-budget.json').text());
-    expect(diffBudget(rowsFrom(diagnostics), budget)).toEqual({ added: [], removed: [] });
+    expect(diffBudget(rowsFrom(parseOxlintOutput(raw)), budget)).toEqual({ added: [], removed: [] });
   });
 });
