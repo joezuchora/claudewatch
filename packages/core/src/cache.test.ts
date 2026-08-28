@@ -603,8 +603,26 @@ describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
     }));
     const got = readCacheResult().envelope!.snapshot.tier;
     expect(got).toBe('unknown');
-    // Positive control: a real member is not rewritten.
-    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ tier: 'enterprise' }) }));
+
+    // Positive control: a real member is not rewritten. UPDATED by sdlc/032 — the original control
+    // seeded `tier: 'enterprise'` on a snapshot whose `enterprise` is null, which is exactly the
+    // incoherent pair sanitizeSnapshot's coupling rule now eliminates, so it began returning
+    // 'unknown'. The rule is right and the old control encoded a state no producer can emit:
+    // normalize() sets tier:'enterprise' only inside its `enterprise !== null` branch. This is the
+    // ONE existing expectation this loop changes, against a predicted zero.
+    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ tier: 'standard' }) }));
+    expect(readCacheResult().envelope!.snapshot.tier).toBe('standard');
+
+    // And the coupling must not OVER-fire: 'enterprise' beside a real enterprise block survives.
+    seed(makeTestEnvelope({
+      snapshot: makeTestSnapshot({
+        tier: 'enterprise',
+        enterprise: {
+          utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 12,
+          currency: 'USD', isEnabled: true, disabledReason: null,
+        },
+      }),
+    }));
     expect(readCacheResult().envelope!.snapshot.tier).toBe('enterprise');
   });
 

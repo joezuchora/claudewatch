@@ -66,7 +66,10 @@ describe('telemetry: emit', () => {
   });
 
   test('an oversized line is dropped and counted, not written', () => {
-    const huge = 'x'.repeat(MAX_LINE_BYTES + 100);
+    // `as never` is load-bearing since sdlc/032 narrowed `PayloadLeaf`: these cases park an
+    // oversized string in a payload to exercise the BYTE CAP, which means constructing a value the
+    // type now forbids. The cast is the point, not a smell — and no assertion here changed.
+    const huge = 'x'.repeat(MAX_LINE_BYTES + 100) as never;
     emit(ON, makeEvent('product', 'render', true, 1, { surface: huge }));
     expect(existsSync(getSpoolPath())).toBe(false);
     expect(readSpoolState().droppedCount).toBe(1);
@@ -84,7 +87,10 @@ describe('telemetry: emit', () => {
   });
 
   test('the drop counter survives across processes via the sidecar', () => {
-    const huge = 'x'.repeat(MAX_LINE_BYTES + 100);
+    // `as never` is load-bearing since sdlc/032 narrowed `PayloadLeaf`: these cases park an
+    // oversized string in a payload to exercise the BYTE CAP, which means constructing a value the
+    // type now forbids. The cast is the point, not a smell — and no assertion here changed.
+    const huge = 'x'.repeat(MAX_LINE_BYTES + 100) as never;
     emit(ON, makeEvent('product', 'render', true, 1, { surface: huge }));
     emit(ON, makeEvent('product', 'render', true, 1, { surface: huge }));
 

@@ -24,6 +24,7 @@
 import { appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getCacheDir } from './cache.js';
+import type { AccountTier, RuntimeState } from './types.js';
 import type { TelemetryConfig } from './config.js';
 
 export const TELEMETRY_SCHEMA_VERSION = 1;
@@ -43,6 +44,32 @@ export type CacheOutcome =
 export type Surface = 'statusline' | 'vscode';
 export type WarningCategory = 'window' | 'timestamp' | 'enterprise' | 'shape';
 
+/**
+ * Every value type a telemetry payload leaf may hold. **No bare `string`.**
+ *
+ * `SPEC.md §17` required this as prose and `renderEvent`'s own comment asserted it — "constrained
+ * by their producing unions in types.ts" — which is the argument sdlc/029-031 established is void
+ * for a value read off a cache file, written in the payload builder itself.
+ *
+ * Narrowing `renderEvent`'s two parameters alone does NOT deliver the guarantee: sdlc/032's Stage 2
+ * reviewer added a `newFreeText?: string` and typecheck exited 0, because `string` was structurally
+ * legal in a payload. This union is what makes it a compile error, and
+ * `typefixtures/payload-string.expect-error.ts` freezes that.
+ *
+ * Four of the six string leaves were already closed unions when this was written; only
+ * `runtimeState` and `tier` were bare.
+ */
+export type PayloadLeaf =
+  | number
+  | boolean
+  | null
+  | Surface
+  | StatusClass
+  | CacheOutcome
+  | WarningCategory
+  | RuntimeState
+  | AccountTier;
+
 export interface MetricEvent {
   eventId: string;
   ts: string;
@@ -51,7 +78,7 @@ export interface MetricEvent {
   ok: boolean;
   durationMs: number | null;
   schemaVersion: number;
-  payload: Record<string, string | number | boolean | null>;
+  payload: Record<string, PayloadLeaf>;
 }
 
 export interface SpoolState {
@@ -152,7 +179,7 @@ export function makeEvent(
   kind: string,
   ok: boolean,
   durationMs: number | null,
-  payload: Record<string, string | number | boolean | null>,
+  payload: Record<string, PayloadLeaf>,
 ): MetricEvent {
   return {
     eventId: newEventId(),
@@ -228,13 +255,15 @@ export function cacheEvent(args: { outcome: CacheOutcome }): MetricEvent {
 
 export function renderEvent(args: {
   surface: Surface;
-  runtimeState: string;
-  tier: string;
+  runtimeState: RuntimeState;
+  tier: AccountTier;
   utilizationBucket: number | null;
   durationMs: number | null;
 }): MetricEvent {
-  // runtimeState and tier are constrained by their producing unions in types.ts; bucket is a
-  // decile, never a raw utilization, and never a credit amount.
+  // Every leaf here is a closed enum, a decile bucket, or a number — enforced by `PayloadLeaf`
+  // since sdlc/032, not by this comment. `utilizationBucket` is never a raw utilization and never
+  // a credit amount. `tier` additionally passes through `sanitizeSnapshot` at the cache-read
+  // boundary, because a producing union says nothing about a value read off disk.
   return makeEvent('product', 'render', true, args.durationMs, {
     surface: args.surface,
     runtimeState: args.runtimeState,

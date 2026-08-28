@@ -14,10 +14,8 @@ import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
 import { isSurfaceableMessage } from './client.js';
 // A leaf module with no runtime imports, so this edge cannot close a cycle — unlike an import of
 // `normalize.ts`, which reaches back here through `telemetry.ts`. See closed-sets.ts's header.
-import {
-  UNKNOWN_FETCHED_AT, isStaleReason, isNormalizationWarning, isAccountTier,
-  CLOCK_SKEW_TOLERANCE_MS, MAX_NORMALIZATION_WARNINGS,
-} from './closed-sets.js';
+import { CLOCK_SKEW_TOLERANCE_MS } from './closed-sets.js';
+import { sanitizeSnapshot } from './sanitize-snapshot.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -156,25 +154,16 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'invalidShape' };
   }
 
-  // Seven fields are VALIDATED below. All are degraded rather than rejected: discarding a good
-  // snapshot would cost a live token-bearing fetch on every read, and delete the cooldown that
-  // throttles one.
+  // Everything below is degraded, never rejected: discarding a good snapshot would cost a live
+  // token-bearing fetch on every read, and delete the cooldown that throttles one.
   //
-  // **This does not make the envelope fully validated, and saying so was a defect in sdlc/031's own
-  // draft.** `--json` serialises the WHOLE snapshot, at THREE cache-derived call sites of `output()`
-  // (main.ts:241, :256 and :310 -> :371; :291 alone is a fresh `normalize()` result), so
-  // `source.usageEndpoint`, `authState`, `tier`, `display.*` and every window field still reach
-  // stdout verbatim. That surface was missed for a structural reason worth remembering: a search
-  // for readers of a field BY NAME cannot find a caller that stringifies the whole object. The
-  // question is what gets serialised, not what gets read. Snapshot-level validation is sdlc/032.
+  // Since sdlc/032 the SNAPSHOT is rebuilt wholesale rather than patched field by field, so the
+  // running count that used to sit here — "two", then "three", then "seven" — is gone with it.
+  // What is left at this level is the three envelope error fields plus `lastHttpStatus`.
   //
-  // The same reference-passthrough hole is still open one level down, measured rather than assumed:
-  // an unknown key on `snapshot`, on `display`, or on any window object survives this function and
-  // reaches `--json`. An unknown key on the ENVELOPE also survives the read but is inert at every
-  // current surface — `output()` stringifies `snapshot`, not the envelope, and `printDebug` copies
-  // named keys — so it is the least of the four, not the most; the first version of this sentence
-  // ranked it wrong. Only `freshness`, `rawMetadata` and the leaves below are rebuilt from known
-  // keys. Whitelisting the rest is sdlc/032's job and needs its own tests.
+  // Still open, and named rather than implied: an unknown key on the ENVELOPE survives this
+  // function. It is inert at every current surface — `output()` serialises the snapshot and
+  // `printDebug` copies named keys — which is why it is the least of the gaps, not the most.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -207,88 +196,22 @@ export function readCacheResult(): CacheReadResult {
   // Nulled on garbage (fail open, one fetch, then a real cooldown is written), clamped on
   // magnitude (fail closed, never longer than the backoff we would have set ourselves), and
   // canonicalised so the string that comes out is one we constructed rather than one we read.
-  // `fetchedAt` reaches `--debug` as `lastFetchedAt` and `--json` as part of the whole snapshot.
-  // Canonicalised when it parses (the `cooldownUntil` rule, for the same reason: `Date.parse`
-  // accepts far more than ISO-8601 and its legacy parser ignores parenthesised trailing text), and
-  // replaced with a sentinel when it does not — including when it is not a string at all, which is
-  // the case that used to delete the cache.
-  //
-  // NOT clamped, and the reason given here until sdlc/031's security pass was FALSE IN BOTH HALVES.
-  // It said a far-future `fetchedAt` "suppresses one [fetch] and is exactly what `detectClockSkew`
-  // reports. Clamping would delete that signal." Measured: `detectClockSkew` has ZERO production
-  // callers — there is no signal to delete — and `isCacheFresh` returns TRUE for `2099-01-01`, so
-  // nothing rewrites the cache and every subsequent render repeats it. One far-future byte pinned
-  // the tool on stale data permanently, escapable only with `--refresh`.
-  //
-  // Still not clamped, because the value is not the hazard — the comparison is. `isCacheFresh` now
-  // rejects an age below `-CLOCK_SKEW_TOLERANCE_MS`, which bounds the suppression while leaving the
-  // stored timestamp intact for whoever eventually consumes the skew signal. Citing a dead function
-  // as a reason not to act is the failure this loop is named for, arriving as a design decision.
-  {
-    const rawFetchedAt = parsed.snapshot.fetchedAt;
-    const ms = typeof rawFetchedAt === 'string' ? Date.parse(rawFetchedAt) : NaN;
-    const fetchedAt = Number.isFinite(ms) ? new Date(ms).toISOString() : UNKNOWN_FETCHED_AT;
-    if (fetchedAt !== rawFetchedAt) {
-      parsed = { ...parsed, snapshot: { ...parsed.snapshot, fetchedAt } };
-    }
-  }
+  // ONE call replaces the four per-field blocks sdlc/030 and 031 grew here. `sanitizeSnapshot`
+  // rebuilds the snapshot from known keys, so every field is validated and no unknown key at any
+  // depth survives — measured at 26 of 26 leaking before it existed. See sanitize-snapshot.ts for
+  // why a whitelist rather than in-place validation, and for the coherence rules that stop
+  // independent degradation inventing states no producer can emit.
+  parsed = { ...parsed, snapshot: sanitizeSnapshot(parsed.snapshot) };
 
-  // `tier` is the ONE unvalidated leaf that reaches a persisted FILE rather than stdout — see
-  // ACCOUNT_TIERS. Degraded to `'unknown'`, which is a real member meaning exactly what a
-  // unrecognisable tier means, so no consumer needs a new branch.
-  if (!isAccountTier(parsed.snapshot.tier)) {
-    parsed = { ...parsed, snapshot: { ...parsed.snapshot, tier: 'unknown' } };
-  }
-
-  // `freshness` is emitted whole by `printDebug` (main.ts:145), so both its fields are surfaces.
-  //
-  // `staleReason` falls back to `'none'` because that changes NO observable classification: every
-  // consumer tests for a specific reason, so an unknown string and `'none'` take identical branches
-  // at all five sites (state.ts:30,43,49, main.ts:250, extension.ts:175). Measured before the
-  // change and recorded in sdlc/031's plan.md, with positive controls showing the classifier does
-  // distinguish real members. `isStale` is left alone when it is a boolean: inventing a cause for a
-  // staleness we cannot explain is worse than recording none.
-  //
-  // REBUILT UNCONDITIONALLY, not only when a field is bad. The first version reconstructed the
-  // object only when a degradation fired, so an envelope whose two known fields were both valid
-  // passed `freshness` through BY REFERENCE — and any unknown sibling key on it survived to
-  // `--debug` and `--json`. Measured: a `freshness.evil` key reached stdout verbatim. The comment
-  // here already said "`freshness` is emitted whole by `printDebug`" and then drew the narrower
-  // conclusion "so both its FIELDS are surfaces". Emitted whole means every KEY is a surface.
-  // Found by sdlc/031's Stage 5 audit; it is this loop's own rule — return what you constructed,
-  // never what you read — applied to an object instead of a scalar.
-  {
-    const f = parsed.snapshot.freshness;
-    parsed = {
-      ...parsed,
-      snapshot: {
-        ...parsed.snapshot,
-        freshness: {
-          isStale: typeof f.isStale === 'boolean' ? f.isStale : false,
-          staleReason: isStaleReason(f.staleReason) ? f.staleReason : 'none',
-        },
-      },
-    };
-  }
-
-  // `normalizationWarnings` is printed by `--debug` and serialised by `--json`. Filtered rather than
-  // emptied, so a poisoned entry costs only itself: a real warning beside it survives, which is the
-  // whole value of the field on the path where it appears.
-  // Rebuilt unconditionally too, for the reason above: `rawMetadata` leaked unknown sibling keys
-  // whenever every warning happened to be valid.
-  {
-    const w: unknown = parsed.snapshot.rawMetadata?.normalizationWarnings;
-    parsed = {
-      ...parsed,
-      snapshot: {
-        ...parsed.snapshot,
-        rawMetadata: {
-          normalizationWarnings: Array.isArray(w)
-            ? w.filter(isNormalizationWarning).slice(0, MAX_NORMALIZATION_WARNINGS)
-            : [],
-        },
-      },
-    };
+  // `lastHttpStatus` is an ENVELOPE field, so `sanitizeSnapshot` cannot reach it — and it reaches
+  // `--debug` verbatim (main.ts:142, :170). Measured: a seeded
+  // `"lastHttpStatus": "MARK /home/someone/.claude"` printed to stdout. It does NOT reach `--json`,
+  // which serialises the snapshot rather than the envelope, and that asymmetry is why the two
+  // end-to-end tests differ on this field. Found by sdlc/032's Stage 2 review, which also caught
+  // that the first spec draft made DELETING §12's gap paragraph a pass condition while this still
+  // echoed.
+  if (parsed.lastHttpStatus !== null && !Number.isInteger(parsed.lastHttpStatus)) {
+    parsed = { ...parsed, lastHttpStatus: null };
   }
 
   parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
