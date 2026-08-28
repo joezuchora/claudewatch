@@ -12,6 +12,11 @@ import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
 // everything crossing it is a hoisted function declaration. A module-level `const` added to
 // client.ts and read at cache.ts load time would TDZ. (sdlc/030 security pass, finding 4.)
 import { isSurfaceableMessage } from './client.js';
+// A leaf module with no runtime imports, so this edge cannot close a cycle — unlike an import of
+// `normalize.ts`, which reaches back here through `telemetry.ts`. See closed-sets.ts's header.
+import {
+  UNKNOWN_FETCHED_AT, isStaleReason, isNormalizationWarning,
+} from './closed-sets.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -129,10 +134,19 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'versionMismatch' };
   }
 
+  // `fetchedAt` USED to be checked here, and a non-string one deleted the whole envelope — taking
+  // the live `cooldownUntil` with it, which is §9.4's only throttle on token-bearing requests.
+  // sdlc/031 measured that: `cooldownActive: false` and `usage.json` gone. It moved below, where a
+  // sentinel exists to degrade to.
+  //
+  // What is left rejects because there is nothing coherent to substitute. That is the line — not
+  // "shape rejects, value degrades", which was a taxonomy this loop's own draft used to excuse the
+  // hazard above. **These paths keep their §9.4 exposure**: a structurally broken envelope still
+  // discards the cooldown. Named, not closed; closing it needs the cooldown stored separably from
+  // the snapshot. See sdlc/031's spec.
   if (
     !parsed.snapshot ||
     typeof parsed.snapshot !== 'object' ||
-    typeof parsed.snapshot.fetchedAt !== 'string' ||
     !parsed.snapshot.display ||
     !parsed.snapshot.freshness
   ) {
@@ -141,21 +155,16 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'invalidShape' };
   }
 
-  // Three fields are VALIDATED below, in two idioms: `lastErrorClass` and `lastErrorMessage` are
-  // nulled on failure, `cooldownUntil` is sanitised, clamped and canonicalised. All three are
-  // degraded rather than rejected: none says anything about the snapshot beside it, and discarding
-  // a good snapshot would cost a live token-bearing fetch on every read.
+  // Seven fields are VALIDATED below. All are degraded rather than rejected: discarding a good
+  // snapshot would cost a live token-bearing fetch on every read, and delete the cooldown that
+  // throttles one.
   //
-  // At least three more cross the `as CacheEnvelope` assertion and are NOT validated —
-  // `snapshot.fetchedAt` (checked for `typeof === 'string'` above, nothing more),
-  // `snapshot.freshness.staleReason` (presence of `freshness` only), and
-  // `snapshot.rawMetadata.normalizationWarnings` (not checked at all). All three reach `--debug`
-  // stdout verbatim. They are closed-set at every writer today, which is exactly the posture
-  // sdlc/029 left `lastErrorMessage` in and sdlc/030 declared insufficient — so this is a known
-  // open gap, not a cleared one. sdlc/030's security pass measured it; see that review.md.
-  //
-  // The count said "Two" until sdlc/030 and named the wrong set. `lastErrorMessage` was validated
-  // nowhere on this path, while the pattern for doing it properly sat ten lines below.
+  // **This does not make the envelope fully validated, and saying so was a defect in sdlc/031's own
+  // draft.** `--json` (main.ts:241, :256 -> :371) serialises the WHOLE snapshot, so
+  // `source.usageEndpoint`, `authState`, `tier`, `display.*` and every window field still reach
+  // stdout verbatim. That surface was missed for a structural reason worth remembering: a search
+  // for readers of a field BY NAME cannot find a caller that stringifies the whole object. The
+  // question is what gets serialised, not what gets read. Snapshot-level validation is sdlc/032.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -188,6 +197,55 @@ export function readCacheResult(): CacheReadResult {
   // Nulled on garbage (fail open, one fetch, then a real cooldown is written), clamped on
   // magnitude (fail closed, never longer than the backoff we would have set ourselves), and
   // canonicalised so the string that comes out is one we constructed rather than one we read.
+  // `fetchedAt` reaches `--debug` as `lastFetchedAt` and `--json` as part of the whole snapshot.
+  // Canonicalised when it parses (the `cooldownUntil` rule, for the same reason: `Date.parse`
+  // accepts far more than ISO-8601 and its legacy parser ignores parenthesised trailing text), and
+  // replaced with a sentinel when it does not — including when it is not a string at all, which is
+  // the case that used to delete the cache.
+  //
+  // NOT clamped, unlike `cooldownUntil`: the hazards are opposite. A far-future cooldown suppresses
+  // fetches forever; a far-future `fetchedAt` suppresses one and is exactly what `detectClockSkew`
+  // reports. Clamping would delete that signal.
+  {
+    const rawFetchedAt = parsed.snapshot.fetchedAt;
+    const ms = typeof rawFetchedAt === 'string' ? Date.parse(rawFetchedAt) : NaN;
+    const fetchedAt = Number.isFinite(ms) ? new Date(ms).toISOString() : UNKNOWN_FETCHED_AT;
+    if (fetchedAt !== rawFetchedAt) {
+      parsed = { ...parsed, snapshot: { ...parsed.snapshot, fetchedAt } };
+    }
+  }
+
+  // `freshness` is emitted whole by `printDebug` (main.ts:145), so both its fields are surfaces.
+  //
+  // `staleReason` falls back to `'none'` because that changes NO observable classification: every
+  // consumer tests for a specific reason, so an unknown string and `'none'` take identical branches
+  // at all five sites (state.ts:30,43,49, main.ts:250, extension.ts:175). Measured before the
+  // change and recorded in sdlc/031's plan.md, with positive controls showing the classifier does
+  // distinguish real members. `isStale` is left alone when it is a boolean: inventing a cause for a
+  // staleness we cannot explain is worse than recording none.
+  {
+    const f = parsed.snapshot.freshness;
+    const staleReason = isStaleReason(f.staleReason) ? f.staleReason : 'none';
+    const isStale = typeof f.isStale === 'boolean' ? f.isStale : false;
+    if (staleReason !== f.staleReason || isStale !== f.isStale) {
+      parsed = { ...parsed, snapshot: { ...parsed.snapshot, freshness: { isStale, staleReason } } };
+    }
+  }
+
+  // `normalizationWarnings` is printed by `--debug` and serialised by `--json`. Filtered rather than
+  // emptied, so a poisoned entry costs only itself: a real warning beside it survives, which is the
+  // whole value of the field on the path where it appears.
+  {
+    const w: unknown = parsed.snapshot.rawMetadata?.normalizationWarnings;
+    const kept = Array.isArray(w) ? w.filter(isNormalizationWarning) : [];
+    if (!Array.isArray(w) || kept.length !== w.length) {
+      parsed = {
+        ...parsed,
+        snapshot: { ...parsed.snapshot, rawMetadata: { normalizationWarnings: kept } },
+      };
+    }
+  }
+
   parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
 
   return { envelope: parsed, reason: 'hit' };

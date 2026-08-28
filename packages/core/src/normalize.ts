@@ -1,5 +1,11 @@
 import type { UsageSnapshot, UsageWindow, EnterpriseUsage } from './types.js';
 import { emitProcess, schemaDriftEvent, categorizeWarning } from './telemetry.js';
+// The reader filters `normalizationWarnings` against this same set (sdlc/031). Sourcing the strings
+// here rather than spelling them twice is what stops producer and filter drifting into a state
+// where a real warning is silently dropped on read.
+import {
+  WINDOW_NAMES, resetsAtWarning, WARNING_NOT_AN_OBJECT, WARNING_NO_VALID_WINDOWS,
+} from './closed-sets.js';
 
 const ISO_CURRENCY_RE = /^[A-Z]{3}$/;
 
@@ -21,7 +27,7 @@ function parseWindow(raw: unknown, warnings: string[], name: string): UsageWindo
   if (typeof raw.resets_at === 'string' && raw.resets_at.length > 0) {
     const parsed = new Date(raw.resets_at);
     if (isNaN(parsed.getTime())) {
-      warnings.push(`${name}.resets_at is not a valid ISO timestamp`);
+      warnings.push(resetsAtWarning(name));
     } else {
       resetsAt = parsed.toISOString();
     }
@@ -118,14 +124,17 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
   const now = fetchedAt ?? new Date().toISOString();
 
   if (raw === null || raw === undefined || typeof raw !== 'object') {
-    return makeMalformed(now, ['Response is not an object']);
+    return makeMalformed(now, [WARNING_NOT_AN_OBJECT]);
   }
 
   const obj = raw as Record<string, unknown>;
 
-  const fiveHour = parseWindow(obj.five_hour, warnings, 'five_hour');
-  const sevenDay = parseWindow(obj.seven_day, warnings, 'seven_day');
-  const sevenDayOpus = parseWindow(obj.seven_day_opus, warnings, 'seven_day_opus');
+  // Names come from WINDOW_NAMES so the closed set and the call sites cannot disagree; they are
+  // still literals, which is what makes resetsAtWarning's output a closed set at all.
+  const [FIVE_HOUR, SEVEN_DAY, SEVEN_DAY_OPUS] = WINDOW_NAMES;
+  const fiveHour = parseWindow(obj.five_hour, warnings, FIVE_HOUR);
+  const sevenDay = parseWindow(obj.seven_day, warnings, SEVEN_DAY);
+  const sevenDayOpus = parseWindow(obj.seven_day_opus, warnings, SEVEN_DAY_OPUS);
 
   // Detect enterprise tier from the presence of extra_usage. This signal is
   // distinct from "both windows are null" — standard accounts omit extra_usage
@@ -162,7 +171,7 @@ export function normalize(raw: unknown, fetchedAt?: string): UsageSnapshot {
     sevenDay.utilizationPct === null &&
     sevenDayOpus.utilizationPct === null
   ) {
-    return makeMalformed(now, [...warnings, 'No valid usage windows found']);
+    return makeMalformed(now, [...warnings, WARNING_NO_VALID_WINDOWS]);
   }
 
   // One event per successful normalize, never per warning: a malformed response with eight

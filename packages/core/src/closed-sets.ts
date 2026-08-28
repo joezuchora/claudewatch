@@ -1,0 +1,97 @@
+/**
+ * Closed sets shared between a producer and the cache reader.
+ *
+ * **A leaf module on purpose.** `cache.ts` needs the warning set and `normalize.ts` produces it, but
+ * a direct `cache.ts -> normalize.ts` edge would close a cycle: `normalize.ts` imports
+ * `telemetry.ts`, and `telemetry.ts:26` imports `getCacheDir` from `cache.ts`. Measured, not
+ * assumed. sdlc/030 took a review NIT for stating a cycle claim more confidently than its premise
+ * supported; this module removes the question rather than re-litigating it. Nothing here imports
+ * anything at runtime, so it can never participate in one.
+ *
+ * `state.ts` was considered as a home for the StaleReason members and rejected: warning strings are
+ * not a classification concern, and splitting them across two modules would be worse than either.
+ */
+import type { StaleReason } from './types.js';
+
+/**
+ * What `readCacheResult` substitutes for a `fetchedAt` it cannot parse.
+ *
+ * Not an ISO timestamp, deliberately, and every downstream behaviour was measured rather than
+ * reasoned about: `formatLocalTime` returns the literal `unknown` (so `format.ts:437` renders
+ * "Fresh as of unknown" rather than a plausible time), `isCacheFresh` returns false, and
+ * `printDebug`'s `Math.round(NaN)` serialises to `cacheAgeSec: null` — the same shape a cache miss
+ * emits.
+ *
+ * The epoch was the obvious alternative and is wrong: `new Date(0)` renders "12:00 AM", so a
+ * snapshot of unknowable age would print a confident falsehood on the user's statusline. A
+ * documented-contract nuance is the better price. See sdlc/031's spec, Rejected alternatives.
+ */
+export const UNKNOWN_FETCHED_AT = 'unknown';
+
+/** Every member of `StaleReason`, as values. */
+export const STALE_REASONS = [
+  'none',
+  'fetchFailed',
+  'authInvalid',
+  'sourceUnavailable',
+  'malformedResponse',
+] as const satisfies readonly StaleReason[];
+
+// A new StaleReason member that nobody adds here is a compile error, not a silent hole. Mirrors
+// `FAILURE_CLASSES`'s guard in cooldown.ts; sdlc/014 established the idiom and typefixtures/
+// freezes the form.
+const _allReasonsCovered: never = null as unknown as Exclude<
+  StaleReason,
+  (typeof STALE_REASONS)[number]
+>;
+void _allReasonsCovered;
+
+const STALE_REASON_SET: ReadonlySet<string> = new Set(STALE_REASONS);
+
+export function isStaleReason(value: unknown): value is StaleReason {
+  return typeof value === 'string' && STALE_REASON_SET.has(value);
+}
+
+/** The window names `normalize` passes to `parseWindow`. All three are literals at the call sites. */
+export const WINDOW_NAMES = ['five_hour', 'seven_day', 'seven_day_opus'] as const;
+
+/** The one interpolated warning form. Closed only because every `name` above is a literal. */
+export function resetsAtWarning(name: string): string {
+  return `${name}.resets_at is not a valid ISO timestamp`;
+}
+
+/**
+ * Every string `normalize()` can put into `rawMetadata.normalizationWarnings`.
+ *
+ * **Nine, and the count is the whole point.** sdlc/031's intent said eight; its spec's first draft
+ * said seven and built a table to prove it. The table was assembled by grepping `warnings.push` —
+ * and two producers do not use `push`: `normalize.ts:121` and `:165` pass literal arrays to
+ * `makeMalformed`. A filter built from that table would have DROPPED the headline warning of the
+ * malformed-response path on read, deleting diagnostics from the one cache file where they matter.
+ * Found by the Stage 2 review, by driving `normalize()` instead of reading it.
+ *
+ * `closed-sets.test.ts` re-derives this set from `normalize()` on every run, so the next producer
+ * added without a row here is a red test rather than silent data loss.
+ */
+/** The two `makeMalformed` warnings. Named so the call sites reference them rather than respell them. */
+export const WARNING_NOT_AN_OBJECT = 'Response is not an object';
+export const WARNING_NO_VALID_WINDOWS = 'No valid usage windows found';
+
+export const NORMALIZATION_WARNINGS: readonly string[] = [
+  // From makeMalformed's literal-array arguments — NOT from warnings.push. These two are the rows
+  // the spec's first table lost, because it was built from a `warnings.push` grep.
+  WARNING_NOT_AN_OBJECT,
+  WARNING_NO_VALID_WINDOWS,
+  // From warnings.push.
+  'extra_usage present but missing required fields',
+  'extra_usage present but has out-of-range values',
+  'extra_usage present but has invalid enabled monthly limit',
+  'extra_usage.currency invalid; defaulted to USD',
+  ...WINDOW_NAMES.map(resetsAtWarning),
+];
+
+const WARNING_SET: ReadonlySet<string> = new Set(NORMALIZATION_WARNINGS);
+
+export function isNormalizationWarning(value: unknown): value is string {
+  return typeof value === 'string' && WARNING_SET.has(value);
+}

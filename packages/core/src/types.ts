@@ -17,7 +17,14 @@ export interface EnterpriseUsage {
 }
 
 export interface UsageSnapshot {
-  fetchedAt: string; // ISO timestamp, always UTC
+  // ISO timestamp, always UTC — with ONE documented exception. `readCacheResult` substitutes
+  // `UNKNOWN_FETCHED_AT` ('unknown') for a value off disk it cannot parse, rather than deleting the
+  // envelope and the cooldown with it (sdlc/031). So a snapshot that came from the CACHE may carry
+  // a non-ISO sentinel here; one that came from `normalize()` never does. Every reader handles it:
+  // `formatLocalTime` renders the literal 'unknown', `isCacheFresh` returns false, `detectClockSkew`
+  // returns false, and `printDebug`'s age arithmetic serialises to null. SPEC.md §11.4 and §14
+  // record the same exception against `--json`.
+  fetchedAt: string;
   source: {
     usageEndpoint: 'success' | 'failed' | 'unavailable';
   };
