@@ -917,3 +917,67 @@ Four consecutive loops have now broken a rule recorded in this file by the loop 
 honest conclusion is not "try harder". It is that these rules are not self-enforcing, and the
 reviewers are the enforcement: every one of the three errors above was found by an agent that ran the
 measurement again.
+
+## Loop 032 — a test that cannot fail
+
+Loops 030 and 031 validated fields at the cache-read boundary, one at a time, in place. Loop 032
+replaced that with a **whitelist rebuild**: `sanitizeSnapshot` constructs a new snapshot from a
+declared list of eleven fields, so an unknown key cannot ride along. The difference is which way the
+mechanism fails. Validate-in-place fails by **leaking** a field nobody enumerated, and nothing catches
+that. A rebuild fails by **dropping** a field, and a strict round-trip catches it on the next run.
+That trade is the whole design, and it is the right one.
+
+The loop still shipped three defects into review. None of the three was found by me.
+
+**A rebuild bug that passed all 870 tests.** The rebuild hardcoded `isEnabled: false`. `format.ts:373`
+gates the enterprise line on `!e.isEnabled`, so every enterprise account with extra usage enabled
+would have read back from cache as disabled. Eight hundred and seventy green tests, and not one of
+them touched it. The reason is worth more than the bug: the poisoned fixture corrupts
+`enterprise.utilizationPct`, and `sanitizeEnterprise` **short-circuits to `null`** on any bad numeric.
+One poisoned field means the other five rules under that guard are never reached.
+
+> **When a validator short-circuits, one poisoned fixture is not a test suite — it is a test of the
+> short circuit.** Every rule behind an early return needs its own fixture that is valid up to that
+> rule.
+
+**The `--debug` e2e leg could not fail.** Mutate `sanitizeSnapshot` into a no-op and twenty-two tests
+go red — and T2, the end-to-end leak assertion, stays **green**. `printDebug` emits a fixed key list;
+four fields from the snapshot reach it, and none of the poisoned ones did. Commit 4 had already
+written that leg into `SPEC.md` as evidence. The e2e claim was load-bearing in the spec and inert in
+the suite.
+
+> **A test that has never been seen to fail has not been tested.** Mutation testing is how this repo
+> checks that, and this loop proves the check must be **per rule, not per guard**. The four silent
+> enterprise mutations all lived under a guard I had already mutated once and declared load-bearing.
+
+**A user at 96% was shown 3%.** `display.primaryUtilizationPct` was validated on its own merits —
+finite, non-negative — and never cross-checked against the windows it summarises. A cache file whose
+`display` block disagreed with its own `windows` passed sanitisation intact, `classify()` returned
+`Healthy`, and the VS Code status bar went green for an account at 96%. The fix is not a tighter
+range check: `display` is now **derived** from `primaryWindow` and the windows, and the stored block
+is discarded. A summary field that can be validated independently of what it summarises is not
+validated.
+
+Two smaller ones, same shape. The reject clause discarded a live `cooldownUntil` when `display` was
+`null` but not when it was `"x"` — a truthiness test standing in for a type test, losing the §9.4
+throttle. And `sanitizeDisabledReason` was a **blacklist**: it leaked FQDNs, usernames, Windows
+paths, JWTs, bearer tokens and ANSI escapes.
+
+> **A blacklist enumerates what you thought of.** It is now a positive character whitelist plus
+> structural rejection of identifier shapes, which fails closed on the next thing nobody thought of.
+
+Two acceptance criteria are recorded **UNMET** rather than argued down. A6: three of ten mutation
+predictions held, and two of the misses could not be reproduced from their own written text — the
+prediction was too vague to be wrong, which is worse than being wrong. From here a prediction names a
+specific `file:testname`, never a count. A9 predicted zero changed test expectations and five changed.
+
+And A12, the lint budget, broke for the **fifth time in four loops** — three times in this loop alone.
+Always the same two rules: a nested helper capturing nothing trips `consistent-function-scoping`, and
+`Array#sort` should be `toSorted()`. Five hand-caught failures of one mechanical check is not a
+discipline problem. Loop 033 makes it a gate.
+
+The thread running through 029, 030, 031 is "a claim made by reading instead of measuring". That is
+not the failure any more — every claim in this loop was measured. The failure moved one step down:
+**the measurement itself could not fail**. A green suite, a green e2e leg, a mutation that a guard
+absorbs. The reviewers remain the enforcement, and what they now enforce is not whether a test
+passes but whether it was ever capable of failing.
