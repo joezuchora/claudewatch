@@ -746,3 +746,57 @@ Two process notes worth keeping:
   `no-unused-vars` alongside the rule under test. Fixing an instance is not fixing the shape.
 
 Eight mutations, six predictions right, two wrong. The two wrong ones produced both findings. Again.
+
+## Loop 029 — a case nothing constructs is a default wearing a decision's clothes
+
+Two findings, and **both were regressions this loop introduced**. That is "a fix is not exempt from
+review" arriving with teeth: B1b was a *correctness* improvement that removed a rate limit, and B1 was
+a *security* improvement that destroyed a security signal.
+
+**The rate limit.** `malformedResponse` was defined in `types.ts`, handled by `failurePolicy`, and
+specified in `SPEC.md §7.2` — and constructed nowhere. `cooldown.ts` said so in a comment, and put it
+in the no-cooldown bucket, which was harmless for exactly as long as nothing constructed it. This loop
+constructed it — that was the whole point of B1b — moving a 200-with-non-JSON body off
+`serviceUnavailable` and, silently, off the 5-minute §9.4 cooldown with it. Measured: **2
+authenticated requests per prompt render, unbounded**, instead of 2 per 5 minutes, with no cooldown
+envelope written at all on the no-cache branch. `cache.ts:139` calls that cooldown the only throttle
+on token-bearing requests.
+
+The detail that makes it a catalogue entry: **the same commit edited the comment that had gone stale,
+and did not notice.** It changed *"`malformedResponse` is not constructed anywhere"* to *"is
+constructed since sdlc/029"* while leaving the next sentence — *"Both rows match the default bucket
+they used to fall into, so neither changes behaviour"* — intact. The stale claim and its falsifier
+were adjacent lines in one diff, written in one sitting.
+
+**New rule: when a change makes a previously-unconstructed case reachable, audit every table that
+case appears in.** A `switch` arm nothing reaches is not a decision, it is a default wearing a
+decision's clothes, and the moment you make it reachable you have adopted whatever it says. Grep the
+member name across the tree before shipping the constructor.
+
+**The destroyed signal.** B1 collapsed every network failure to a constant. The spec said "information
+lost is nil". Measured against a local self-signed server, that is false: TLS verification failure
+gives `"self signed certificate"` / `DEPTH_ZERO_SELF_SIGNED_CERT`, distinct from the `"Unable to
+connect…"` that refused and DNS give — and `failureClass` does not carry the difference either. **A
+TLS interception attempt had become indistinguishable from a dead link on every surface.** The fix
+keeps the guarantee: select from `err.code`, a closed set of OpenSSL identifiers, never `err.message`.
+
+That one refines an existing rule rather than adding one. The claim *was* measured — badly. The first
+probe raced `AbortSignal.timeout(1)` against a refused connection, so the refusal won the race and its
+message was recorded as the timeout's; the TLS case was never probed at all. **A measurement that does
+not isolate the case it names is worse than no measurement, because it ships as evidence.** This
+loop's spec was rewritten once for precisely this failure, and the corrected table still had a hole.
+
+Two smaller repeats worth recording, both of things already written down:
+
+- **A7 was violated by the exact trap loop 028 named in writing.** Loop 028's A6 said "a test written
+  with a nested helper would trip `consistent-function-scoping`", and taught that such a criterion
+  must be a **diff**, not a count. Loop 029 wrote it as a count, nested two helpers, went 11 → 13, and
+  did not notice. Writing the lesson down did not confer immunity — for the fourth loop running.
+- **`plan.md` said "Eight paths" over a nine-row table.** Loop 028's plan said "Nine" over eleven. The
+  same miscount, one loop apart, caught by the same reviewer.
+
+Eleven mutations, seven predictions right. The four wrong ones were wrong in the safe direction, and
+for a pleasant reason: correcting two test fixtures that seeded strings **no producer emits**
+(`'Rate limited'` where production says `'Rate limited (429)'`) turned those tests into a second layer
+of guard coverage. A fixture that round-trips a fictional value proves nothing; fixing it proved
+something twice.
