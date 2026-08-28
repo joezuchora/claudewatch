@@ -2,7 +2,7 @@
 
 - **ID:** 032-snapshot-validation
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** revised after review — five BLOCKING, seven MAJOR, seven MINOR, all folded in
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
@@ -18,19 +18,28 @@ guarantee a compile error instead of a comment.
 This loop's three predecessors each shipped a wrong number in a section headed "measured". Every
 figure below was produced by running code, and the command is stated so it can be re-run.
 
-### The leak is total, not partial: 14 of 14
+### The leak is total: **26 of 26**, and my first count was 14
 
-Poisoned every remaining field of a v2 envelope, read it back through `readCacheResult`, and searched
-the serialised result for each marker:
+Poisoned every field, at every level, and read it back through `readCacheResult`:
 
 ```
-usageEndpoint  sourceExtra  authState  primaryWindow  primaryPct  primaryResetsAt  displayExtra
-fivePct  fiveResetsAt  windowExtra  entPct  currency  disabledReason  snapshotExtra
-                                                                → 14 of 14 LEAK
+LEAK COUNT: 26 of 26
+  inside snapshot : 24
+  envelope-level  : extraEnvelopeKey, lastHttpStatus
 ```
 
-Not "roughly twenty fields, some unchecked" as `intent.md` put it. **Every field loop 031 did not
-name survives, and so does every unknown key at every depth.**
+**The first version of this section said 14, and that number is wrong for the same reason loop 031's
+warning table said seven.** The probe behind it poisoned `fiveHour` but not `sevenDay` or
+`sevenDayOpus`, and three of `enterprise`'s six fields but not the other three — and it never seeded
+an unknown key at the enterprise level at all, while the spec's own edge-case table and A2 both
+asserted that level. An enumeration presented as the counter-measure against a miscount, built from
+an incomplete probe. Third loop running.
+
+The ten fields the first probe missed: `sevenDay.utilizationPct`, `sevenDay.resetsAt`,
+`sevenDayOpus.utilizationPct`, `sevenDayOpus.resetsAt`, unknown keys on both of those windows,
+`enterprise.monthlyLimitCredits`, `.usedCredits`, `.isEnabled`, and an unknown key on `enterprise`.
+
+**And two of the 26 are not in the snapshot at all** — see B4.
 
 ### `renderEvent` narrowing costs **zero** call-site errors — and the first probe said two
 
@@ -41,25 +50,66 @@ arrived at honestly, which is the exact species this loop's predecessors kept sh
 import added: **0 errors**. `classify` already returns `RuntimeState` and `tier` is already
 `AccountTier` after loop 031.
 
-### A null `primaryUtilizationPct` renders `⊙ error`, not a blank
+### A null `primaryUtilizationPct` renders `⊙ error` — **on one of four surfaces, and not the default one**
 
-`intent.md`'s open question 2 worried that degrading a poisoned percentage to `null` would "silently
-blank the statusline". Measured:
+`intent.md`'s open question 2 asked what a poisoned percentage should degrade to. The first version
+of this section measured `formatStatusLine`, got `⊙ error`, and wrote **"this settles question 2"**.
+It settles nothing. Measured across every renderer:
 
-```
-valid pct -> "⊙ 42% resets sat 5:00 pm · 7d 18% resets sat 7:00 am"
-null  pct -> "⊙ error"
-```
+| surface | with `primaryUtilizationPct: null` |
+|---|---|
+| `formatStatusLine` | `⊙ error` |
+| **`formatRichStatusLine`** | **renders `current: 42% \| weekly: 18%` normally — never reads the field** |
+| `formatTooltip` | renders windows normally — never reads it |
+| VS Code status bar | `classify` returns `Healthy`; renders `$(graph) —`, a blank |
 
-Not silent, and not blank. `format.ts` already has an error rendering for exactly this state. **This
-settles question 2**: `null` is the right degrade, because the resulting display is honest — the
-cache is corrupt and the tool says so — and it costs no fetch.
+**`formatRichStatusLine` is the default production renderer.** Claude Code pipes session JSON,
+`readStdin()` returns non-null, and `main.ts` takes the rich branch. The one function measured was
+the fallback. So "the display is then honest" was true of the surface nobody sees and false of the
+three they do — a measurement that did not isolate the case it named, which is loop 029's rule
+arriving in loop 032.
+
+`null` is still the right degrade, but for a different reason, and it needs the coherence rule in B4
+to be true: **a degraded primary must force a state the surfaces already render as an error**, rather
+than relying on one renderer's null-check.
 
 ### `disabledReason` reaches the tooltip verbatim, today
 
 `format.ts:374` interpolates it directly: `` const reason = e.disabledReason ? ` — ${e.disabledReason}` : '' ``.
-It is a live §12 instance, not a hypothetical one, and it is the **only** field in the snapshot for
-which no closed set can exist — the text is chosen by the API.
+It is a live §12 instance, not a hypothetical one, and it is the only field in the snapshot that is
+neither enumerable nor **canonicalisable** — the text is chosen by the API. (`fetchedAt` and the
+four `resetsAt` fields have no closed set either; the distinction being drawn is canonicalisability,
+and the first draft said "only field for which no closed set can exist", which is wrong.)
+
+### A poisoned `enterprise.utilizationPct` throws — a live stuck-failure loop, today
+
+```
+enterprise.utilizationPct = "POISON"   -> THROWS: pct.toFixed is not a function
+enterprise.monthlyLimitCredits = "..." -> renders "⊙ E 1.0% · $0.01 / $NaN"
+```
+
+The throw reaches `main()`'s top-level catch and exits 3. `readCacheResult` returns the envelope
+rather than deleting it, so **every subsequent render repeats it forever** — the class `SPEC.md §9`
+exists to prevent, and `§7.3` requires a compact error state "without crashing". Pre-existing, not
+introduced here, and this is the loop that claims to close every snapshot field, so it is in scope.
+
+### The rebuild can manufacture states no producer can emit
+
+`normalize()` emits `tier: 'enterprise'` only inside its `enterprise !== null` branch, so the pair
+`tier: 'enterprise'` + `enterprise: null` is unreachable from the producer. Degrading each field
+independently makes it reachable from the reader — poison one enterprise number, the object nulls,
+`tier` survives because `'enterprise'` is a valid member. Measured, that state renders:
+
+```
+classify   : Enterprise
+statusline : "⊙ 42% resets sat 5:00 pm · 7d 18% resets sat 7:00 am"
+```
+
+A plausible line with no indication anything is wrong. (The reviewer measured `⊙ 0%` here from a
+different fixture; the exact string differs, the finding does not — an unreachable state renders as
+though it were fine.) It also breaks `SPEC.md §5.3`, whose invariant is that primary utilization is
+the highest across valid windows, once `display.*` is validated independently of the windows it is
+derived from.
 
 ## Behavior
 
@@ -82,15 +132,40 @@ Per-field rules:
 | `authState` | closed set of 4 | `'unknown'` |
 | `tier` | closed set of 3 — **unchanged from loop 031** | `'unknown'` |
 | `fiveHour` / `sevenDay` / `sevenDayOpus` | rebuilt: `utilizationPct` finite number or `null`; `resetsAt` canonicalised ISO or `null` | `{utilizationPct: null, resetsAt: null}` |
-| `enterprise` | `null`, or rebuilt with every field checked | `null` |
-| `enterprise.currency` | `ISO_CURRENCY_RE` — the regex `normalize.ts:12` already uses | `'USD'` |
+| `enterprise` | `null`, or rebuilt with **all six** fields checked; **any failing numeric nulls the whole object** — a half-degraded `enterprise` is what renders `$NaN` | `null` |
+| `enterprise.utilizationPct` | finite number — **unchecked today it THROWS**, see the measurement above | nulls the object |
+| `enterprise.monthlyLimitCredits` | finite number, `>= 0` | nulls the object |
+| `enterprise.usedCredits` | finite number, `>= 0` | nulls the object |
+| `enterprise.isEnabled` | boolean | nulls the object |
+| `enterprise.currency` | `ISO_CURRENCY_RE`, **moved to `closed-sets.ts`** — it is a module-private const in `normalize.ts` and importing it would close the `cache -> normalize -> telemetry -> cache` cycle `closed-sets.ts` exists to avoid | `'USD'` |
 | `enterprise.disabledReason` | **bounded, not enumerated** — see B2 | `null` |
 | `display.primaryWindow` | closed set of 5 | `'unknown'` |
-| `display.primaryUtilizationPct` | finite number in 0–100 or `null` | `null` |
+| `display.primaryUtilizationPct` | finite number `>= 0`, **no upper bound** | `null` |
 | `display.primaryResetsAt` | canonicalised ISO or `null` | `null` |
 | `freshness`, `rawMetadata` | **unchanged from loop 031** | as there |
 
 Unknown keys at every depth are dropped by construction.
+
+**No 0–100 bound**, and the first draft had one. `normalize()` bounds only the *enterprise*
+utilization; window `utilization` is copied through unbounded and `computePrimaryDisplay` copies the
+window's value verbatim. So an honest `five_hour.utilization: 105` would have been nulled on the
+first cache read — the same snapshot rendering `⊙ 105%` fresh and `⊙ error` a second later, with the
+window keeping 105 while `display` went null, desynchronising two renderers off one file.
+`contract.test.ts` also seeds `utilization: 100`, so an exclusive bound would have broken a shipped
+contract test.
+
+### B1b — cross-field coherence, because independent degradation invents states
+
+Field-at-a-time degradation is what manufactures `tier: 'enterprise'` + `enterprise: null`. Two
+coupling rules, applied after the per-field pass:
+
+- `enterprise === null` → force `tier` to `'unknown'` and `display` to
+  `{primaryWindow: 'unknown', primaryUtilizationPct: null, primaryResetsAt: null}`.
+- `display.primaryWindow` names a window whose `utilizationPct` degraded to `null` → force
+  `primaryWindow` to `'unknown'` and `primaryUtilizationPct` to `null`.
+
+This is also what makes the `null` degrade honest on all four renderers rather than one: the
+resulting state is one the surfaces already treat as unknown.
 
 `resetsAt` timestamps are **canonicalised, not sentinelled** — unlike `fetchedAt`, `null` is already
 in their type and already means "no reset known", so no sentinel is needed and none is invented.
@@ -101,19 +176,61 @@ Its text is chosen by the API. Enumerating it is impossible, and the producer-un
 "comes from Anthropic so it is safe" is precisely the reasoning loops 029–031 established is void for
 a value read off disk.
 
+It also reaches **`--json` unconditionally**, where the `!isEnabled` gate that guards the tooltip
+line does not apply — and `isEnabled` is itself unvalidated today, so poisoning it to a truthy string
+suppresses the tooltip line entirely. The first draft named only the tooltip.
+
 **Bounded rather than enumerated**: kept if it is a string, truncated to 200 characters, else `null`.
 This is a *different mitigation for a genuinely different case*, and it is the weakest decision in
 this spec — it stops an unbounded blob reaching a tooltip and does **not** stop a short poisoned
-string. Stated plainly so the reviewer can reject it rather than discover it. The alternative
+string. Stated plainly so the reviewer can reject it rather than discover it. A third option the first draft did not consider, raised by the review: **redact rather than
+truncate** — reject the string if it matches path or host shapes (`/`, `\\`, `sk-ant-`, `@`,
+`.local`) and keep it otherwise. `SPEC.md §17` already requires that class of scrub for `sdlc`-source
+free text, so the idiom exists in-repo, and it keeps the legitimate message while closing the
+short-poisoned-string hole the bound admits it leaves open. **Adopted in preference to the bare
+bound**: the rule is now *redact-then-bound* — reject on those shapes, else truncate to 200.
+It is still weaker than a closed set and still the weakest decision here.
+
+The alternative
 considered and rejected was nulling it on every cache read, which would delete a legitimate,
 user-facing explanation from every render except the one immediately after a fetch — a real feature
 loss to close a hole whose content cannot carry local state.
 
-### B3 — `renderEvent` narrows
+### B4 — `lastHttpStatus`, and the paragraph the first draft deleted
 
-`runtimeState: string` → `RuntimeState`, `tier: string` → `AccountTier`, and the comment justifying
-them as "constrained by their producing unions" is replaced with what is now true. Measured cost: **0
+Two of the 26 leaking values are **not in the snapshot**, so `sanitizeSnapshot` cannot reach them:
+`lastHttpStatus` and an unknown key on the envelope itself. `main.ts` copies `lastHttpStatus` into
+`--debug` unvalidated; measured, `"lastHttpStatus": "MARK_httpStatus /home/someone/.claude"` reaches
+stdout.
+
+`lastHttpStatus` comes into scope: `Number.isInteger` else `null`, one line at the same boundary
+beside the seven checks already there. Unknown envelope keys stay out — `output()` serialises the
+snapshot and `printDebug` copies named keys, so they are inert, as loop 031 established.
+
+**The first draft said §12's gap paragraph would be "deleted, not replaced", and made that a pass
+condition in A8.** `SPEC.md` states "Every value `readCacheResult` returns from a cache file is
+either validated against a closed set or reconstructed by us — never echoed." Deleting the paragraph
+below it while `lastHttpStatus` still echoed would have made that sentence false and scored it MET.
+The paragraph is now **rewritten to name exactly what remains**, and A8 is rewritten to check that
+against a re-run of the probe rather than against its own previous text.
+
+### B3 — `renderEvent` narrows, and `MetricEvent.payload` narrows with it
+
+`runtimeState: string` → `RuntimeState`, `tier: string` → `AccountTier`. Measured cost: **0
 call-site errors** once the types are imported.
+
+**That alone does not deliver `intent.md`'s outcome**, and the first draft filed it as though it
+did. Narrowing two existing parameters says nothing about a *new* one: the reviewer added
+`newFreeText?: string` to `renderEvent` and `bun run typecheck` exited **0**, because
+`MetricEvent.payload` is `Record<string, string | number | boolean | null>` — `string` is
+structurally legal in a payload, and no typefixture can prove otherwise. A7's second half was
+unachievable as written and would have been scored MET by a fixture proving something else.
+
+So `payload`'s value type narrows too: `number | boolean | null` plus a `PayloadEnum` union of the
+closed sets telemetry may carry. *That* is the structural guarantee `intent.md:75` asked for, and a
+typefixture can freeze it. Whether the narrowing is achievable without churning every existing
+`makeEvent` call is the one open risk this spec carries into `plan.md`, which must measure the
+error count before committing to it.
 
 ### Amendments to `SPEC.md`
 
@@ -122,6 +239,12 @@ call-site errors** once the types are imported.
   `display`, `freshness` missing entirely), which already has its own bullet, and `disabledReason`'s
   bound, which gains one.
 - **§17** records that `renderEvent`'s enum leaves are enforced by the compiler.
+- **§11.4 and §14** — the `--json` contract. No key changes, but six *values* now may be
+  substitutions (`usageEndpoint`, `authState`, `primaryWindow`, `enterprise`, `currency`,
+  `disabledReason`). Loop 031 amended both sections for a single sentinel; doing less for six is an
+  unacknowledged amendment by the standard this repo already set. §14's "a corrupt cache file is
+  deleted and a fresh fetch performed" also needs to distinguish structural rejection from value
+  degradation, which it currently does not.
 
 ## Data and types
 
@@ -164,42 +287,71 @@ change the envelope's shape.
 
 ## Acceptance criteria
 
-- [ ] **A1** — a `usage.json` with all 14 measured fields poisoned puts none of that text on
+- [ ] **A1** — a `usage.json` with all **26** measured values poisoned puts none of that text on
       `--debug`, on `--json`, or into the telemetry spool — verified by a unit test asserting on the
-      whole serialised envelope, and by two end-to-end cases against the compiled binary, one per
-      flag. The spool leg is asserted by driving `renderEvent`/`emit` into a sandboxed `HOME` and
-      reading the spool file, because loop 031 established stdout is not the whole surface.
-- [ ] **A2** — no unknown key survives at any depth — verified by a test seeding one at each of the
-      five levels and asserting the serialised envelope contains none of them.
-- [ ] **A3** — **a rich envelope round-trips deep-equal**, with a fixture populating `enterprise`,
-      all three windows, a non-`'none'` `staleReason` and all nine warnings. A whitelist's failure
-      mode is a dropped field; this is the criterion that catches it. `makeTestSnapshot`'s defaults
-      are every field's *degraded* value, so the fixture must override them — that vacuity was a
-      Stage 2 finding against loop 031 and applies with more force here.
+      whole serialised envelope, and by two end-to-end cases against the compiled binary.
+      **Both e2e cases carry preconditions in the same block**: `exitCode === 0`,
+      `typeof cacheAgeSec === 'number'`, and a value from the *seeded* envelope present in the
+      output. Without them the `--json` leg passes vacuously — a poisoned `fetchedAt` degrades to
+      the sentinel, `isCacheFresh` goes false, the binary falls through to an expired credential and
+      exits 2, and every `not.toContain` assertion holds against a snapshot the cache never
+      produced. `smoke.test.ts`'s existing `poisonedButFresh()` solves this and must be reused.
+- [ ] **A2** — no unknown key survives at any depth — verified by seeding one at **all five** levels
+      (snapshot, source, display, each window, enterprise) and asserting none appears. The first
+      draft asserted this level count without ever probing the enterprise one.
+- [ ] **A3** — **a rich envelope round-trips `toStrictEqual`**, with a fixture whose every leaf
+      differs from that leaf's own degraded value, **enforced by a positive precondition in the same
+      test**: a table of `[field, fixtureValue, degradedValue]` asserting they differ, for every
+      field in the B1 table. Without it this criterion is vacuous for at least five fields — the
+      reviewer showed a rebuild that **drops `currency` and hardcodes `'USD'`** passes both A3 and
+      the `'zz' → 'USD'` edge-case row, silently formatting every non-USD account with the wrong
+      symbol and divisor. `currency`, `disabledReason`, `isStale`, `primaryResetsAt` and `isEnabled`
+      all have fixtures in `makeTestSnapshot` identical to their degraded values.
+      `toStrictEqual`, not `toEqual`: measured in bun 1.3.11, `expect({x:1,y:undefined}).toEqual({x:1})`
+      **passes**, so a rebuild that sets a field to `undefined` would round-trip green.
 - [ ] **A4** — every closed set is exhaustive against its union — verified by the
-      `Exclude<…> = never` guard, and by a typefixture proving the guard fails when a member is
-      omitted. Loop 031 learned that a criterion the gate cannot run is a note; this one runs.
+      `Exclude<…> = never` guard **anchored to indexed access**
+      (`UsageSnapshot['source']['usageEndpoint']`, `UsageSnapshot['display']['primaryWindow']`),
+      because those are anonymous unions with no named type to exclude from. Note `authState` is
+      spelled twice — inline at `types.ts:30` and as `AuthState` at `:118` — so a guard anchored to
+      the named type would miss a member added to the inline one. The negative control is the
+      **existing** `typefixtures/array-missing-member.expect-error.ts`; cite it, do not add a fourth
+      copy (`CLAUDE.md`: reuse before adding).
 - [ ] **A5** — no poisoned value costs a fetch or discards `cooldownUntil` — verified by a test
-      asserting `reason === 'hit'`, `cooldownUntil` unchanged, `isInCooldown` true.
-- [ ] **A6** — each per-field rule is individually load-bearing — verified by a mutation table in
-      `review.md` with every result **predicted in `plan.md` before the run**, the prediction commit
-      SHA preceding every implementation commit so `git log --oneline <predict>..<impl>` shows it.
-      **Predictions are made against the tests as written, not against the plan's test table** —
-      loop 031 missed four of nine by predicting against its own mapping, and its miss list included
-      one row that was in the mapping and simply overlooked.
-- [ ] **A7** — `renderEvent`'s narrowing produces **0** call-site errors, as measured above —
-      verified by `bun run typecheck` exiting 0, and by a typefixture proving a `string` payload
-      field is now rejected.
-- [ ] **A8** — `SPEC.md §12`'s gap paragraph is **deleted**, and §17 records the compiler
-      enforcement — verified by reading the diff. A §12 still claiming unvalidated snapshot fields
-      fails it.
-- [ ] **A9** — at most **two** existing expectations change, both named in `plan.md` in advance,
-      with the measured count recorded before the change rather than budgeted. Loop 031 measured
-      zero and held; this loop touches far more surface and the honest expectation is not zero.
-- [ ] **A10** — no new lint warning — recorded in `review.md` as two sorted `oxlint` outputs
-      compared as a **set** (line numbers shift on unrelated edits). Still a manual step; wiring it
-      into the gate is loop 033, and this is the third loop to say so.
-- [ ] **A11** — `bun run verify` exits 0.
+      asserting `reason === 'hit'`, `isInCooldown` true, and `cooldownUntil` **resolving to the same
+      instant** (not byte-identical: `sanitizeCooldownUntil` canonicalises).
+- [ ] **A6** — each per-field rule and both coherence rules are individually load-bearing —
+      verified by a mutation table in `review.md`, every result predicted in `plan.md` before the
+      run, prediction commit SHA preceding every implementation commit. **`plan.md` must name, per
+      mutation, the specific `file:testname` it expects to fail** — that makes "predicted against
+      the tests as written" checkable by diffing predicted names against observed failures, instead
+      of the honour system loop 031 ran on and missed four of nine.
+- [ ] **A7** — a `string` payload field in `renderEvent` is a **compile error** — verified by a
+      typefixture. This is achievable only after `MetricEvent.payload` narrows (B3); if `plan.md`
+      measures that as too costly, **A7 is cut and `intent.md`'s outcome 5 is recorded as unmet**,
+      not quietly rescored against the weaker guarantee.
+- [ ] **A8** — `SPEC.md §12`'s gap paragraph **names exactly what remains**, verified by re-running
+      the 26-marker probe and checking the paragraph against its output. Deleting it is a pass only
+      if the probe reports zero. §17 records the compiler enforcement.
+- [ ] **A9** — **zero** existing expectations change. Measured, not budgeted: the reviewer
+      prototyped `sanitizeSnapshot` against this spec's rules, wired it into `readCacheResult`, and
+      ran the suite — **854 pass, 0 fail, identical to baseline**. The first draft budgeted "at most
+      two" while its own sentence said the number should be measured rather than budgeted, which is
+      the contradiction loop 029 shipped and loop 031 fixed. If any expectation changes, A9 fails
+      and it is a finding.
+- [ ] **A10** — a poisoned `enterprise.utilizationPct` no longer throws — verified by a test that
+      reads such an envelope and renders it without exception. This closes a live §9 stuck-failure
+      loop (exit 3, file never deleted, forever) that no artefact in this loop claimed until the
+      review found it.
+- [ ] **A11** — **one place names every validated field** — verified by a test that reflects over
+      `makeTestSnapshot()`'s keys and fails if any is absent from an exported `SANITIZED_FIELDS`
+      list that `sanitizeSnapshot` uses, so a field added to `UsageSnapshot` without a rule is red
+      rather than silently dropped. This is `intent.md`'s outcome 7, which the first draft dropped
+      without saying so, and it is the check that stops loop 033 re-running this arithmetic.
+- [ ] **A12** — no new lint warning — recorded in `review.md` as two sorted `oxlint` outputs
+      compared as a **set**. Still manual; the gate wiring is loop 033, and this is the third loop
+      to say so.
+- [ ] **A13** — `bun run verify` exits 0.
 
 ## Rejected alternatives
 
