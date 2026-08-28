@@ -800,3 +800,65 @@ for a pleasant reason: correcting two test fixtures that seeded strings **no pro
 (`'Rate limited'` where production says `'Rate limited (429)'`) turned those tests into a second layer
 of guard coverage. A fixture that round-trips a fictional value proves nothing; fixing it proved
 something twice.
+
+## Loop 030 — a validator that returns its input is not a validator
+
+Loop 029 closed the set of surfaceable error messages at the producer and at one consumer. Two
+`--debug` sites read the field straight off the cache envelope and never called that consumer, so a
+cache file written before 029 still surfaced free text. Loop 030 moved the check to
+`readCacheResult`, the parse boundary — which fixed both sites **without editing either**, and is
+the whole thesis: validate where the value enters, not where it is used, and the consumer count
+stops mattering.
+
+Then Stage 5 found two things, and both are worth more than the fix.
+
+**The leak three lines below the guard.** `sanitizeCooldownUntil` validated with `Date.parse` and
+then returned `value` — the original string, unmodified. `Date.parse` accepts far more than
+ISO-8601, and its legacy parser ignores parenthesised trailing text entirely:
+
+```
+Date.parse("2026-01-01 (/home/someone/.claude sk-ant-oat01-SECRET)")  -> finite
+```
+
+Finite, below the clamp ceiling, returned whole, printed by `--debug`. The clamp branch had always
+*constructed* its result; only the passthrough echoed its input. Two idioms in one function, sixteen
+loops, and the name said "sanitize".
+
+**New rule: a function that validates a value from outside the trust boundary must return something
+it constructed, not something it read.** `Date.parse` returning finite says nothing about what else
+is in the string. The same holds for every parse-then-passthrough — `parseInt`, a regex `.test()`
+followed by returning the argument, a schema check that hands back what it was given. The check and
+the return value must be about the same thing.
+
+**The rule that was already written down, in this loop's own spec.** `spec.md` opens its fourth
+finding by naming loop 029's error — *"copied verbatim from 029's review without re-measurement, the
+exact behaviour this loop's thesis criticises 029 for"* — and measures the real answer three lines
+later. The closing artifact then published a **different** number, unmeasured, in the very marker
+the criterion exists to produce, and the commit body asserted it. **Writing the rule down does not
+execute it.** That is now four consecutive loops in which a lesson recorded in this file was
+violated by the loop that recorded it. The only thing that caught it was a reviewer who re-ran the
+measurement rather than reading the table.
+
+**A guard's own gate was defeated by spelling.** The criterion protecting the type narrowing was a
+grep. The auditor rewrote the field as `null | string` — semantically identical to the widening the
+grep exists to catch — and measured: typecheck 0, 824 tests pass, grep silent. It was also never
+wired into `verify` or CI; it lived as prose in a review document nobody re-runs. Replaced with a
+typefixture that asserts **exactly four** compile errors against the real types, because a
+"greater than zero" assertion stays green while three of four sites widen back. **A criterion that
+cannot be run by the gate is a note, not a check** — specify "a check that runs in `verify`", never
+"a grep".
+
+**And a test that asserted against a stale artifact.** The end-to-end smoke case rebuilt the binary
+only when it was *absent*, while `verify` runs `test` before `build`. So the case meant to be the
+strongest check in the loop was the weakest: deleting the guard left it green. It now rebuilds when
+the binary is older than the newest source file.
+
+One process distinction, drawn against loop 029's own reasoning. 029 queued its `--debug` bypass
+because *"widening a fence to cover a Stage 5 finding is how loops start eating each other."* Sound —
+and it cost a full loop of exposure on a real leak. The line this loop draws: **queue a gap, fix a
+leak.** A missing check can wait for its own intent. A value already reaching stdout cannot,
+especially when the pass that found it was reviewing the fix for its twin.
+
+Six mutations, six predictions right — including one predicted to fail nothing. `M5` widened the
+narrowed type back: typecheck 0, 824 pass, not one test red. That green was the finding, recorded as
+such in advance, and it is what made the grep's weakness worth chasing rather than shrugging at.
