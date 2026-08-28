@@ -981,3 +981,68 @@ not the failure any more — every claim in this loop was measured. The failure 
 **the measurement itself could not fail**. A green suite, a green e2e leg, a mutation that a guard
 absorbs. The reviewers remain the enforcement, and what they now enforce is not whether a test
 passes but whether it was ever capable of failing.
+
+## Loop 033 — writing the rule down does not confer immunity
+
+Two rules this repo had been enforcing by hand became steps in `bun run verify`: an `oxlint` warning
+budget, and a check comparing each loop's `spec.md` requirement headings against its `plan.md` fence.
+Both had failed in the field. The lint criterion broke **five times** — twice in loop 031, three
+times in loop 032 — always found by a human re-running a command. And nothing at all compared spec
+to plan, which is how loop 030 shipped a requirement its own plan forbade, with the criterion
+recorded as met.
+
+The loop built the machinery to stop both classes of failure, and committed both classes anyway.
+
+**A number lifted from the wrong experiment, published in the paragraph arguing for measurement.**
+The spec rejected "match backticks anywhere" on the strength of *15 findings across 8 loops*. The
+Stage 2 reviewer swept 24 interpretations and could not reproduce it under any of them, because the
+figure came from a **different** experiment — the path-only variant — and was wrong even for that
+one. The real answer is 89 across 9. The conclusion survived; the number did not.
+
+**A test that stayed green under the mutation it existed to catch.** The portability test built a
+backslash corpus and converted it back to POSIX before calling anything, because `toPosix` was
+unreachable from the function under test. The auditor replaced `toPosix` with the identity function:
+still green. That is loop 032's closing sentence — *a test that has never been seen to fail has not
+been tested* — reproduced one loop later by the author who wrote it.
+
+**And a fence that said the opposite of what the parser reads.** One paragraph after warning myself
+that the fence must not contain `scripts/`, I wrote *"every existing file under `scripts/` other than
+`verify.ts`"*. Run through the real extractor, that sentence yields ten tokens including `scripts/`
+— the forbidden one — and `verify.ts`, the one script the loop actually changes. The general defect
+is worth keeping: **"everything under X except Y" inverts both terms.**
+
+> **The reviewers are the immunity.** All six substantive defects were found by an agent that re-ran
+> a measurement instead of re-reading a claim, and two specifically by mutation — by asking not
+> "does this test pass" but "has this test ever been seen to fail". Four consecutive loops have now
+> broken a rule recorded in this file by the loop that recorded it. The rules are not self-enforcing
+> and were never going to be; what changed this loop is that two of them stopped being rules and
+> became steps.
+
+**Both gates fail in both directions, and that did more work than expected.** The removal direction
+is not politeness about cleanup commits. Without it, a budget keyed on rule + file + count is
+defeated by swapping one warning for another of the same rule in the same file — the same defeat as
+the count-only budget it replaces, one level down. **A one-directional budget decays.** The same
+logic put `unresolvedTokens` in the baseline: a check with zero false positives that cannot parse
+44% of its input is buying accuracy with silence, so the silence gets published and ratcheted.
+
+Fourteen mutations, **zero survivors**, nine of fourteen predictions exact by name — against loop
+032's three of ten, two of which were too vague to be scored at all. The five misses share a single
+cause rather than being five slips: any mutation to the parser also moves the committed baseline,
+and I kept forgetting to name that test. One missing rule, not five errors.
+
+**The loop's proof is not a test.** It is `verify` rejecting the commit that added it:
+
+```
+lint-budget: NEW WARNING  unicorn(consistent-function-scoping)  scripts/fence-check.test.ts
+             Function `statAs` does not capture any variables from its parent scope
+```
+
+Fifth occurrence of that rule across five loops. The first four were caught by hand. This one was
+caught by the gate, in the commit that adds the gate, before it could reach CI.
+
+The honest limit, recorded rather than smoothed over: this loop committed exactly one fence
+violation, and `fence-check` **cannot see it**. The fence clause covering `scripts/env.test.ts` is
+unbackticked prose, so the extractor yields twelve tokens and none is a test file. A13 passes partly
+because the parser is blind to the clause that was breached. Loop 026's fence has the same shape and
+reports passing over four tokens. Closing that needs a structured fence, which is deferred — and
+deferring it is a choice made with the hole measured, not assumed away.
