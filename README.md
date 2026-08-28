@@ -152,7 +152,7 @@ Test files live next to their source files as `*.test.ts`. All tests use mocked 
 1. Reads the OAuth token from Claude Code's credential file (read-only, never modified)
 2. Queries the Anthropic usage endpoint with a 5-second timeout
 3. Normalizes the response into a `UsageSnapshot` with both usage windows
-4. Caches the result locally (`~/.cache/claudewatch/usage.json`) with a 10-minute TTL
+4. Caches the result locally (`~/.cache/claudewatch/usage.json`, or `$XDG_CACHE_HOME/claudewatch/` when that is set) with a 10-minute TTL
 5. Renders the data in the terminal or VS Code status bar
 
 Note: `/api/oauth/usage` is not documented as a public API endpoint and does not have a published schema/versioning contract. ClaudeWatch treats it as best-effort and degrades gracefully when the shape drifts.

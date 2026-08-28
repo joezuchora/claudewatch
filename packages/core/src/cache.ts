@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CacheEnvelope, SurfaceableMessage } from './types.js';
@@ -26,15 +26,52 @@ let cacheBaseDir: string | null = null;
 
 /**
  * Override the cache directory root (e.g. for test isolation).
- * Pass null to reset to the default (~/.cache/claudewatch).
+ *
+ * Wins over `$XDG_CACHE_HOME` as well as over the legacy default. Passing null restores
+ * env-sensitive resolution in the same process — which is what every `afterEach` depends on.
  */
 export function setCacheBaseDir(dir: string | null): void {
   cacheBaseDir = dir;
 }
 
+/**
+ * Where the cache lived before sdlc/034, and still lives when `$XDG_CACHE_HOME` is not usable.
+ *
+ * Exported so that `cli-ship`'s legacy drain imports this notion of "legacy" rather than
+ * reconstructing `join(homedir(), '.cache', 'claudewatch')` by hand. sdlc/034's Stage 2 review
+ * counted EIGHT independent places that decide where this tool's files live; adding a ninth while
+ * fixing the first would have been the same defect wearing a fix.
+ */
+export function getLegacyCacheDir(): string {
+  return join(homedir(), '.cache', 'claudewatch');
+}
+
+/**
+ * Resolve the cache root, honouring `$XDG_CACHE_HOME`.
+ *
+ * SPEC.md §9.6 claimed this followed the XDG convention from loop 003 onward. It did not — the
+ * variable was never read — and loops 003 and 005 both recorded the divergence without fixing it.
+ *
+ * The rule is the XDG Base Directory specification's own, both halves: unset or empty falls back to
+ * `$HOME/.cache`, and a RELATIVE value is invalid and ignored. The relative case is not pedantry:
+ * without it a relative value makes every path here relative to the current working directory, so
+ * the cache would follow the user around their filesystem and the statusline would refetch on
+ * every `cd`.
+ *
+ * ONE condition, not two. `isAbsolute('') === false`, so an explicit empty-string test would be an
+ * equivalent mutant — no test could kill it. sdlc/034's spec fixes this shape deliberately so two
+ * implementers do not build two different resolvers, and predicts five mutation rules, not six.
+ *
+ * Applies on EVERY platform, not just Linux. A branch that only executes on Windows can only be
+ * exercised on Windows, and CI here runs Linux — loop 011 already paid for that with a Windows-only
+ * path that would have run real credentials through a benchmark loop. A user who has never set the
+ * variable gets `getLegacyCacheDir()`, character-identical to the behaviour before this loop.
+ */
 export function getCacheDir(): string {
   if (cacheBaseDir !== null) return cacheBaseDir;
-  return join(homedir(), '.cache', 'claudewatch');
+  const xdg = process.env.XDG_CACHE_HOME;
+  if (xdg !== undefined && isAbsolute(xdg)) return join(xdg, 'claudewatch');
+  return getLegacyCacheDir();
 }
 
 export function getCachePath(): string {

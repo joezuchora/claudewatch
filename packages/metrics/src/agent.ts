@@ -75,6 +75,37 @@ function parseLines(raw: string): { events: unknown[]; skipped: number } {
   return { events, skipped };
 }
 
+/**
+ * Whether a legacy spool location still holds anything worth draining.
+ *
+ * NOT `existsSync` alone. `ship()` rotates the live spool to `<spool>.<stamp>.shipping` and deletes
+ * it only on HTTP 2xx, so after a FAILED ship the live `metrics-spool.jsonl` is gone and the events
+ * sit in a retained `.shipping` file. That is precisely the situation a drain exists for — a user
+ * with unshipped events who then sets `$XDG_CACHE_HOME` — and an existsSync-only condition would
+ * skip it, leaving those files to be dropped by `MAX_RETAINED_SHIPPING_FILES` once 20 accumulate.
+ *
+ * sdlc/034's Stage 2 review caught this by running it. See sdlc/034-xdg-cache-home/.
+ */
+export function shouldDrainLegacy(legacySpool: string): boolean {
+  return existsSync(legacySpool) || pendingShippingFiles(legacySpool).length > 0;
+}
+
+/**
+ * Fold two ship runs into one result, because `cli-ship` exits on `filesRetained`.
+ *
+ * Exiting on the primary result alone would report success to systemd forever while a permanently
+ * failing legacy drain accumulated toward the 20-file drop.
+ */
+export function combineResults(a: ShipResult, b: ShipResult): ShipResult {
+  return {
+    shipped: a.shipped + b.shipped,
+    filesShipped: a.filesShipped + b.filesShipped,
+    filesRetained: a.filesRetained + b.filesRetained,
+    filesDropped: a.filesDropped + b.filesDropped,
+    skippedUnparseable: a.skippedUnparseable + b.skippedUnparseable,
+  };
+}
+
 export async function ship(opts: ShipOptions): Promise<ShipResult> {
   const now = opts.now ?? Date.now;
   const doFetch = opts.fetchImpl ?? fetch;

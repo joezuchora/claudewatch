@@ -23,7 +23,7 @@
  */
 import { appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { getCacheDir } from './cache.js';
+import { getCacheDir, getLegacyCacheDir } from './cache.js';
 import type { AccountTier, RuntimeState } from './types.js';
 import type { TelemetryConfig } from './config.js';
 
@@ -118,6 +118,17 @@ export function emitProcess(event: MetricEvent): void {
 
 export function getSpoolPath(): string {
   return join(getCacheDir(), 'metrics-spool.jsonl');
+}
+
+/**
+ * The spool as it was located before sdlc/034. Used only by `cli-ship`'s legacy drain.
+ *
+ * A lost `usage.json` costs one token-bearing refetch. A lost spool costs measurements of runs that
+ * already happened and exist nowhere else, which is why the spool is the one file this loop carries
+ * across the move.
+ */
+export function getLegacySpoolPath(): string {
+  return join(getLegacyCacheDir(), 'metrics-spool.jsonl');
 }
 
 export function getSpoolStatePath(): string {

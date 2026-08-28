@@ -15,7 +15,7 @@
  */
 import { spawn } from 'child_process';
 import { appendFileSync, mkdirSync, statSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { homedir, tmpdir } from 'os';
 // MAX_LINE_BYTES comes from junit.ts, NOT from packages/core, even though the constant lives
 // there too. A syntax error in core would make that import fail and the gate would never start:
@@ -25,6 +25,7 @@ import { homedir, tmpdir } from 'os';
 // (sdlc/020)
 import { readJunitReport, attachFailures, tightenMode, MAX_LINE_BYTES, type TestFailureRecord } from './junit.js';
 import { shouldRecordVerifyMetrics } from './env.js';
+import { resolveSpoolPath } from './spool-path.js';
 
 interface StepResult {
   name: string;
@@ -108,7 +109,7 @@ function runStep(name: string, cmd: string[], junitOutfile?: string): Promise<St
 }
 
 function spoolPath(): string {
-  return join(homedir(), '.cache', 'claudewatch', 'metrics-spool.jsonl');
+  return resolveSpoolPath(homedir(), process.env);
 }
 
 /**
@@ -166,8 +167,14 @@ function record(
     // into corrupt JSONL. Twenty realistic entries exceed the cap, so the case is reachable.
     const event = wrap(attachFailures(payload, testFailures, wrap, MAX_LINE_BYTES));
 
-    const dir = join(homedir(), '.cache', 'claudewatch');
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // DERIVED from the file, never constructed a second time. sdlc/034's Stage 2 review found
+    // this line was an independent definition of the cache directory: honour $XDG_CACHE_HOME in
+    // `spoolPath()` alone and this created the LEGACY directory while the append below targeted
+    // the XDG path whose parent did not exist. The append threw ENOENT, the catch at the bottom of
+    // this function swallowed it, the gate still exited 0 — and every verify_run event was lost
+    // silently, on the machine that runs the hourly loop. Deriving removes the possibility rather
+    // than testing for it.
+    mkdirSync(dirname(spoolPath()), { recursive: true, mode: 0o700 });
     try {
       if (statSync(spoolPath()).size >= 5 * 1024 * 1024) return;
     } catch { /* first append */ }

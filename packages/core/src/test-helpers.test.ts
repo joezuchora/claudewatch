@@ -229,3 +229,27 @@ describe('seedSandboxHome', () => {
     expect(a.home).not.toBe(b.home);
   });
 });
+
+/**
+ * sdlc/034 — sandboxing HOME no longer sandboxes the cache.
+ *
+ * `getCacheDir()` honours `$XDG_CACHE_HOME`, which bypasses `homedir()` entirely. Every spawn site
+ * merges `seed.env` over `process.env`, so a developer or CI runner with the variable set would
+ * have the fixture written under the sandbox home and the binary reading the ambient path — a
+ * guaranteed miss, and `perf.ts`'s sentinel throwing. Measured in sdlc/034's Stage 2 review before
+ * it was written, which is why it is pinned on the seed rather than at each call site.
+ */
+describe('the seed pins XDG_CACHE_HOME (sdlc/034)', () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    while (homes.length) rmSync(homes.pop()!, { recursive: true, force: true });
+  });
+
+  test('it is present, and points inside the sandbox home', () => {
+    const s = seedSandboxHome({ prefix: 'cw-xdg-', accessToken: 'sk-ant-oat01-CORE-TEST-NOT-REAL' });
+    homes.push(s.home);
+    expect(s.env.XDG_CACHE_HOME).toBe(join(s.home, '.cache'));
+    // The failure this guards: a seed value pointing at the AMBIENT cache would sandbox nothing.
+    expect(s.env.XDG_CACHE_HOME?.startsWith(s.home)).toBe(true);
+  });
+});

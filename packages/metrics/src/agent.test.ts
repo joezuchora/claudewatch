@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, appendFileSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { ship, rotate, pendingShippingFiles, MAX_RETAINED_SHIPPING_FILES } from './agent.js';
+import { ship, rotate, pendingShippingFiles, shouldDrainLegacy, combineResults, MAX_RETAINED_SHIPPING_FILES } from './agent.js';
 
 const line = (i: number) =>
   `${JSON.stringify({ eventId: `e${i}`, ts: new Date().toISOString(), source: 'product', kind: 'render', ok: true, durationMs: 1, schemaVersion: 1, payload: {} })}\n`;
@@ -96,5 +96,65 @@ describe('agent: shipping', () => {
 
   test('rotate is a no-op on an absent spool', () => {
     expect(rotate(spool, 1)).toBeNull();
+  });
+});
+
+/**
+ * sdlc/034 — the legacy spool drain.
+ *
+ * The condition is NOT `existsSync` alone, and the second test here is the reason. `ship()` rotates
+ * the live spool to `.shipping` and deletes it only on success, so after a failed ship the live
+ * file is GONE and the events sit in a retained `.shipping`. That is exactly the state a user with
+ * unshipped events is in when they set `$XDG_CACHE_HOME`, and an existsSync-only condition skips
+ * it — leaving those files to be dropped once MAX_RETAINED_SHIPPING_FILES accumulate.
+ *
+ * Caught by sdlc/034's Stage 2 reviewer, by running it.
+ */
+describe('shouldDrainLegacy (sdlc/034)', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cw-drain-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  test('true when a live legacy spool exists', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    writeFileSync(spool, '{"a":1}\n');
+    expect(shouldDrainLegacy(spool)).toBe(true);
+  });
+
+  test('TRUE when only a retained .shipping file remains and the live spool is gone', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    writeFileSync(spool, '{"a":1}\n');
+    const rotated = rotate(spool, 1_700_000_000_000);
+    // Positive precondition: the rotation really did remove the live file and leave a pending one.
+    expect(rotated).not.toBeNull();
+    expect(existsSync(spool)).toBe(false);
+    expect(pendingShippingFiles(spool)).toHaveLength(1);
+
+    expect(shouldDrainLegacy(spool)).toBe(true);
+  });
+
+  test('false when neither a live spool nor a pending file exists', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    expect(existsSync(spool)).toBe(false);
+    expect(pendingShippingFiles(spool)).toHaveLength(0);
+    expect(shouldDrainLegacy(spool)).toBe(false);
+  });
+});
+
+describe('combineResults (sdlc/034)', () => {
+  const a = { shipped: 3, filesShipped: 1, filesRetained: 0, filesDropped: 0, skippedUnparseable: 1 };
+  const b = { shipped: 2, filesShipped: 1, filesRetained: 1, filesDropped: 2, skippedUnparseable: 0 };
+
+  test('every field sums, so the exit code sees both runs', () => {
+    expect(combineResults(a, b)).toEqual({
+      shipped: 5, filesShipped: 2, filesRetained: 1, filesDropped: 2, skippedUnparseable: 1,
+    });
+  });
+
+  test('a clean primary and a RETAINED legacy still yields a non-zero retained count', () => {
+    // The failure this prevents: exiting on the primary result alone reports success to systemd
+    // forever while a failing legacy drain accumulates toward the 20-file drop.
+    expect(a.filesRetained).toBe(0);                       // positive precondition
+    expect(combineResults(a, b).filesRetained).toBeGreaterThan(0);
   });
 });

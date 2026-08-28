@@ -25,7 +25,7 @@ If `verify` does not pass on a clean checkout, that is a bug — please open an 
 `verify` **records nothing about your checkout by default.** When
 `CLAUDEWATCH_VERIFY_METRICS=1` is set it appends a `verify_run` event — step durations, and on a
 failing test step the names and repo-relative paths of the failing tests — to
-`~/.cache/claudewatch/metrics-spool.jsonl`. Nothing transmits it; a separate agent, run
+`~/.cache/claudewatch/metrics-spool.jsonl` (or `$XDG_CACHE_HOME/claudewatch/`). Nothing transmits it; a separate agent, run
 deliberately, would. Unset means off, so you have to opt in on purpose — as does any value other than `1`, `true`,
 `yes` or `on`. An unrecognised value records nothing and prints a warning, so a typo cannot
 quietly turn collection on **or** silently fail to turn it on. See `SPEC.md` §17.

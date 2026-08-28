@@ -1,6 +1,8 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
-import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir, sanitizeCooldownUntil } from './cache.js';
+import { join, win32 } from 'path';
+import { homedir } from 'os';
+import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir, getLegacyCacheDir, setCacheBaseDir, sanitizeCooldownUntil } from './cache.js';
 import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
 import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 import { classify } from './state.js';
@@ -796,5 +798,104 @@ describe('the whitelist rebuild fails by DROPPING, so the round-trip is the net 
     // a test that merely does not throw passes when the code under it is never reached.
     expect(() => formatStatusLine(snapshot, 120)).not.toThrow();
     expect(typeof formatStatusLine(snapshot, 120)).toBe('string');
+  });
+});
+
+/**
+ * sdlc/034 — `$XDG_CACHE_HOME` resolution.
+ *
+ * `process.env.XDG_CACHE_HOME` is read LIVE by `getCacheDir()`, so the XDG axis can be varied
+ * in-process. `homedir()` is NOT — it resolves once at process start — which is why these tests
+ * assert against `homedir()` rather than mutating `HOME`, and why `scripts/spool-path.ts` takes
+ * `home` as a parameter instead.
+ *
+ * `setCacheBaseDir(null)` in the afterEach is load-bearing: without it the override from one test
+ * would mask the env resolution in the next, and every assertion here would pass for the wrong
+ * reason.
+ */
+describe('getCacheDir — XDG_CACHE_HOME (sdlc/034)', () => {
+  const saved = process.env.XDG_CACHE_HOME;
+  const legacy = join(homedir(), '.cache', 'claudewatch');
+
+  afterEach(() => {
+    setCacheBaseDir(null);
+    if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved;
+  });
+
+  test('unset resolves to the legacy location, byte-identical to pre-034 behaviour', () => {
+    setCacheBaseDir(null);
+    delete process.env.XDG_CACHE_HOME;
+    expect(getCacheDir()).toBe(legacy);
+    expect(getCacheDir()).toBe(getLegacyCacheDir());
+  });
+
+  test('an absolute value is honoured, with claudewatch appended', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+    // Positive precondition: the value really is different from the fallback, so the assertion
+    // above cannot pass by accident on a machine where they coincide.
+    expect(getCacheDir()).not.toBe(legacy);
+  });
+
+  test('an EMPTY value is ignored, per the XDG spec', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '';
+    expect(getCacheDir()).toBe(legacy);
+  });
+
+  test('a RELATIVE value is ignored, and never resolves against the cwd', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = 'relative/path';
+    expect(getCacheDir()).toBe(legacy);
+    // The failure this rule prevents: a cache that follows the user around their filesystem.
+    expect(getCacheDir()).not.toContain('relative/path');
+  });
+
+  test('a leading ~ is NOT expanded — it is relative, therefore ignored', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '~/cache';
+    expect(getCacheDir()).toBe(legacy);
+    expect(getCacheDir()).not.toContain('~');
+  });
+
+  test('a trailing slash normalises rather than doubling', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs/';
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+    expect(getCacheDir()).not.toContain('//');
+  });
+
+  test('setCacheBaseDir wins with the variable SET', () => {
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');
+  });
+
+  test('setCacheBaseDir wins with the variable UNSET', () => {
+    delete process.env.XDG_CACHE_HOME;
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');
+  });
+
+  test('setCacheBaseDir(null) restores env-sensitive resolution in the same process', () => {
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');   // positive precondition
+    setCacheBaseDir(null);
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+  });
+
+  /**
+   * The one platform-dependent thing the resolver leans on, pinned on the platform CI runs.
+   *
+   * `isAbsolute` is platform-sensitive, and B2 chose one rule for all platforms rather than a
+   * Windows branch CI could never execute. `path.win32` is importable everywhere, so the
+   * classification itself is checkable here even though the branch is not.
+   */
+  test('win32 classifies C:foo as relative and C:\\foo as absolute', () => {
+    expect(win32.isAbsolute('C:foo')).toBe(false);
+    expect(win32.isAbsolute('C:\\foo')).toBe(true);
   });
 });

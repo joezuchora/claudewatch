@@ -165,6 +165,10 @@ function runGate(fixture: { dir: string; home: string }, env: Record<string, str
     TMPDIR: process.env.TMPDIR,
     HOME: fixture.home,
     USERPROFILE: fixture.home,
+    // sdlc/034: getCacheDir() honours $XDG_CACHE_HOME, which bypasses homedir(). Without pinning
+    // it here an ambient value would send the gate's spool outside the fixture home and this
+    // suite's "no spool at all" assertions would pass for the wrong reason.
+    XDG_CACHE_HOME: join(fixture.home, '.cache'),
     ...env,
   };
 

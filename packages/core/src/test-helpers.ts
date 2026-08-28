@@ -275,6 +275,12 @@ export function seedSandboxHome(opts: {
     HOMEDRIVE: '',
     HOMEPATH: home,
     CLAUDEWATCH_TELEMETRY: '0',
+    // Since sdlc/034, sandboxing HOME no longer sandboxes the cache: getCacheDir() honours
+    // $XDG_CACHE_HOME, which bypasses homedir() entirely. Every spawn site merges this over
+    // process.env, so without pinning it a developer or CI runner with the variable set would have
+    // the seed written under the sandbox home and the binary reading the ambient path — a
+    // guaranteed miss, and perf.ts's sentinel throwing. Measured before it was written.
+    XDG_CACHE_HOME: join(home, '.cache'),
   };
 
   return { home, cachePath, credentialsPath, utilizationPct, env };

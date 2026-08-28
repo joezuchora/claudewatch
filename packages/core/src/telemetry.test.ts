@@ -2,13 +2,13 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, statSync } from 'fs';
 import { join } from 'path';
 import {
-  emit, makeEvent, getSpoolPath, getSpoolStatePath, readSpoolState, clearSpoolState,
+  emit, makeEvent, getSpoolPath, getSpoolStatePath, getLegacySpoolPath, readSpoolState, clearSpoolState,
   fetchResultEvent, cacheEvent, renderEvent, schemaDriftEvent,
   categorizeWarning, utilizationBucket,
   MAX_SPOOL_BYTES, MAX_LINE_BYTES,
 } from './telemetry.js';
 import { setupTestCacheDir } from './test-helpers.js';
-import { getCacheDir } from './cache.js';
+import { getCacheDir, getLegacyCacheDir, setCacheBaseDir } from './cache.js';
 
 const ON: { enabled: boolean } = { enabled: true };
 const OFF: { enabled: boolean } = { enabled: false };
@@ -139,5 +139,45 @@ describe('telemetry: payload builders', () => {
     expect(utilizationBucket(0)).toBe(0);
     expect(utilizationBucket(100)).toBe(10);
     expect(utilizationBucket(Infinity)).toBeNull();
+  });
+});
+
+/**
+ * sdlc/034 — every path derived from `getCacheDir()` moves together.
+ *
+ * A3 asserts all of them rather than one, because three are derived and a fix to the resolver is
+ * not automatically a fix to its consumers. The spool is the file that matters most: a lost
+ * `usage.json` costs one token-bearing refetch, a lost spool costs measurements that exist nowhere
+ * else.
+ */
+describe('spool paths follow XDG_CACHE_HOME (sdlc/034)', () => {
+  const saved = process.env.XDG_CACHE_HOME;
+  afterEach(() => {
+    setCacheBaseDir(null);
+    if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved;
+  });
+
+  test('the spool, its cursor and the cache dir all move to the XDG location', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    const root = join('/xdg-abs', 'claudewatch');
+    expect(getCacheDir()).toBe(root);
+    expect(getSpoolPath()).toBe(join(root, 'metrics-spool.jsonl'));
+    expect(getSpoolStatePath()).toBe(join(root, 'metrics-spool.state.json'));
+  });
+
+  test('the LEGACY spool path does not move, which is what makes a drain possible', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    expect(getLegacySpoolPath()).toBe(join(getLegacyCacheDir(), 'metrics-spool.jsonl'));
+    // Positive precondition: the two really are different, so the drain condition can fire.
+    expect(getLegacySpoolPath()).not.toBe(getSpoolPath());
+  });
+
+  test('with the variable unset the legacy and resolved spools coincide, so no drain happens', () => {
+    setCacheBaseDir(null);
+    delete process.env.XDG_CACHE_HOME;
+    expect(getLegacySpoolPath()).toBe(getSpoolPath());
   });
 });

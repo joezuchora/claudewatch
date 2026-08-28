@@ -488,7 +488,21 @@ The VS Code extension runs fetches asynchronously on its polling interval and ne
 ~/.cache/claudewatch/usage.json
 ```
 
-On Linux this follows `$XDG_CACHE_HOME` convention (defaults to `~/.cache`). On Windows `~` resolves to `%USERPROFILE%`. The `~/.cache/claudewatch/` directory is created on first write if it does not exist.
+The root is resolved from `$XDG_CACHE_HOME`, on **every** platform, not only Linux:
+
+- set to an **absolute** path → `$XDG_CACHE_HOME/claudewatch`
+- unset, **empty**, or a **relative** path → `~/.cache/claudewatch`
+
+Both fallback conditions are the XDG Base Directory specification's own. A relative value is
+ignored rather than honoured because resolving it would make every path here relative to the
+current working directory. A leading `~` is not expanded, and is therefore relative and ignored.
+
+The rule is not platform-conditional: a branch that only runs on Windows can only be exercised on
+Windows, and CI runs Linux. On Windows `~` resolves to `%USERPROFILE%` as before. Setting the
+variable **does not migrate** an existing directory — the tool reads and writes the resolved
+location and refetches once — with one exception: `cli-ship` also drains a spool left at the legacy
+location, because unshipped metrics events exist nowhere else. The directory is created on first
+write if it does not exist. (sdlc/034)
 
 **Cache file format:**
 
@@ -1070,7 +1084,7 @@ Create these source files:
 | `src/normalize.ts` | `normalize(raw: unknown, fetchedAt?: string): UsageSnapshot` — validate required fields, compute primary window |
 | `src/state.ts` | `classify(snapshot: UsageSnapshot): RuntimeState` — state machine |
 | `src/thresholds.ts` | `evaluate(pct: number, warn: number, crit: number): 'normal' \| 'warning' \| 'critical'` |
-| `src/cache.ts` | Read/write `~/.cache/claudewatch/usage.json` with TTL check, atomic rename, corruption recovery |
+| `src/cache.ts` | Read/write `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) with TTL check, atomic rename, corruption recovery |
 | `src/cooldown.ts` | Track and check cooldown state after endpoint failures (5-minute window) |
 | `src/time.ts` | UTC parsing, local display conversion, relative formatting, negative duration guard |
 | `src/format.ts` | Format percentage, reset time (relative + absolute), freshness text, compact vs default |
@@ -1188,7 +1202,7 @@ Before building UI, prove the critical path end-to-end. This can be done in a si
 1. **Credential resolution:** Read and parse `~/.claude/.credentials.json`, extract `accessToken`
 2. **API call:** Hit the usage endpoint with the token, get a 200 response
 3. **Normalization:** Parse the response into a `UsageSnapshot`
-4. **Cache write:** Write the snapshot to `~/.cache/claudewatch/usage.json` atomically
+4. **Cache write:** Write the snapshot to `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) atomically
 5. **Cache read + format:** Read the cache, format output, print to stdout
 
 If all five steps work, you have a working statusline binary. The VS Code extension is then a rendering layer on top of the same pipe.
@@ -1253,7 +1267,7 @@ To avoid drift, the following are fixed for v1:
 - Compiled binary for terminal; no runtime dependencies
 - Claude Code built-in status line for terminal integration
 - Atomic file writes for cache consistency
-- Cache at `~/.cache/claudewatch/usage.json` with version header
+- Cache at `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) with version header
 - All internal timestamps UTC; display times converted to local
 - HTTP timeout 5 seconds; TLS verification always enabled
 - Cache corruption triggers delete + fresh fetch, never a stuck failure loop

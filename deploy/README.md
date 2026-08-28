@@ -158,3 +158,35 @@ systemctl --user daemon-reload
 
 The store and config are left in place deliberately — delete
 `~/.local/share/claudewatch-metrics` and `~/.config/claudewatch` if you want them gone.
+
+## `$XDG_CACHE_HOME` and the systemd sandbox
+
+Since sdlc/034 the tool resolves its cache root from `$XDG_CACHE_HOME` when that is set to an
+absolute path. **The unit does not follow it automatically, and cannot.**
+
+`claudewatch-ship.service` sets `ProtectSystem=strict` and `ProtectHome=read-only`, with a single
+write grant:
+
+```
+ReadWritePaths=%h/.cache/claudewatch
+```
+
+`ReadWritePaths=` performs **no environment expansion** — an entry like `${XDG_CACHE_HOME}/claudewatch`
+is parsed as a non-absolute path and silently dropped (`ReadWritePaths= path is not absolute,
+ignoring`), and there is no `%` specifier for it. Because `ProtectSystem=strict` makes the whole
+filesystem read-only apart from the grant, a shipper writing anywhere else fails with `EPERM` —
+including a location inside `$HOME`.
+
+The default deployment is unaffected: it does not set the variable, so the grant above is correct.
+
+**If you set `XDG_CACHE_HOME` on this machine**, add a literal line to the unit and reload:
+
+```
+ReadWritePaths=-/your/absolute/path/claudewatch
+```
+
+The leading `-` makes systemd tolerate the path not existing yet. Then
+`systemctl --user daemon-reload && systemctl --user restart claudewatch-ship.service`.
+
+Substituting the resolved path at install time is the only thing that would make this unattended;
+that is recorded as out of scope in `sdlc/034-xdg-cache-home/spec.md` rather than half-done here.
