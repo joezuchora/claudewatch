@@ -118,13 +118,25 @@ export function failurePolicy(fc: FailureClass): FailurePolicy {
     case 'timeout':
       return { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
 
-    // `unexpectedFailure` IS constructed — client.ts returns it for any status that is not
-    // 200/401/429/5xx. `malformedResponse` is constructed by client.ts's response.json() guard since sdlc/029;
-    // before that it was defined in types.ts, handled here, and specified in SPEC.md §7.2 while
-    // no code path produced it — a third guarantee that existed only on paper. Both rows match the
-    // default bucket they used to fall into, so neither changes behaviour; the review that
-    // caught this comment claiming both were unreachable is recorded in sdlc/014.
+    // `malformedResponse` COOLS DOWN, and this row exists because sdlc/029 nearly removed that.
+    //
+    // Before sdlc/029 nothing constructed the class, so it sat in the no-cooldown bucket harmlessly
+    // and this comment said "neither row changes behaviour" — true then. Then B1b made a 200 with a
+    // non-JSON body construct it, moving that path OFF `serviceUnavailable` and silently off the
+    // 5-minute cooldown with it. Measured: 2 authenticated requests per prompt render, unbounded,
+    // instead of 2 per 5 minutes — and on the no-cache branch (main.ts:318) no cooldown envelope is
+    // written at all, so every invocation refetches. That is exactly the rate-limit amplification
+    // SPEC.md §9.4 exists to prevent, and cache.ts:139 calls the cooldown the only throttle on
+    // token-bearing requests. Found by the sdlc/029 security pass; the comment above had gone
+    // stale in the same commit that made it stale.
+    //
+    // A malformed body is a server-side condition that will not resolve within seconds, so it
+    // belongs with `serviceUnavailable`, not with the no-cooldown bucket.
     case 'malformedResponse':
+      return { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
+
+    // `unexpectedFailure` IS constructed — client.ts returns it for any status that is not
+    // 200/401/429/5xx. It keeps the no-cooldown bucket it has always had.
     case 'unexpectedFailure':
       return { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 };
   }

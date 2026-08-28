@@ -97,8 +97,12 @@ describe('cooldown', () => {
       expect(shouldCooldown('notConfigured')).toBe(false);
     });
 
-    test('returns false for malformedResponse', () => {
-      expect(shouldCooldown('malformedResponse')).toBe(false);
+    test('returns TRUE for malformedResponse (changed by sdlc/029)', () => {
+      // Was false while NOTHING constructed the class. sdlc/029's B1b made a 200 with a non-JSON
+      // body construct it, which moved that path off `serviceUnavailable` and silently off the
+      // §9.4 cooldown with it — 2 authenticated requests per prompt render, unbounded. Restoring
+      // the throttle restores pre-029 behaviour for that path.
+      expect(shouldCooldown('malformedResponse')).toBe(true);
     });
 
     test('returns false for unexpectedFailure', () => {
@@ -120,7 +124,7 @@ describe('shouldCooldown after the timeout split (sdlc/010)', () => {
   });
 
   test('no other class enters cooldown', () => {
-    for (const c of ['notConfigured', 'authInvalid', 'malformedResponse', 'unexpectedFailure'] as const) {
+    for (const c of ['notConfigured', 'authInvalid', 'unexpectedFailure'] as const) {   // sdlc/029 moved malformedResponse into the cooldown set
       expect(shouldCooldown(c)).toBe(false);
     }
   });
@@ -137,7 +141,7 @@ describe('failurePolicy (sdlc/014)', () => {
     authInvalid: { cooldown: false, retryable: false, presentation: 'invalid', statuslineExitCode: 2 },
     serviceUnavailable: { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
     timeout: { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
-    malformedResponse: { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
+    malformedResponse: { cooldown: true, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },   // sdlc/029
     unexpectedFailure: { cooldown: false, retryable: true, presentation: 'unknown', statuslineExitCode: 1 },
   };
 

@@ -163,6 +163,18 @@ function statusClassOf(result: FetchResult): StatusClass {
  * version may hold free text. Exactly seven literal forms, one per `SurfaceableMessage` member —
  * sdlc/029's mutation table has one row per form, so the shape is load-bearing.
  */
+/**
+ * OpenSSL verification failures, as a closed set. Reading a CODE and mapping it to one of our own
+ * literals adds no free text — which is what makes preserving this signal compatible with §12.
+ */
+const TLS_FAILURE_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
 export function isSurfaceableMessage(m: string | null | undefined): m is SurfaceableMessage {
   if (typeof m !== 'string') return false;
   return (
@@ -171,6 +183,7 @@ export function isSurfaceableMessage(m: string | null | undefined): m is Surface
     m === 'Network error' ||
     m === 'Request timed out' ||
     m === 'Malformed response' ||
+    m === 'TLS verification failed' ||
     /^Server error \(\d+\)$/.test(m) ||
     /^Unexpected status \d+$/.test(m)
   );
@@ -225,9 +238,17 @@ export async function fetchUsage(
     let result: FetchResult;
     try {
       result = await singleFetch(token, controller.signal);
-    } catch {
-      // No binding: nothing from the platform's error object is read any more, and the linter
-      // enforces that. The class comes from `timedOut`, the message from a constant. (sdlc/029)
+    } catch (err) {
+      // Reads `err.code`, NEVER `err.message`. A code is a closed set of OpenSSL identifiers that
+      // maps to a literal we choose; a message is free text that varies by platform and Bun
+      // version. That distinction is the whole of sdlc/029.
+      //
+      // Why this exists: B1 collapsed every network failure to 'Network error', and the sdlc/029
+      // SECURITY PASS measured that this threw away a real signal. A self-signed cert on a local
+      // server gives message "self signed certificate", code DEPTH_ZERO_SELF_SIGNED_CERT — not the
+      // "Unable to connect..." string that refused/DNS give. So a TLS INTERCEPTION ATTEMPT had
+      // become indistinguishable from a dead link on every surface. `failureClass` does not carry
+      // it either: both are `serviceUnavailable`. The spec's "information lost is nil" was wrong.
       clearTimeout(timeout);
       fetchedMs += Date.now() - attemptStarted;
       // A constant, chosen by the same flag that picks failureClass — for the reason the comment
@@ -236,7 +257,11 @@ export async function fetchUsage(
       // 1.3.11: connection-refused/TLS/DNS give "Unable to connect...", a timeout gives "The
       // operation was aborted." (a DOMException, which IS instanceof Error). Both generic today;
       // neither is a property this repo controls. (sdlc/029)
-      const message: SurfaceableMessage = timedOut ? 'Request timed out' : 'Network error';
+      const code = (err as { code?: unknown } | null)?.code;
+      const message: SurfaceableMessage =
+        timedOut ? 'Request timed out'
+        : (typeof code === 'string' && TLS_FAILURE_CODES.has(code)) ? 'TLS verification failed'
+        : 'Network error';
       lastError = {
         ok: false,
         status: null,

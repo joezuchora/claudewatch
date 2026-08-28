@@ -18,6 +18,7 @@ import { readFileSync } from 'fs';
 import { normalize } from './normalize.js';
 import { fetchUsage, isSurfaceableMessage } from './client.js';
 import { extractLastError } from './snapshot.js';
+import { shouldCooldown, failurePolicy } from './cooldown.js';
 import { makeCacheEnvelope, writeCache, getCachePath } from './cache.js';
 import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
 
@@ -286,7 +287,7 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
    * that is PERSISTED to the cache and RENDERED in the VS Code tooltip. The guard existed on the
    * telemetry path and not on this one.
    */
-  test('all seven fetch failure paths produce a surfaceable message', async () => {
+  test('all eight fetch failure paths produce a surfaceable message', async () => {
     const cases: Array<[string, () => void, string]> = [
       ['401', () => mockSurfaceFetch(async () => jsonResponse(401)), 'Authentication failed (401)'],
       ['429', () => mockSurfaceFetch(async () => jsonResponse(429)), 'Rate limited (429)'],
@@ -294,6 +295,14 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
       ['unexpected', () => mockSurfaceFetch(async () => jsonResponse(418)), 'Unexpected status 418'],
       ['network', () => mockSurfaceFetch(async () => { throw new TypeError('fetch failed: getaddrinfo ENOTFOUND some.host'); }), 'Network error'],
       ['malformed', () => mockSurfaceFetch(async () => new Response('not json', { status: 200 })), 'Malformed response'],
+      // Eighth path, added by sdlc/029's security pass. Selected from err.CODE, never err.message —
+      // a code is a closed OpenSSL set, a message is free text. Without this a TLS interception
+      // attempt was indistinguishable from a dead link on every surface.
+      ['tls', () => mockSurfaceFetch(async () => {
+        const e = new Error('self signed certificate') as Error & { code: string };
+        e.code = 'DEPTH_ZERO_SELF_SIGNED_CERT';
+        throw e;
+      }), 'TLS verification failed'],
     ];
 
     // Collected and asserted as one array rather than per-case: bun's `expect` takes no label
@@ -307,7 +316,7 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
     }
     expect(got).toEqual(cases.map(([name, , expected]) => [name, expected, true]));
 
-    // Seventh: the REAL timeout. The mock honours the abort signal as real fetch does, so client's
+    // Eighth: the REAL timeout. The mock honours the abort signal as real fetch does, so client's
     // own timer fires and sets `timedOut`. A synthetic AbortError would leave that flag false and
     // silently test the network branch instead — which is what the contract suite did for 29 loops.
     mockSurfaceFetch((_u: unknown, init: unknown) => new Promise<Response>((_res, rej) => {
@@ -324,6 +333,18 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
 
     // Positive precondition for the negatives above: the predicate really does reject things.
     expect(isSurfaceableMessage('Unable to connect. Is the computer able to access the url?')).toBe(false);
+  });
+
+  test('a malformed body still cools down — B1b must not remove the §9.4 throttle', () => {
+    // sdlc/029's security pass: B1b moved the 200-with-non-JSON path off `serviceUnavailable`,
+    // and `malformedResponse` sat in the no-cooldown bucket because nothing had ever constructed
+    // it. Net effect measured before the fix: 2 authenticated requests per prompt render,
+    // unbounded, instead of 2 per 5 minutes. cache.ts:139 calls the cooldown the ONLY throttle on
+    // token-bearing requests.
+    expect(shouldCooldown('malformedResponse')).toBe(true);
+    expect(failurePolicy('malformedResponse').cooldown).toBe(true);
+    // Positive precondition: the bucket it must NOT be in still exists and still means what it says.
+    expect(shouldCooldown('unexpectedFailure')).toBe(false);
   });
 
   test('the cache-read boundary drops a message no producer emits', () => {

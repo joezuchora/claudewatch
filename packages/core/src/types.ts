@@ -151,6 +151,7 @@ export type SurfaceableMessage =
   | 'Network error'
   | 'Request timed out'
   | 'Malformed response'
+  | 'TLS verification failed'
   | `Server error (${number})`
   | `Unexpected status ${number}`;
 

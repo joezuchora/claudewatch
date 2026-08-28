@@ -465,7 +465,7 @@ Default refresh interval is 60 seconds. Minimum configurable interval for the ex
 
 ### 9.4 Endpoint Failure Cooldown
 
-If the endpoint returns 429, 5xx, or a network failure (timeout, DNS, connection refused), ClaudeWatch enters a **cooldown period of 5 minutes (300 seconds)** during which no new network requests are attempted. Cached data continues to be served as stale. The cooldown timestamp is stored in the cache file so it is shared between the VS Code extension and the statusline binary.
+If the endpoint returns 429, 5xx, a network failure (timeout, DNS, connection refused), or a 200 whose body is not parseable JSON (`malformedResponse`, amended 2026-08-28 by `sdlc/029`), ClaudeWatch enters a **cooldown period of 5 minutes (300 seconds)** during which no new network requests are attempted. Cached data continues to be served as stale. The cooldown timestamp is stored in the cache file so it is shared between the VS Code extension and the statusline binary.
 
 This prevents accidental rate-limit amplification when the prompt hook fires frequently during an outage.
 
