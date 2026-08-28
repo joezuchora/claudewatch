@@ -9,7 +9,10 @@
 ## Problem
 
 Loop 029 closed the set of surfaceable error messages at the producer (a type) and at **one**
-consumer (`extractLastError`). Its Stage 5 left three gaps, all recorded in `sdlc/029/review.md`:
+consumer (`extractLastError`). Its Stage 5 left **nine** open items in `sdlc/029/review.md`; three
+concern this loop. (The first draft of this file said "three gaps" full stop — corrected after the
+spec review, because A9 requires marking all nine and an undercount would have licensed marking
+three and leaving six.)
 
 1. **The `--debug` bypass.** `packages/statusline/src/main.ts:143` and `:171` read
    `lastErrorMessage` straight off the envelope, never through `extractLastError`, so a cache file
@@ -44,7 +47,7 @@ Measured, so the cost is known rather than guessed:
 
 | Question | Measured |
 |---|---|
-| Typecheck errors from narrowing `CacheEnvelope.lastErrorMessage` | **1** — `cooldown.ts:30`, the `errorMessage` param |
+| Typecheck errors from narrowing `CacheEnvelope.lastErrorMessage` **alone** | **2** — `cache.ts:209`, `cooldown.ts:30`. CORRECTED: the first draft said 1, having narrowed the interface *and* a writer param in one probe — describing one mutation and measuring another |
 | Import cycle from `cache.ts` → `client.ts` | **none** — `client.ts` does not import `cache.ts` |
 | Precedent for the import | `cache.ts` already imports `isFailureClass` from `cooldown.ts`, the module owning that policy |
 

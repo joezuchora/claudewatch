@@ -2,33 +2,35 @@
 
 - **ID:** 030-cache-read-validation
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** revised after spec review (three BLOCKING, eight MAJOR; see "Spec review")
 - **Date:** 2026-08-28
 
-Reads `intent.md`. The design question it left open — whether the parse-boundary check makes
-`extractLastError`'s gate redundant enough to remove — is settled below **by measurement**, not by
-argument.
+Reads `intent.md`. The design question it left open is settled below by measurement.
 
-## Measurements this spec is built on
+## Measurements — CORRECTED after review
 
 | Question | Measured |
 |---|---|
-| Ways a `CacheEnvelope` comes into existence | **exactly two**: `JSON.parse(raw) as CacheEnvelope` (`cache.ts:88`) and `makeCacheEnvelope` (`cache.ts:196`) |
-| Production callers of `extractLastError` | **one**: `extension.ts:185`, whose argument came from `readCache()` — i.e. through the parse boundary |
-| Typecheck errors from narrowing `CacheEnvelope.lastErrorMessage` | **1** — `cooldown.ts:30` |
+| Producers of a `lastErrorMessage` **value** | **three**: `JSON.parse(raw) as CacheEnvelope` (`cache.ts:88`), `makeCacheEnvelope` (`cache.ts:196`), `enterCooldown` (`cooldown.ts:30`) — the third writes to disk and is re-read through the first |
+| Production callers of `extractLastError` | **one**: `extension.ts:185`, argument from `readCache()` |
+| Typecheck errors, narrowing `CacheEnvelope.lastErrorMessage` **alone** | **2** — `cache.ts:209`, `cooldown.ts:30` |
+| ...narrowing it **together with both writer params** | **0** |
+| Typecheck errors, additionally narrowing `LastErrorInfo.message` | **0** |
 | Import cycle `cache.ts` → `client.ts` | **none** |
-| Existing precedent | `cache.ts` already imports `isFailureClass` from `cooldown.ts` |
 
-So after B1 and B2 below, **`extractLastError`'s gate is redundant on every reachable path.**
+**Two of these were wrong in the first draft.** It claimed "exactly two" producers, missing
+`enterCooldown` — which is the site that *historically wrote free text to disk*, i.e. the one this
+whole loop exists for. And it claimed **1** typecheck error where narrowing the interface alone gives
+**2**: the first draft's probe narrowed the interface *and* a writer param in one edit, so it
+described one mutation and measured another. A wrong number in a table headed "Measured" is a
+first-class defect in this repo, not a typo.
 
 ## Behaviour
 
 ### B1 — `lastErrorMessage` is validated at the parse boundary
 
 `readCacheResult` already says *"Two fields cross the `as CacheEnvelope` assertion unchecked"* and
-nulls both. `lastErrorMessage` is the third. Same idiom, same reasoning — null rather than reject,
-because a bad message says nothing about the snapshot beside it and discarding a good snapshot costs
-a live token-bearing fetch:
+nulls both. `lastErrorMessage` is the third:
 
 ```ts
 if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMessage)) {
@@ -36,86 +38,144 @@ if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMe
 }
 ```
 
-The comment's own count — "**Two** fields" — becomes three and must be updated in the same edit.
-Loop 029 shipped a stale comment adjacent to its own falsifier; this is the same shape and is called
-out here so it cannot be repeated by inattention.
+Null rather than reject — a bad message says nothing about the snapshot beside it, and discarding a
+good snapshot costs a live token-bearing fetch. The comment's own count must go two → three in the
+same edit, naming which three (and noting they use two idioms: null-on-invalid ×2, sanitise-and-clamp
+×1). Loop 029 shipped a stale comment adjacent to its own falsifier; this is that shape.
 
-**This closes the `--debug` bypass** (`main.ts:143`, `:171`) without importing anything into
-`packages/statusline`: those two sites read an envelope that has already been cleaned. Loop 029's
-security pass established that they are the **only** two bypasses, having checked every read of
-`lastErrorMessage`/`lastErrorClass`/`lastHttpStatus` in all four packages — so this is a complete
-fix, not a partial one.
+**`CACHE_VERSION` stays 2.** B1 degrades one field rather than rejecting the envelope. A bump would
+discard every existing user's snapshot and force a token-bearing fetch on next render — the exact
+cost `readCacheResult`'s own comment says to avoid.
 
-### B2 — the persisted field is narrowed
+**This makes `SPEC.md §12` true rather than amending it.** §12 already claims the predicate runs "at
+the cache-read boundary". It does not — it runs in `extractLastError`, a consumer. `types.ts:145`
+carries the same inaccuracy and is corrected in the same edit. That is a stronger argument for B1
+than any the first draft made, and it went unnoticed.
 
-`CacheEnvelope.lastErrorMessage: SurfaceableMessage | null`, and both writer params
-(`makeCacheEnvelope`'s `lastErrorMessage`, `enterCooldown`'s `errorMessage`) with it. Costs one
-typecheck error, measured.
+### B2 — three types narrowed, not one
 
-After B1 the type is **true at runtime** rather than aspirational. Order matters: narrowing without
-B1 would produce a type that lies about disk contents, which is worse than a wide one — the compiler
-would promise something the parse boundary does not deliver.
+`CacheEnvelope.lastErrorMessage`, both writer params (`makeCacheEnvelope`'s, `enterCooldown`'s
+`errorMessage`), **and `LastErrorInfo.message`** (`format.ts:355`) — the last measured at **0**
+additional errors.
+
+`LastErrorInfo` was missing from the first draft and is the type actually **rendered**
+(`format.ts:405`, `tooltip.ts:51`). It has two producers: `extractLastError` (gated) and
+`extension.ts:235`, which builds one straight from a `FetchResult` and **never touches
+`extractLastError`**. Leaving it `string | null` re-widens `SurfaceableMessage` at the last hop, so a
+reader of the first draft would have believed the render path closed when half of it was not.
+
+After B1 the type is an **over-approximation** of disk contents, not an exact match: the template
+literal admits `Server error (-1)`, which `isSurfaceableMessage` nulls. Harmless, and stated because
+"the type is true at runtime" was B2's entire justification and is only approximately so.
 
 ### B3 — `extractLastError`'s gate is KEPT, and relabelled
 
-It is redundant on every path reachable today. Kept anyway, for one stated reason: it is the only
-check that survives a **third** construction site being added, and there is currently no test that
-would notice such a site appearing. One predicate call is a cheap standing guard.
+Redundant on every path reachable today. Kept as a standing guard against a **fourth** producer
+appearing (the first draft said "third", not knowing about `enterCooldown`).
 
-**But its test must keep constructing the envelope in memory.** After B1, a test that reaches the
-gate *through `readCache`* would pass with the gate deleted — the parse boundary would have caught it
-first. Loop 029's B3 test uses `makeCacheEnvelope(..., '…' as never)`, which bypasses both the type
-and the parse boundary; that is exactly right and must not be "tidied" into a `readCache` round-trip.
-Stated because the tidier version looks more realistic and tests less.
+**Its test must keep constructing the envelope in memory.** Verified by the reviewer, both ways: with
+B1+B2 applied and the gate deleted, loop 029's existing test still fails — because it uses
+`makeCacheEnvelope(..., '…' as never)`. And the `as never` survives B2: `never` is assignable to
+every type, so narrowing the param does not disarm it. A test that reached the gate *through*
+`readCache` would pass with the gate deleted, since the parse boundary catches it first. The
+realistic-looking version tests less.
 
-### B4 — gap 3 is recorded, not fixed
+### B4 — gap 3 recorded, with the claim CORRECTED
 
-`` `Server error (${number})` `` accepts `-1`, `NaN`, `1e5`; the regex rejects all three.
-Unreachable — `response.status` is a bounded positive integer from `Response.status`. **Decision:
-leave it**, with the divergence recorded in `review.md` so the next producer knows the predicate is
-the tighter of the two. Constraining the template type to real status codes costs more than the
-unreachable case is worth, and inventing a status-code union would be its own loop.
+The first draft said the type accepts `-1`, `NaN` and `1e5` while the regex rejects all three.
+**Two of those three are wrong**, and the claim was copied verbatim from `sdlc/029/review.md` without
+re-measurement — the exact behaviour this loop's thesis criticises 029 for. Measured:
 
-## Edge cases
+| value | template-literal type | regex |
+|---|---|---|
+| `-1` | accepts | rejects → **the only divergence** |
+| `NaN` | **TS2322** | rejects → no divergence |
+| `1e5` | accepts, renders `100000` | **accepts** → no divergence |
+| `Infinity` | **TS2322** | rejects → no divergence |
 
-- **An old cache file with free text AND a non-null `lastHttpStatus`.** B1 nulls the message and
-  keeps the status. `format.ts:404` and `tooltip.ts:50` both guard on `lastError?.message`, so the
-  `Last error:` line is omitted rather than rendered empty — verified by loop 029's security pass.
-- **`readCacheResult`'s telemetry.** The existing nulling branches emit no event; B1's must not
-  either, or the shape of `cache_event` changes (§17).
-- **A cache file whose message is valid but whose class is not** — the two checks are independent and
-  both already null-on-failure, so they compose without ordering concerns.
+Unreachable confirmed independently: the only two construction sites are `client.ts:109` and `:112`,
+both interpolating `response.status`, and `FetchOptions` carries no injected-fetch seam.
+**Decision: leave it**, recorded in `review.md`, and B1 nulls the divergent value off disk anyway.
+
+## Scope
+
+**Not in scope, recorded by name:** `printLiveDebug`'s `fetchError.message: string`
+(`main.ts:158`), carried from `sdlc/029/review.md:176`. It comes from a live `FetchFailure`, never
+from the cache, so **B1 cannot touch it** — it is type-safe today only because `result.message` is
+`SurfaceableMessage`, which that declaration immediately re-widens. The first draft quoted 029's
+bullet and silently dropped this clause: an open gap narrowed without a decision, in the same
+artifact that adds A9 against exactly that.
+
+Also out of scope: `commands.ts:26`'s modal; `enterprise.disabledReason`; `metrics.db`'s `0644` mode;
+`SPEC.md §17`'s allowed-debug list, which does not name `lastErrorClass`/`lastHttpStatus`/
+`lastErrorMessage`/`cooldownUntil`/`freshness` although `printDebug` emits all five — pre-existing,
+improved by this loop, recorded not amended.
 
 ## Acceptance criteria
 
 - **A1** — `readCacheResult` nulls a non-surfaceable `lastErrorMessage`. Demonstrated by writing a
   cache file containing free text into a sandbox `HOME` and reading it back.
-- **A2** — **the check can fail.** Remove B1's branch; a test fails naming it. Restore; green. **Both
-  halves in `review.md`** — a `review.md` showing only the green half fails this criterion.
-- **A3** — `CacheEnvelope.lastErrorMessage` and both writer params are `SurfaceableMessage | null`;
-  `grep -c "lastErrorMessage: string | null" packages/core/src` is **0**.
-- **A4** — the `--debug` path is clean **end to end**: a seeded free-text cache file, read through the
-  same code path `printDebug` uses, yields `lastErrorMessage: null`. Asserted against the value, not
-  against the absence of a grep hit.
-- **A5** — `readCacheResult`'s "Two fields" comment says three, and names the third.
-- **A6** — `extractLastError`'s test still constructs its envelope in memory. If it goes through
-  `readCache`, A6 fails even if the suite is green.
-- **A7** — lint warnings unchanged at **11**, and the before/after lists differ by **no** line. Stated
-  as a diff, not a count: loop 029's A7 was written as a count, violated, and shipped unnoticed.
-- **A8** — every mutation in the plan's table produces its predicted count.
-- **A9** — `sdlc/029/review.md`'s "What is NOT done" list is updated to mark which items this loop
-  closed and which remain. An open-gaps list that silently goes stale is what 029's retrospective was
-  about.
+- **A2** — **the check can fail.** Remove B1's branch; a named test fails. Restore; green. Both halves
+  in `review.md`.
+- **A3** — REWRITTEN; the first draft's check **could not fail**. It ran `grep -c "…" packages/core/src`
+  non-recursively on a directory, which prints `0` and exits 2 unconditionally — green before, after,
+  and on revert, while the string it hunts is present twice. Replaced with:
+  `grep -rnE "(lastError|error)?[Mm]essage: string \| null" packages/ --include=*.ts` returns **0**
+  lines, **and** `bun run typecheck` exits 0 as the positive control.
+- **A4** — SCOPED and STRENGTHENED. The `--debug` **cache-read** path is clean end to end, asserted in
+  `packages/statusline/src/smoke.test.ts` against the compiled binary with `seedSandboxHome`:
+  ```
+  expect(out.lastErrorMessage).toBeNull();        // strict null, not falsy
+  expect(typeof out.cacheAgeSec).toBe('number');  // the cache was actually READ, not missed
+  expect(out.lastHttpStatus).toBe(503);           // and THIS envelope, not some other
+  ```
+  **A test in `main.test.ts` does NOT satisfy A4** — that file mocks `./core-deps.js`, so it would
+  assert against a mocked `readCache` and prove nothing about `readCacheResult`. The hit-precondition
+  assertions exist because `printDebug` omits the key entirely on a cache miss or a rejected seed, so
+  a loose assertion goes green while proving nothing. The seed override needs its own `as never` once
+  B2 narrows `Partial<CacheEnvelope>` — a **second** load-bearing `as never`.
+- **A5** — `readCacheResult`'s "Two fields" comment says three and names them; `types.ts:145` and
+  `SPEC.md §12` no longer misdescribe where the predicate runs.
+- **A6** — mechanical, not an eyeball:
+  `grep -A20 'drops a message no producer emits' packages/core/src/security.test.ts | grep -c 'readCache\|writeCache'`
+  is **0**.
+- **A7** — REWRITTEN; the first draft's mechanism produces spurious failures. oxlint's output order is
+  **nondeterministic across runs on an identical tree** (measured). Sorted:
+  `oxlint 2>&1 | grep warning | sort` before and after; `diff` empty and `wc -l` = **11** on both,
+  both pasted in `review.md`.
+- **A8** — every mutation in the plan's table produces its predicted count, and the table has **at
+  least three rows for B1**: delete the `if` block; invert the condition; replace the predicate with
+  `true`. A plan cannot satisfy A8 with a one-row table.
+- **A9** — **all nine** bullets under `sdlc/029/review.md`'s "What is NOT done" carry a marker
+  (`CLOSED by 030` / `OPEN` / `DEFERRED — reason`). The first draft said 029 left "three gaps"; it
+  left **nine**, so an unmarked-bullet loophole would have let this loop mark three and leave six —
+  self-undermining, in the criterion that exists against stale gap lists.
+- **A10** — NEW. B1 and B2 land in the **same commit**. `git log -p` for the range shows `cache.ts`'s
+  new branch and `types.ts`'s narrowing in one diff. See Risks for why prose was not enough.
 
 ## Risks
 
-- **A2 is the criterion most likely to ship as nothing** — it always is. It requires deleting the
-  branch and watching a specific test go red.
-- **B2 before B1 would be actively harmful.** The plan must sequence them, and the implementation must
-  not land the narrowing alone "because it typechecks".
-- **The `as never` in loop 029's B3 test is load-bearing** and looks like a smell. A future cleanup
-  that removes it silently makes the test unable to construct the case it exists for.
+- **B2 alone is a review hazard with a concrete consequence**, not the "type that lies" rhetoric the
+  first draft offered. Measured: B2 alone changes zero runtime behaviour and fails zero tests. The
+  real consequence is that `extractLastError`'s ternary becomes redundant *by the declared type* while
+  still load-bearing *at runtime* — so a later cleanup (a `no-unnecessary-condition` rule, or a
+  reviewer grepping types) deletes it and free text from a pre-029 cache file flows to `format.ts:405`.
+  The first draft's only mitigation was prose; **A10 now enforces it**, because no other criterion
+  was violated by B2-alone.
+- **A2 is the criterion most likely to ship as nothing.** It always is.
+- **Two `as never` casts are load-bearing** — 029's test fixture and A4's seed override. Both look like
+  smells; removing either silently makes its test unable to construct the case it exists for.
+
+## Spec review
+
+Run at Stage 2 against `127f922..c3acbb2`. Returned **three BLOCKING**, eight MAJOR, five MINOR. The
+central claim was traced and **confirmed**: `main.ts:201` is the sole assignment to `cache`, from
+`readCache()`, so both `--debug` sites receive a post-B1 envelope.
+
+Three findings were re-measured by me before acting, because each falsified something written as
+measured: the typecheck count (2, not 1), A3's grep (cannot fail — exits 2 on a directory), and B4's
+divergence set (one member, not three).
 
 ## Next stage
 
-`/sdlc-plan`, after the spec review.
+`/sdlc-plan`.
