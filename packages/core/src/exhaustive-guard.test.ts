@@ -167,6 +167,33 @@ describe('the negative control', () => {
   });
 });
 
+describe("a count stated in a comment is a claim, and this one has been wrong twice", () => {
+  test("isSurfaceableMessage's docstring count matches its implementation", () => {
+    // sdlc/031, A9. The docstring said "seven literal forms" while the function had eight, and it
+    // sat orphaned behind a second docblock so nothing attached it to the function at all. Both
+    // found by review. A comment nobody can fail is a comment that drifts — three separate wrong
+    // counts have shipped in this repo (sdlc/028 "nine" over eleven, sdlc/029 "eight" over nine,
+    // and this one), so the count is now checked rather than read.
+    const source = readFileSync(join(REPO_ROOT, 'packages/core/src/client.ts'), 'utf-8');
+
+    const stated = source.match(/Exactly (\w+) literal forms/);
+    expect(stated).not.toBeNull();
+    const WORDS: Record<string, number> = { five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+    const claimed = WORDS[stated![1]!];
+    expect(claimed).toBeDefined();
+
+    // Count the forms in the function body itself: one `m === '...'` per literal member, one
+    // regex `.test(m)` per templated member.
+    const body = source.slice(source.indexOf('export function isSurfaceableMessage'));
+    const fn = body.slice(0, body.indexOf('\n}'));
+    const actual = (fn.match(/m === '/g) ?? []).length + (fn.match(/\.test\(m\)/g) ?? []).length;
+
+    // Positive precondition: the extraction found a real function body, not an empty string.
+    expect(actual).toBeGreaterThan(0);
+    expect(claimed).toBe(actual);
+  });
+});
+
 describe('tsconfig exclusions', () => {
   test('typecheck skips exactly three paths and no more', () => {
     // sdlc/018: `scripts` was in this list for eleven loops, so `bun run typecheck` never

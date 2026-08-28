@@ -55,10 +55,13 @@ export function makeErrorSnapshot(
  */
 export function extractLastError(envelope: CacheEnvelope | null): LastErrorInfo | null {
   if (!envelope?.lastHttpStatus && !envelope?.lastErrorMessage) return null;
-  // The type closes the set at the producer; this closes it here, where a type cannot reach — the
-  // value comes off DISK, and a cache file written before sdlc/029 may hold free text from
-  // `err.message`. A rejected message becomes null; the status is still returned, because it is a
-  // number and carries nothing free-form. (SPEC.md §12, sdlc/029 B3)
+  // A STANDING SECOND GUARD, not the boundary. Since sdlc/030 the value has already been validated
+  // in `readCacheResult`, where the file enters the process, so nothing free-form off disk reaches
+  // this line any more. Kept because this function also accepts envelopes built in memory by
+  // callers that never went through the reader, and because the day a fourth producer appears the
+  // check is already here. Claiming it was the boundary — as this comment did until sdlc/031 —
+  // overstated it in exactly the direction sdlc/014's review warned about.
+  // (SPEC.md §12, sdlc/029 B3, sdlc/030 B1)
   const message = isSurfaceableMessage(envelope.lastErrorMessage) ? envelope.lastErrorMessage : null;
   return { httpStatus: envelope.lastHttpStatus, message };
 }

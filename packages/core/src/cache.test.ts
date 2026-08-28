@@ -2,7 +2,9 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
 import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir, sanitizeCooldownUntil } from './cache.js';
 import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
-import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { classify } from './state.js';
+import { UNKNOWN_FETCHED_AT, NORMALIZATION_WARNINGS } from './closed-sets.js';
 
 describe('cache', () => {
   let tempDir: string;
@@ -481,5 +483,113 @@ describe('a corrupt cooldownUntil cannot release the throttle (sdlc/014 security
     const envelope = readCacheResult().envelope!;
     expect(envelope.cooldownUntil).toBe(until);
     expect(isInCooldown(envelope)).toBe(true);
+  });
+});
+
+/** Write a raw object to the cache path, bypassing writeCache's types. */
+function seed(envelope: unknown): void {
+  writeFileSync(getCachePath(), JSON.stringify(envelope), { mode: 0o600 });
+}
+
+const LIVE_COOLDOWN = (): string => new Date(Date.now() + 120_000).toISOString();
+
+// Module scope, not nested in the describe: a helper that captures nothing trips
+// unicorn(consistent-function-scoping). Loop 028 named this trap in writing, loop 029 hit it,
+// loop 031 hit it again. Writing the lesson down does not confer immunity; hoisting does.
+describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
+  let cleanup2: () => void;
+  beforeEach(() => { ({ cleanup: cleanup2 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup2(); });
+
+  test('T7 — a poisoned VALUE costs neither the envelope nor the cooldown', () => {
+    // §9.4: the cooldown is the only throttle on token-bearing requests, and it lives in the file
+    // a reject would delete. This is the property that makes degrade-don't-reject a security
+    // decision rather than a preference.
+    const cooldownUntil = LIVE_COOLDOWN();
+    seed(makeTestEnvelope({
+      cooldownUntil,
+      snapshot: makeTestSnapshot({
+        freshness: { isStale: true, staleReason: 'POISON /home/someone' as never },
+      }),
+    }));
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope!.cooldownUntil).toBe(cooldownUntil);
+    expect(isInCooldown(result.envelope!)).toBe(true);
+  });
+
+  test('T12 — a NON-STRING fetchedAt no longer deletes the cache', () => {
+    // Before sdlc/031 this hit the shape gate: tryDelete, envelope gone, cooldown gone, and a
+    // token-bearing fetch on every prompt render. Measured before the change.
+    const cooldownUntil = LIVE_COOLDOWN();
+    seed(makeTestEnvelope({
+      cooldownUntil,
+      snapshot: makeTestSnapshot({ fetchedAt: 12345 as never }),
+    }));
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope!.snapshot.fetchedAt).toBe(UNKNOWN_FETCHED_AT);
+    expect(result.envelope!.cooldownUntil).toBe(cooldownUntil);
+    expect(existsSync(getCachePath())).toBe(true);
+  });
+
+  test('T12b — a structurally broken envelope still rejects, and still loses the cooldown', () => {
+    // The other half of the line, asserted rather than left implied: there is nothing coherent to
+    // substitute for a missing `display`, so this path rejects — and its §9.4 exposure is real and
+    // NOT closed by this loop. Pinning it means the day someone closes it, this test says so.
+    seed({
+      version: 2, cooldownUntil: LIVE_COOLDOWN(), lastErrorClass: null,
+      lastHttpStatus: null, lastErrorMessage: null,
+      snapshot: { fetchedAt: new Date().toISOString(), freshness: { isStale: false, staleReason: 'none' } },
+    });
+    expect(readCacheResult().reason).toBe('invalidShape');
+    expect(existsSync(getCachePath())).toBe(false);
+  });
+
+  test('T8 — a RICH honest envelope round-trips deep-equal', () => {
+    // Every field overridden. makeTestSnapshot's defaults are each field's DEGRADED value
+    // ('none', [], a current ISO timestamp), so a default fixture passes this criterion with an
+    // empty closed set and a predicate that accepts only 'none'. That was a Stage 2 finding.
+    const envelope = makeTestEnvelope({
+      cooldownUntil: LIVE_COOLDOWN(),
+      snapshot: makeTestSnapshot({
+        fetchedAt: '2026-08-01T12:34:56.000Z',
+        freshness: { isStale: true, staleReason: 'malformedResponse' },
+        rawMetadata: { normalizationWarnings: [...NORMALIZATION_WARNINGS] },
+      }),
+    });
+    seed(envelope);
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).toEqual(envelope);
+    // Positive preconditions: the fixture really is rich, so the deep-equal above is load-bearing.
+    expect(result.envelope!.snapshot.rawMetadata.normalizationWarnings).toHaveLength(9);
+    expect(result.envelope!.snapshot.freshness.staleReason).toBe('malformedResponse');
+  });
+
+  test('T9 — the staleReason fallback changes no classification', () => {
+    // A5. The right-hand column is the table measured on 825ac80 and committed in plan.md BEFORE
+    // the change; `git log --oneline e783783..HEAD` shows the ordering.
+    const cases: Array<[boolean, string, string]> = [
+      [false, 'none', 'Healthy'],
+      [false, 'POISON /home/someone', 'Healthy'],
+      [true, 'none', 'Stale'],
+      [true, 'POISON /home/someone', 'Stale'],
+      [true, 'malformedResponse', 'Degraded'],
+      [true, 'fetchFailed', 'Stale'],
+    ];
+
+    const got: Array<[boolean, string, string]> = [];
+    for (const [isStale, staleReason] of cases) {
+      seed(makeTestEnvelope({
+        snapshot: makeTestSnapshot({ freshness: { isStale, staleReason: staleReason as never } }),
+      }));
+      got.push([isStale, staleReason, classify(readCacheResult().envelope!.snapshot)]);
+    }
+    expect(got).toEqual(cases);
   });
 });

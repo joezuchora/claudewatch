@@ -14,7 +14,7 @@ import { spawnSync, spawn } from 'child_process';
 import { rmSync, existsSync, statSync, readdirSync } from 'fs';
 import { resolve } from 'path';
 import * as net from 'net';
-import { seedSandboxHome, type SandboxSeed } from '@claudewatch/core/test-helpers';
+import { seedSandboxHome, makeTestSnapshot, type SandboxSeed } from '@claudewatch/core/test-helpers';
 
 const BIN = resolve(import.meta.dir, '..', 'dist', 'claudewatch');
 const REPO = resolve(import.meta.dir, '..', '..', '..');
@@ -261,6 +261,115 @@ describe('smoke: --debug never prints free text off a cache file', () => {
       expect(r.stdout).not.toContain('someones-nuc.local');
     } finally {
       rmSync(poisoned.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+const p = (n: number): string => String(n).padStart(2, '0');
+
+describe('smoke: neither --debug nor --json prints free text off a cache file', () => {
+  // Four DISTINGUISHABLE poisons, one per validated field, in one envelope. A single-check
+  // mutation then fails with a message naming which field leaked, rather than a bare "output
+  // contained a string".
+  const P = {
+    fetchedAt: 'LEAK-FETCHEDAT-/home/someone',
+    staleReason: 'LEAK-STALEREASON-/home/someone',
+    isStale: 'LEAK-ISSTALE-/home/someone',
+    warning: 'LEAK-WARNING-/home/someone',
+  };
+
+  /**
+   * A `fetchedAt` that is poisoned AND parses to roughly now.
+   *
+   * This matters for --json and took a measurement to get right. `--debug` returns before any
+   * freshness check, so it takes any seed; `--json` only reaches `output()` at main.ts:241 when
+   * `isCacheFresh` is true. An ISO string with a suffix does not parse at all, and a bare date
+   * parses to midnight — both leave the cache stale and route --json somewhere else entirely.
+   * Date.parse's legacy path ignores parenthesised text, so a full local date-time plus a
+   * parenthesised suffix parses to ~now and stays fresh.
+   */
+  function poisonedButFresh(): string {
+    const d = new Date();
+    const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+    return `${mon} ${d.getDate()} ${d.getFullYear()} `
+      + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} (${P.fetchedAt})`;
+  }
+
+  function seedPoisoned(): SandboxSeed {
+    return seedSandboxHome({
+      prefix: 'cw-smoke-poison-',
+      accessToken: FAKE_TOKEN,
+      snapshot: makeTestSnapshot({
+        fetchedAt: poisonedButFresh(),
+        freshness: { isStale: P.isStale, staleReason: P.staleReason },
+        rawMetadata: { normalizationWarnings: [P.warning, 'Response is not an object'] },
+      } as never),
+    });
+  }
+
+  function runFlag(flag: string, env: Record<string, string>): Promise<RunResult> {
+    return new Promise((res) => {
+      const started = Date.now();
+      const child = spawn(BIN, [flag], {
+        env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let stdout = '';
+      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 20000);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        res({ code, stdout, timedOut, ms: Date.now() - started });
+      });
+    });
+  }
+
+  test('T5 — --debug', async () => {
+    // Network-inert twice over: --debug without --refresh returns at main.ts:204-207 before
+    // resolveCredentials, and the seeded credential is already expired.
+    const seedP = seedPoisoned();
+    try {
+      const r = await runFlag('--debug', seedP.env);
+      expect(r.timedOut).toBe(false);
+      expect(r.code).toBe(0);
+
+      const out = JSON.parse(r.stdout) as Record<string, unknown>;
+      // Preconditions: the cache was READ, and it was THIS envelope. printDebug omits every cache
+      // key on a miss, so without these the absence assertions could pass while proving nothing.
+      expect(typeof out.cacheAgeSec).toBe('number');
+      expect(out.freshness).toBeDefined();
+
+      for (const [field, poison] of Object.entries(P)) {
+        expect(`${field}: ${r.stdout}`).not.toContain(poison);
+      }
+      // The surviving real warning proves the filter filters rather than empties.
+      expect(r.stdout).toContain('Response is not an object');
+    } finally {
+      rmSync(seedP.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('T6 — --json, which serialises the WHOLE snapshot', async () => {
+    // The surface the draft spec missed. It names no field, so no field-name search could find it.
+    // Reached only on the fresh-cache path (main.ts:241), hence poisonedButFresh above.
+    const seedP = seedPoisoned();
+    try {
+      const r = await runFlag('--json', seedP.env);
+      expect(r.timedOut).toBe(false);
+      expect(r.code).toBe(0);
+
+      const snap = JSON.parse(r.stdout) as { fetchedAt: string; freshness: Record<string, unknown> };
+      // Precondition: this really is the fresh-cache path serialising the cached snapshot, not a
+      // stale or error snapshot built in main().
+      expect(snap.freshness).toBeDefined();
+      expect(snap.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      for (const [field, poison] of Object.entries(P)) {
+        expect(`${field}: ${r.stdout}`).not.toContain(poison);
+      }
+      expect(r.stdout).toContain('Response is not an object');
+    } finally {
+      rmSync(seedP.home, { recursive: true, force: true });
     }
   }, 30_000);
 });

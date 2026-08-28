@@ -21,6 +21,7 @@ import { extractLastError } from './snapshot.js';
 import { shouldCooldown, failurePolicy } from './cooldown.js';
 import { makeCacheEnvelope, writeCache, getCachePath, readCacheResult } from './cache.js';
 import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { UNKNOWN_FETCHED_AT } from './closed-sets.js';
 
 const TOKEN = 'sk-ant-oat01-FAKE-SECRET-TOKEN-1234567890';
 let cleanup: () => void;
@@ -396,5 +397,90 @@ describe('§12: every surfaceable error message is a literal this repo wrote', (
       lastErrorMessage: 'Server error (503)',
     })), { mode: 0o600 });
     expect(readCacheResult().envelope!.lastErrorMessage).toBe('Server error (503)');
+  });
+});
+
+/**
+ * Each case asserts on the WHOLE serialised envelope, not on its field alone.
+ *
+ * `--json` (main.ts:241, :256 -> :371) stringifies the entire snapshot, so a per-field assertion
+ * proves less than it looks: it cannot see a poison that survives in a neighbouring key. The
+ * draft spec missed that surface entirely because it searched for readers of three field NAMES,
+ * and `--json` names no field.
+ */
+function seedAndRead(snapshotOverrides: Record<string, unknown>): {
+  serialised: string; envelope: NonNullable<ReturnType<typeof readCacheResult>['envelope']>;
+} {
+  writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+    snapshot: makeTestSnapshot(snapshotOverrides as never),
+  })), { mode: 0o600 });
+  const result = readCacheResult();
+  expect(result.reason).toBe('hit');   // precondition: degraded, not discarded
+  return { serialised: JSON.stringify(result.envelope), envelope: result.envelope! };
+}
+
+
+describe('§12: no value off a cache file reaches a surface unvalidated (sdlc/031)', () => {
+  const POISON = '/home/someone sk-ant-oat01-SECRET nuc.local';
+
+  test('a fetchedAt carrying free text is canonicalised', () => {
+    // Parseable: Date.parse's legacy path ignores parenthesised trailing text, so this is finite
+    // and was returned whole. Asserted as a SHAPE, not an instant — the legacy parser reads a
+    // bare date as LOCAL time, so the exact value is timezone-dependent and the property is not.
+    const { serialised, envelope } = seedAndRead({ fetchedAt: `2026-01-01 (${POISON})` });
+    expect(envelope.snapshot.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a fetchedAt that will not parse becomes the sentinel', () => {
+    const { serialised, envelope } = seedAndRead({ fetchedAt: `not-a-date ${POISON}` });
+    expect(envelope.snapshot.fetchedAt).toBe(UNKNOWN_FETCHED_AT);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a poisoned staleReason falls back to a member', () => {
+    const { serialised, envelope } = seedAndRead({
+      freshness: { isStale: true, staleReason: `leaked ${POISON}` },
+    });
+    expect(envelope.snapshot.freshness.staleReason).toBe('none');
+    expect(envelope.snapshot.freshness.isStale).toBe(true);   // the fact survives; only the reason goes
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a non-boolean isStale becomes false', () => {
+    const { serialised, envelope } = seedAndRead({
+      freshness: { isStale: `yes ${POISON}`, staleReason: 'fetchFailed' },
+    });
+    expect(envelope.snapshot.freshness.isStale).toBe(false);
+    expect(envelope.snapshot.freshness.staleReason).toBe('fetchFailed');  // a real member survives
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('warnings are FILTERED, not emptied — a real one beside a poisoned one survives', () => {
+    const { serialised, envelope } = seedAndRead({
+      rawMetadata: { normalizationWarnings: ['Response is not an object', `evil ${POISON}`] },
+    });
+    // Filtering rather than emptying is the whole value of the field on the path where it appears.
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual(['Response is not an object']);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a non-array normalizationWarnings becomes an empty array', () => {
+    const { envelope } = seedAndRead({ rawMetadata: { normalizationWarnings: `not an array ${POISON}` } });
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual([]);
+  });
+
+  test('an honest envelope is untouched — the positive control for all six above', () => {
+    // Without this, every assertion above passes just as well for a reader that blanks these
+    // fields unconditionally, which is a different and useless guard.
+    const fetchedAt = '2026-08-01T12:34:56.000Z';
+    const { envelope } = seedAndRead({
+      fetchedAt,
+      freshness: { isStale: true, staleReason: 'malformedResponse' },
+      rawMetadata: { normalizationWarnings: ['No valid usage windows found'] },
+    });
+    expect(envelope.snapshot.fetchedAt).toBe(fetchedAt);
+    expect(envelope.snapshot.freshness).toEqual({ isStale: true, staleReason: 'malformedResponse' });
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual(['No valid usage windows found']);
   });
 });

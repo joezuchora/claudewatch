@@ -156,14 +156,6 @@ function statusClassOf(result: FetchResult): StatusClass {
 }
 
 /**
- * Is this string one of the messages this repo produces?
- *
- * The type closes the set at the PRODUCER; this closes it at the CONSUMER, where a type cannot
- * reach: `extractLastError` reads `lastErrorMessage` off disk, and a cache file written by an older
- * version may hold free text. Exactly seven literal forms, one per `SurfaceableMessage` member —
- * sdlc/029's mutation table has one row per form, so the shape is load-bearing.
- */
-/**
  * OpenSSL verification failures, as a closed set. Reading a CODE and mapping it to one of our own
  * literals adds no free text — which is what makes preserving this signal compatible with §12.
  */
@@ -175,6 +167,23 @@ const TLS_FAILURE_CODES = new Set([
   'ERR_TLS_CERT_ALTNAME_INVALID',
 ]);
 
+/**
+ * Is this string one of the messages this repo produces?
+ *
+ * The type closes the set at the PRODUCER. This closes it where a type cannot reach — at a value
+ * read off DISK. Since sdlc/030 the primary caller is `readCacheResult`, at the PARSE BOUNDARY, so
+ * every consumer is covered including the two that never call `extractLastError`; that function's
+ * own gate is now a standing second guard rather than the only one.
+ *
+ * Exactly eight literal forms, one per `SurfaceableMessage` member — sdlc/029's mutation table has
+ * one row per form, so the shape is load-bearing.
+ *
+ * This docstring had three defects until sdlc/031, all found by review rather than by reading it:
+ * it said seven, it described the check as running at the consumer, and it was ORPHANED — a second
+ * docblock for `TLS_FAILURE_CODES` sat between it and this function, so it documented nothing.
+ * `exhaustive-guard.test.ts` now asserts the stated count against the implementation, because a
+ * count in prose is a claim and this file has been wrong about it twice.
+ */
 export function isSurfaceableMessage(m: string | null | undefined): m is SurfaceableMessage {
   if (typeof m !== 'string') return false;
   return (
