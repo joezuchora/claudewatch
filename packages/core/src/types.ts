@@ -77,7 +77,7 @@ export interface CacheEnvelope {
   cooldownUntil: string | null; // ISO timestamp or null
   lastErrorClass: FailureClass | null;
   lastHttpStatus: number | null; // HTTP status code of last failed fetch
-  lastErrorMessage: string | null; // Human-readable error message
+  lastErrorMessage: SurfaceableMessage | null; // A closed-set message; see SurfaceableMessage
 }
 
 // === API Response Types (SPEC.md §3.2) ===
@@ -142,8 +142,13 @@ export interface FetchSuccess {
  *
  * Narrowing this field makes a free-text producer a COMPILE error rather than something a test has
  * to remember to catch. `typefixtures/free-text-message.expect-error.ts` freezes the negative
- * control. `isSurfaceableMessage` re-checks the same set at the cache-read boundary, where a type
- * cannot help because the value comes off disk.
+ * control. `isSurfaceableMessage` re-checks the same set at the cache-read boundary
+ * (`readCacheResult`), where a type cannot help because the value comes off disk.
+ *
+ * CORRECTED by sdlc/030: this said "at the cache-read boundary" while the predicate actually ran in
+ * `extractLastError`, a CONSUMER. Two other consumers — the statusline's two `--debug` sites — never
+ * called it, so a pre-029 cache file still printed free text. The check now runs where the value
+ * enters the program, and this sentence is true.
  */
 export type SurfaceableMessage =
   | 'Authentication failed (401)'

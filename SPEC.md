@@ -727,7 +727,9 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - It must redact sensitive values from all surfaced errors — enforced since `sdlc/029` by
   narrowing `FetchFailure.message` to the closed `SurfaceableMessage` union (a compile error
   for a free-text producer, frozen by `typefixtures/free-text-message.expect-error.ts`) and by
-  `isSurfaceableMessage` at the cache-read boundary. Checked by
+  `isSurfaceableMessage` at the cache-read boundary (`readCacheResult`, since `sdlc/030` — until
+  then the predicate ran in `extractLastError`, a consumer, and the statusline's two `--debug` sites
+  bypassed it). Checked by
   `packages/core/src/security.test.ts` → "§12: every surfaceable error message is a literal
   this repo wrote". Before that, the clause held only by accident and nothing tested it.
 - It must not include tokens in issue templates, screenshots, or debug output

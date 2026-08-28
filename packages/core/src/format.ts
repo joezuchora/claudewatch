@@ -1,4 +1,4 @@
-import type { UsageSnapshot, SessionInfo, EnterpriseUsage, UsageWindow } from './types.js';
+import type { UsageSnapshot, SessionInfo, EnterpriseUsage, UsageWindow, SurfaceableMessage } from './types.js';
 import { formatLocalTime, formatLocalDateTime } from './time.js';
 
 /**
@@ -352,7 +352,12 @@ export function formatRichStatusLine(
  */
 export interface LastErrorInfo {
   httpStatus: number | null;
-  message: string | null;
+  // Narrowed by sdlc/030. This is the type actually RENDERED (:405, tooltip.ts:51), and it has two
+  // producers: `extractLastError` (gated) and extension.ts:235, which builds one straight from a
+  // FetchResult and never touches the gate. Left as `string` it re-widened SurfaceableMessage at the
+  // last hop, so half the render path was open while the loop that closed the other half said it
+  // was done. Measured at 0 additional typecheck errors.
+  message: SurfaceableMessage | null;
 }
 
 export function formatTooltip(snapshot: UsageSnapshot, lastError?: LastErrorInfo | null): string {

@@ -1,4 +1,4 @@
-import type { CacheEnvelope, FailureClass } from './types.js';
+import type { SurfaceableMessage, CacheEnvelope, FailureClass } from './types.js';
 
 /** 5 minutes — endpoint rate-limits aggressively. SPEC.md §9.4. */
 export const COOLDOWN_DURATION_MS = 300_000;
@@ -20,7 +20,7 @@ export function enterCooldown(
   envelope: CacheEnvelope,
   failureClass: FailureClass,
   httpStatus: number | null = null,
-  errorMessage: string | null = null,
+  errorMessage: SurfaceableMessage | null = null,
 ): CacheEnvelope {
   return {
     ...envelope,

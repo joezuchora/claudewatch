@@ -2,9 +2,12 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from '
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
-import type { CacheEnvelope } from './types.js';
+import type { CacheEnvelope, SurfaceableMessage } from './types.js';
 import { emitProcess, cacheEvent } from './telemetry.js';
 import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
+// Mirrors the isFailureClass import above: the module that OWNS a policy also owns its predicate.
+// No cycle — client.ts does not import cache.ts (measured, sdlc/030).
+import { isSurfaceableMessage } from './client.js';
 
 // Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
 // deserializes into a snapshot missing that field, so it is discarded and refetched rather
@@ -123,9 +126,14 @@ export function readCacheResult(): CacheReadResult {
     return { envelope: null, reason: 'invalidShape' };
   }
 
-  // Two fields cross the `as CacheEnvelope` assertion unchecked. Both are nulled rather than
-  // rejected: neither says anything about the snapshot beside it, and discarding a good
-  // snapshot would cost a live token-bearing fetch on every read.
+  // THREE fields cross the `as CacheEnvelope` assertion unchecked, in two idioms: `lastErrorClass`
+  // and `lastErrorMessage` are nulled on failure, `cooldownUntil` is sanitised and clamped. All are
+  // degraded rather than rejected: none says anything about the snapshot beside it, and discarding a
+  // good snapshot would cost a live token-bearing fetch on every read.
+  //
+  // It said "Two" until sdlc/030. `lastErrorMessage` was the third all along — sdlc/029 closed the
+  // message set at the producer and at ONE consumer (`extractLastError`) while the pattern for
+  // doing it properly sat six lines below, in this function.
 
   // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
   // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
@@ -147,6 +155,16 @@ export function readCacheResult(): CacheReadResult {
   //
   // Nulled on garbage (fail open, one fetch, then a real cooldown is written), and clamped on
   // magnitude (fail closed, never longer than the backoff we would have set ourselves).
+  // `lastErrorMessage` is printed by `--debug` (main.ts:143, :171) and rendered in the VS Code
+  // tooltip. Before sdlc/030 those sites read it straight off the envelope, so a cache file written
+  // before sdlc/029 — when the network path assigned `err.message` verbatim — still surfaced free
+  // text. Validating HERE fixes every consumer at once, including the two that never call
+  // `extractLastError`. SPEC.md §12 already claimed this check ran "at the cache-read boundary";
+  // this is the commit that makes that sentence true.
+  if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMessage)) {
+    parsed = { ...parsed, lastErrorMessage: null };
+  }
+
   parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
 
   return { envelope: parsed, reason: 'hit' };
@@ -198,7 +216,7 @@ export function makeCacheEnvelope(
   cooldownUntil: string | null = null,
   lastErrorClass: CacheEnvelope['lastErrorClass'] = null,
   lastHttpStatus: number | null = null,
-  lastErrorMessage: string | null = null,
+  lastErrorMessage: SurfaceableMessage | null = null,
 ): CacheEnvelope {
   return {
     version: CACHE_VERSION,
