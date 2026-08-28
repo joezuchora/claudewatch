@@ -2,218 +2,273 @@
 
 - **ID:** 031-cache-read-completeness
 - **Stage:** 2 — Design
-- **Status:** draft
+- **Status:** revised after review — two BLOCKING, seven MAJOR, six MINOR, all folded in
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
 
-`readCacheResult` will validate every value it returns from a cache file, not three of them. The
-three fields loop 030 named as a known gap — `snapshot.fetchedAt`, `snapshot.freshness.staleReason`,
-`snapshot.rawMetadata.normalizationWarnings` — are degraded to values this repository constructed
-whenever they fail their check, using the idiom loop 030 settled: **keep the envelope, replace the
-field**. Two docstrings stop describing where the check used to run.
+`readCacheResult` will validate **four** fields it currently returns unchecked from a cache file —
+`snapshot.fetchedAt`, `snapshot.freshness.staleReason`, `snapshot.freshness.isStale`, and
+`snapshot.rawMetadata.normalizationWarnings` — using the idiom loop 030 settled: keep the envelope,
+replace the field. Two docstrings stop describing where the check used to run.
 
-## What was measured before designing
+**This does not make the envelope fully validated, and the first draft of this spec said it did.**
+Roughly a dozen further snapshot fields remain unchecked and reach a user-visible surface verbatim.
+They are enumerated below and queued, not implied away.
 
-The intent asserted these three fields "reach `--debug` stdout verbatim". That claim is inherited
-from loop 030's security pass and this loop's thesis is that inherited claims get re-measured. Both
-the claim and its boundaries were checked:
+## What the review changed
 
-| field | verbatim surfaces | non-verbatim consumers |
-|---|---|---|
-| `fetchedAt` | `--debug` `lastFetchedAt` only (`main.ts:136`, `:164`) | `formatLocalTime` (**never echoes** — renders a time or the literal `unknown`, measured); `detectClockSkew` (returns `false` on unparseable); `isCacheFresh` (arithmetic) |
-| `staleReason` | `--debug` `freshness` — `printDebug` emits the whole `freshness` object (`main.ts:145`) | compared only, never rendered: `state.ts:30,43,49`, `main.ts:250`, `extension.ts:175` |
-| `normalizationWarnings` | `--debug` (`main.ts:144`, `:172`) | telemetry passes each through `categorizeWarning` and emits only the bucket — already pinned by `security.test.ts` → "a poisoned normalization warning cannot reach the spool as text" |
+The draft's "What was measured before designing" section asserted a conclusion — *"one surface,
+`--debug`"* — and was wrong twice. Both errors are recorded here rather than quietly corrected,
+because the shape of each is more useful than the fix.
 
-So the intent's claim is **correct and its scope is exactly right**: one surface, `--debug`. The
-statusline and tooltip were checked and are clean, which is worth stating because it is the
-difference between this being a `--debug` hardening and a rendered-output leak.
+### The set is nine, not seven — and the counter-measure failed on its own terms
 
-**A correction carried from the intent, restated so it cannot be re-inherited:** loop 030's security
-pass proposed validating warnings "against `categorizeWarning`'s closed set". `categorizeWarning`
-maps *any* string to a category and falls through to `'shape'`. It is a bucketer, not a predicate,
-and would accept everything. The real closed set is defined below.
+The draft tabulated seven warning strings and congratulated itself on using a table. The table was
+built by grepping `warnings.push`. **Two producers do not use `push`**: `normalize.ts:121` and
+`:165` pass literal arrays to `makeMalformed`, which assigns them at `:208`.
+
+```
+normalize.ts:121  makeMalformed(now, ['Response is not an object'])
+normalize.ts:165  makeMalformed(now, [...warnings, 'No valid usage windows found'])
+```
+
+Both are written to `usage.json` on the ordinary fetch path. A filter built from the seven-string
+table would have **dropped the headline warning of the malformed-response path on read** — deleting
+diagnostics from precisely the cache file where they matter. Confirmed by driving `normalize()` with
+fixtures: `'Response is not an object'` and `'No valid usage windows found'` both appear.
+
+`intent.md` said eight. The draft "corrected" it to seven. The answer is nine. A table is only a
+counter-measure against a miscount if the rows come from the behaviour rather than from one grep.
+
+### `--json` is a second verbatim surface, and no field-name search could ever have found it
+
+`main.ts:241` and `:256` call `output(cache.snapshot, …)`, and `output` at `:371` is
+`console.log(JSON.stringify(snapshot, null, 2))` — **the entire cached snapshot, unfiltered**. It is
+a documented contract (`SPEC.md:631`, `:791`, `:1053`) and the more likely paste-into-an-issue
+surface of the two, being the machine-readable one.
+
+The draft missed it because it searched for readers of `fetchedAt`, `staleReason` and
+`normalizationWarnings` by name. **`--json` names no field.** That is the finding worth keeping:
+grepping for a field name cannot find a surface that serialises the whole object, so a "which
+surfaces read this field" search is structurally incapable of being complete. The question has to be
+"what is serialised", not "what is read".
+
+### Therefore: the honest scope
+
+Validating at `readCacheResult` covers `--json` for free — that is the whole merit of the idiom, and
+it is why the fix does not change. What changes is the claim. Measured on the fresh-cache path, a
+poisoned `usage.json` puts free text on `--json` stdout through **at least** `source.usageEndpoint`,
+`authState`, `tier`, `display.primaryWindow`, `freshness.isStale` and every window field. `isStale`
+is folded into this loop because it sits inside the same `freshness` object as `staleReason` and
+costs one line; the rest becomes **loop 032**, a snapshot-level validator, because a dozen fields
+with their own closed sets is a different change with its own intent.
 
 ## Behavior
 
-Three new degradations in `readCacheResult`, after the existing shape gate and alongside the three
-that exist. All follow §12's settled rule: **degrade, never reject** — rejecting deletes the file,
-which discards `cooldownUntil`, which is the only throttle on token-bearing requests (`SPEC.md
-§9.4`). Loop 030's review records that reasoning in full.
+Four degradations in `readCacheResult`, after the shape gate, alongside the three that exist.
 
-### B1 — `fetchedAt` is canonicalised or replaced with a sentinel
+### The reject-versus-degrade line, restated
 
-- Parseable by `Date.parse` → replaced with `new Date(ms).toISOString()`. Same rule loop 030 applied
-  to `cooldownUntil`, for the same reason: `Date.parse` accepts far more than ISO-8601 and its
-  legacy parser ignores parenthesised trailing text, so `2026-01-01 (/home/someone …)` parses finite
-  and was returned whole.
-- Not parseable → replaced with the exported constant `UNKNOWN_FETCHED_AT`.
+The draft drew it as *shape checks reject, value checks degrade*. The review demonstrated that is a
+taxonomy, not a hazard analysis: with `fetchedAt: 12345` the envelope is deleted, **and the live
+cooldown goes with it** — measured, `cooldownActive: false` and `usage.json` gone. That is the exact
+§9.4 defect this spec's own Rejected-alternatives section argues against, sitting on the other side
+of a line drawn to excuse it.
 
-**No clamp.** Unlike `cooldownUntil`, a far-future `fetchedAt` is not a hazard: it makes
-`isCacheFresh` *true*, which suppresses a fetch rather than causing one, and `detectClockSkew`
-already exists to report it. Clamping would silently discard the skew signal that function was
-written to surface.
+**The line is now: degrade whenever there is a coherent value to degrade to; reject only when there
+is not.**
 
-### B2 — `staleReason` falls back to `'none'`
-
-Not one of the five `StaleReason` members → `'none'`. `isStale` is left alone; the two are stored
-independently and this change is about the reason, not the fact.
-
-**Chosen because it changes no observable classification.** Every consumer tests for a *specific*
-reason (`=== 'malformedResponse'`, `!== 'fetchFailed'`), so an unknown string and `'none'` take
-identical branches at all five sites. The degradation removes the text and nothing else — which is
-the property that makes it safe, and which is separately testable.
-
-### B3 — `normalizationWarnings` is filtered to the closed set
-
-The array is filtered to strings this repository can actually emit. A value that is not an array of
-strings becomes `[]`.
-
-The closed set is **seven** strings, all from `normalize.ts`, counted against the list and not
-asserted:
-
-| # | string | source |
+| condition | outcome | why |
 |---|---|---|
-| 1 | `extra_usage present but missing required fields` | `normalize.ts:85` |
-| 2 | `extra_usage present but has out-of-range values` | `normalize.ts:90` |
-| 3 | `extra_usage present but has invalid enabled monthly limit` | `normalize.ts:95` |
-| 4 | `extra_usage.currency invalid; defaulted to USD` | `normalize.ts:102` |
-| 5 | `five_hour.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:126` |
-| 6 | `seven_day.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:127` |
-| 7 | `seven_day_opus.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:128` |
+| `fetchedAt` is not a string, or is a string that will not parse | `UNKNOWN_FETCHED_AT` | a sentinel exists, so nothing forces a reject |
+| `snapshot`, `snapshot.display` or `snapshot.freshness` missing or not an object | reject, unchanged | there is nothing coherent to substitute; inventing a display object would render fiction |
 
-All three `name` arguments are string literals, which is what makes the interpolated form a closed
-set rather than an open one. That was checked rather than assumed: if any call site passed a key
-taken from the API response, this whole approach would be unsound.
+The reject cases keep their §9.4 exposure. It is **named, not resolved**: a structurally broken
+envelope deletes the cooldown, and closing that needs a cooldown store separable from the snapshot,
+which is its own change. `intent.md` outcome 4 said "in all three cases the envelope is kept" — true
+for all four value cases after this change, and false for the structural cases, which is stated here
+rather than left for a reviewer to notice.
 
-My first draft of this paragraph wrote "eight" and then arithmetic caught it. Loop 028 said "nine"
-over eleven rows, loop 029 said "eight" over nine, loop 030 published a divergence count it had
-never measured. The counter-measure is the table above, plus code that derives the count from the
-array rather than from a literal.
+### B1 — `fetchedAt`
 
-To stop the set and the producer drifting, `normalize.ts` sources its warning strings from the same
-exported constants. **This is an edit to `normalize.ts`**, which `intent.md` placed out of scope —
-scoped narrowly: the strings it writes are byte-identical, pinned by existing tests, and only their
-spelling moves. Declared rather than slipped in.
+Parseable → `new Date(ms).toISOString()`. Not parseable, or not a string → `UNKNOWN_FETCHED_AT`.
+
+**No clamp.** Unlike `cooldownUntil` the hazards are opposite: a far-future `cooldownUntil`
+suppresses fetches forever, a far-future `fetchedAt` suppresses one and is exactly what
+`detectClockSkew` exists to report. Clamping would delete that signal.
+
+### B2 — `freshness`
+
+- `staleReason` not one of the five `StaleReason` members → `'none'`.
+- `isStale` not a boolean → `false`.
+
+`'none'` is chosen because it **changes no observable classification**: every consumer tests for a
+specific reason, so an unknown string and `'none'` take identical branches at all five sites. The
+review enumerated them independently and confirmed there is no `switch`, lookup table or default
+fallthrough anywhere.
+
+### B3 — `normalizationWarnings`
+
+Filtered to `NORMALIZATION_WARNINGS`. Not an array of strings → `[]`.
+
+| # | string | producer |
+|---|---|---|
+| 1 | `Response is not an object` | `normalize.ts:121`, literal array to `makeMalformed` |
+| 2 | `No valid usage windows found` | `normalize.ts:165`, literal array to `makeMalformed` |
+| 3 | `extra_usage present but missing required fields` | `normalize.ts:85` |
+| 4 | `extra_usage present but has out-of-range values` | `normalize.ts:90` |
+| 5 | `extra_usage present but has invalid enabled monthly limit` | `normalize.ts:95` |
+| 6 | `extra_usage.currency invalid; defaulted to USD` | `normalize.ts:102` |
+| 7 | `five_hour.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:126` |
+| 8 | `seven_day.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:127` |
+| 9 | `seven_day_opus.resets_at is not a valid ISO timestamp` | `normalize.ts:24`, called at `:128` |
+
+All three `name` arguments are string literals, which is what makes rows 7–9 a closed set rather
+than an open one. Checked, because if any call site passed a key from the API response the whole
+approach would be unsound.
+
+`normalize.ts` sources rows 3–9 from the shared constants so producer and set cannot drift. **This
+is an edit to `normalize.ts`**, which `intent.md` placed out of scope — declared, and bounded: the
+strings written are byte-identical. The draft claimed they were "pinned by existing tests"; the
+review measured that **only row 9 is pinned by exact text** (`normalize.test.ts:132-133`), the rest
+by `includes()` and length assertions. So A7 carries the pin instead.
+
+Rows 1–2 stay as literal arrays at their call sites for now; making them reference the constants is
+the same edit and will be done in the same commit.
 
 ### Amendments to `SPEC.md`
 
-- **§12's "Known gap" paragraph**, added by loop 030, is **deleted** — the gap is closed. Leaving it
-  standing while the code beneath it changed is the failure this loop's siblings keep shipping.
-- **§12 gains** the three new degradations, each naming its pinning test.
-- **`types.ts:20`'s comment** (`fetchedAt: string; // ISO timestamp, always UTC`) becomes true or
-  becomes accurate: a reader may substitute `UNKNOWN_FETCHED_AT`, which is not an ISO timestamp.
-  This is the one place the design knowingly widens a documented contract, and it is why B1's
-  alternative was rejected below rather than merely not chosen.
+- **§12's "Known gap" paragraph** (added by loop 030, naming three fields and `--debug`) is
+  **replaced**, not deleted: the four fields close, and a new gap paragraph names the snapshot fields
+  that remain and the `--json` surface the old one missed.
+- **§12 gains** the four degradations, each naming its pinning test.
+- **§11.4 / §14's `--json` contract** (`SPEC.md:631`, `:791` — *"valid JSON matching the
+  UsageSnapshot schema"*) is amended: `fetchedAt` may hold `UNKNOWN_FETCHED_AT`. The draft claimed
+  `types.ts:20` was "the one place the design knowingly widens a documented contract". It was not.
+- **`types.ts:20`'s comment** (`// ISO timestamp, always UTC`) states the sentinel.
 
 ## Data and types
 
 | name | kind | value |
 |---|---|---|
-| `UNKNOWN_FETCHED_AT` | exported `const` | `'unknown'` — a string no `Date` parser accepts |
-| `NORMALIZATION_WARNINGS` | exported closed set | the seven strings enumerated above |
+| `UNKNOWN_FETCHED_AT` | exported `const` | `'unknown'` — no `Date` parser accepts it (checked for `'unknown'`, `'Unknown'`, `'UNKNOWN'`) |
+| `NORMALIZATION_WARNINGS` | exported closed set | the nine strings tabulated above |
 | `isStaleReason` | exported type guard | `(v: unknown) => v is StaleReason` |
 
-No field is added, removed, renamed or made optional. `CACHE_VERSION` stays **2** — validation does
-not change the envelope's shape, and a bump would discard every user's cache to fix a problem no
-user has.
+No field added, removed, renamed or made optional. `CACHE_VERSION` stays **2**.
 
-`UNKNOWN_FETCHED_AT = 'unknown'` is chosen so that `formatLocalTime` renders the literal string
-`unknown` (measured: it returns `'unknown'` for any unparseable input), `isCacheFresh` returns
-`false`, and `printDebug`'s `Math.round(NaN)` serialises to `cacheAgeSec: null` — the same shape it
-emits on a cache miss. All three measured, not reasoned about.
+`'unknown'` is chosen on measurement: `formatLocalTime` returns the literal `unknown`, `isCacheFresh`
+returns `false`, and `printDebug`'s `Math.round(NaN)` serialises to `cacheAgeSec: null`.
 
 ## Edge cases
 
 | Case | Expected behavior |
 |---|---|
-| `fetchedAt` is a valid ISO string | unchanged, byte-identical (it is already canonical) |
-| `fetchedAt` is `'2026-01-01 (/home/someone sk-ant-…)'` | canonicalised to an ISO string; the free text is gone from `--debug` |
-| `fetchedAt` is `'not-a-date /home/someone'` | becomes `UNKNOWN_FETCHED_AT`; `cacheAgeSec` is `null`, statusline renders `unknown` |
-| `fetchedAt` is not a string | **unchanged behaviour** — `invalidShape`, envelope rejected. This is a *shape* check and shape checks reject; the new rules are *value* checks and value checks degrade. The line is deliberate and is the answer to `intent.md`'s open question 1 |
-| `fetchedAt` is far in the future | **not clamped.** `detectClockSkew` exists to report exactly this |
-| `staleReason` is one of the five members | unchanged |
-| `staleReason` is `'/home/someone leaked'` | becomes `'none'`; every classification branch takes the same path it took before |
-| `staleReason` is absent, `null`, or a number | becomes `'none'` |
-| `isStale: true` with a poisoned `staleReason` | `isStale` untouched; reason becomes `'none'`. The pair is left inconsistent-looking on purpose — inventing a cause is worse than recording none |
-| `normalizationWarnings` contains one real warning and one poisoned string | the real one survives, the poisoned one is dropped |
+| `fetchedAt` is a valid ISO string | unchanged, byte-identical |
+| `fetchedAt` is `'2026-01-01 (/home/someone sk-ant-…)'` | canonicalised; free text gone from `--debug` **and `--json`** |
+| `fetchedAt` is `'not-a-date /home/someone'` | `UNKNOWN_FETCHED_AT`; `cacheAgeSec: null`, statusline renders `unknown` |
+| `fetchedAt` is `12345` (not a string) | **changed** — `UNKNOWN_FETCHED_AT`, envelope kept, cooldown kept. Previously `invalidShape` + delete + cooldown loss |
+| `fetchedAt` is far in the future | not clamped; `detectClockSkew` reports it |
+| `snapshot.freshness` absent or `null` | reject, unchanged. §9.4 exposure named above |
+| `snapshot.freshness` is `{}` | passes the shape gate; both fields degrade |
+| `staleReason` is a member | unchanged |
+| `staleReason` is `'/home/someone leaked'`, absent, `null`, or a number | `'none'`; every classification branch takes the path it took before |
+| `isStale` is not a boolean | `false` |
+| `isStale: true` with a poisoned `staleReason` | `isStale` untouched, reason `'none'`. Inventing a cause is worse than recording none |
+| `normalizationWarnings` has one real and one poisoned string | real survives, poisoned dropped |
 | `normalizationWarnings` is `[]` | unchanged |
-| `normalizationWarnings` is a string, `null`, or an array of objects | becomes `[]` |
-| every field valid | envelope byte-identical to the file, `reason: 'hit'` |
-| a poisoned field alongside a live `cooldownUntil` | envelope kept, `cooldownUntil` intact, `cooldownActive` still true. **The §9.4 regression test** |
+| `normalizationWarnings` is a string, `null`, or an array of objects | `[]` |
+| every field valid | envelope deep-equal to the file, `reason: 'hit'` |
+| a poisoned **value** field beside a live `cooldownUntil` | envelope kept, cooldown intact, `cooldownActive` true. **The §9.4 regression test** |
+| **`TZ` when asserting a canonicalised date-only-plus-text input** | `Date.parse` uses the legacy **local-time** parser, so `'2026-01-01 (…)'` canonicalises differently per zone (measured: `05:00:00Z` in `America/New_York`, `00:00:00Z` in `UTC`). Any test asserting an exact output must pin `TZ` or assert a shape |
 
 ## Backward compatibility
 
-- **No `CACHE_VERSION` bump**, so no user's cache is discarded.
-- **An honestly-written envelope is unchanged in every field.** `writeCache` emits canonical ISO,
-  union members, and warnings from the set, so a round-trip is byte-identical. Pinned by a test.
-- **No `--debug` key added, removed or renamed.**
-- **`isCacheFresh`, `classify`, `detectClockSkew` and the two `!== 'fetchFailed'` guards keep their
-  current results for every input reachable today.** B2 is chosen specifically to make this true.
-- **Breaking, narrowly and knowingly:** `snapshot.fetchedAt` may now hold a non-ISO sentinel. Any
-  future code assuming it parses must handle `unknown`. Every current reader was enumerated above
-  and all four already handle unparseable input.
+- No `CACHE_VERSION` bump; no user's cache discarded.
+- An honestly-written envelope is unchanged in every field.
+- No `--debug` or `--json` key added, removed or renamed.
+- `classify`, `detectClockSkew` and both `!== 'fetchFailed'` guards keep their current results.
+- **Changed, knowingly:** a non-string `fetchedAt` no longer deletes the cache. This is strictly
+  safer — it removes a cooldown-discarding path — but it is a behaviour change and an existing test
+  asserting `invalidShape` for that input must be updated, which is an expectation change and is
+  budgeted in A11.
+- **Breaking, narrowly:** `snapshot.fetchedAt` may hold a non-ISO sentinel. All four current readers
+  were enumerated and handle unparseable input.
 
 ## Acceptance criteria
 
-- [ ] **A1** — a cache file whose `fetchedAt` carries free text does not put that text on `--debug`
-      stdout — verified by a test in `security.test.ts` that writes the file, reads it through
-      `readCacheResult`, and asserts the returned value is a constructed string, plus the
-      end-to-end `--debug` case in `smoke.test.ts` asserting the raw stdout does not contain it.
-- [ ] **A2** — same for `staleReason` and for `normalizationWarnings` — verified by two further
-      tests in the same file, each asserting on the raw serialised envelope, not on a field alone.
-- [ ] **A3** — **each of the three checks is individually load-bearing** — verified by a mutation
-      table in `review.md` with the result of every row **predicted in `plan.md` before it is run**,
-      at least one row per check, and at least one row that inverts rather than deletes.
-- [ ] **A4** — the §9.4 property holds: a poisoned field costs no fetch and no cooldown — verified
-      by a test asserting the envelope survives with `cooldownUntil` intact and `reason === 'hit'`.
-- [ ] **A5** — an honestly-written envelope round-trips byte-identically — verified by a test that
-      `writeCache`s a `makeTestEnvelope` and asserts `readCacheResult` returns a deep-equal value.
-      Without this, "validate everything" can quietly become "rewrite everything".
-- [ ] **A6** — B2 changes no classification — verified by a test driving `classify`,
-      `isCacheFresh` and both `!== 'fetchFailed'` guards with a poisoned `staleReason` and asserting
-      results identical to the pre-change behaviour, which must be **recorded as measured values in
-      `plan.md` before the change**, not asserted after.
-- [ ] **A7** — the closed set has no member the producer cannot emit and no member missing —
-      verified by a test asserting `NORMALIZATION_WARNINGS` has exactly the enumerated count **and**
-      that every string `normalize.ts` can produce is in it, driven through `normalize` with
-      fixtures rather than by reading the source.
-- [ ] **A8** — `SPEC.md §12`'s "Known gap" paragraph is gone and the three degradations are
-      documented with their pinning tests — verified by reading the diff; an amended §12 that still
-      claims an open gap fails it.
-- [ ] **A9** — `client.ts:161-164` and `snapshot.ts:58-62` describe where the check runs —
-      verified by reading the diff.
-- [ ] **A10** — no new lint warning — verified by `oxlint 2>&1 | grep warning | sort` before and
-      after, `diff` empty. Sorted because oxlint's output order is nondeterministic across runs on
-      an identical tree, measured in loop 029.
-- [ ] **A11** — `bun run verify` exits 0.
+- [ ] **A1** — free text in any of the four fields reaches neither `--debug` **nor `--json`** stdout
+      — verified by tests in `security.test.ts` reading through `readCacheResult`, **and** two
+      end-to-end cases in `smoke.test.ts` against the compiled binary, one per flag, asserting the
+      raw stdout does not contain the poison. The `--json` case is the one the draft omitted.
+- [ ] **A2** — each of the four checks is individually load-bearing — verified by a mutation table in
+      `review.md`, at least one row per check and at least one row that **inverts** rather than
+      deletes, with every result predicted in `plan.md`. **Mechanically checkable:** the prediction
+      commit SHA must precede every implementation commit SHA, and `review.md` must cite both so a
+      reviewer can run `git log --oneline <predict>..<impl>`. The draft's "predicted before it is
+      run" was an honour system.
+- [ ] **A3** — a poisoned **value** field does not discard the envelope or the cooldown — verified by
+      a test asserting `reason === 'hit'`, `cooldownUntil` unchanged, `isInCooldown` still true.
+      **Stated as what it checks:** the draft called this "costs no fetch", which is false — an
+      unparseable `fetchedAt` with no cooldown still makes `isCacheFresh` return `false` and fetches
+      per render, unchanged by this loop and recorded as unchanged.
+- [ ] **A4** — a rich envelope round-trips deep-equal — verified by a test whose fixture overrides
+      **all** of `makeTestSnapshot`'s defaults: a non-`'none'` `staleReason`, `isStale: true`, all
+      **nine** members of `NORMALIZATION_WARNINGS`, and a canonical ISO `fetchedAt` that is not the
+      current time. The defaults are every field's *degraded* value, so a default fixture passes
+      this criterion with an empty closed set and a predicate that accepts only `'none'`.
+- [ ] **A5** — B2 changes no classification — verified by a test driving `classify` and both
+      `!== 'fetchFailed'` guards with a poisoned `staleReason`, against results **recorded as
+      measured values in `plan.md` before the change**, under the same SHA-ordering rule as A2.
+      (`isCacheFresh` is not in this list: it reads only `fetchedAt`.)
+- [ ] **A6** — the closed set is complete and correct — verified by a test that drives `normalize()`
+      with fixtures covering **every** producer, including a non-object input and a
+      no-valid-windows input, collects the distinct warnings, and asserts the set equals
+      `NORMALIZATION_WARNINGS`. Those two fixtures are named because omitting them is exactly how
+      the draft's table lost two rows.
+- [ ] **A7** — the nine strings are compared against **hard-coded literals in the test file**, never
+      against the exported constant — verified by reading the test. Once `normalize.ts` sources its
+      strings from the constant, any assertion phrased against that constant is a tautology and a
+      typo lands in both sides.
+- [ ] **A8** — `SPEC.md §12`'s gap paragraph names what actually remains, and §11.4/§14's `--json`
+      contract names the sentinel — verified by reading the diff. A §12 that claims the envelope is
+      fully validated fails it.
+- [ ] **A9** — `isSurfaceableMessage`'s docstring is **moved** to sit immediately above the function
+      (it is currently orphaned behind a second docblock for `TLS_FAILURE_CODES`), says where the
+      check runs, and its count is corrected from **seven to eight** — verified by a test asserting
+      the stated count equals the number of `SurfaceableMessage` members, not by reading. A third
+      wrong count in a comment, found by the review, in the docstring this loop exists to fix.
+- [ ] **A10** — `snapshot.ts:58-61`'s docstring says where the check runs — verified by reading.
+- [ ] **A11** — **at most two** existing test expectations change, both named in `plan.md` in
+      advance: the `invalidShape` assertion for a non-string `fetchedAt`, and any assertion on
+      `--json` output shape. Written as a budget-with-names because loop 029 wrote it as a count,
+      changed seven, and self-declared six.
+- [ ] **A12** — no new lint warning — recorded in `review.md` as two sorted `oxlint` outputs with an
+      empty `diff`. **Stated honestly as a manual step**: loop 030's review concluded a criterion
+      should run in `verify`, and this one does not. Wiring a warning budget into the gate is
+      harness work and goes to loop 032 with the spec-versus-fence check.
+- [ ] **A13** — `bun run verify` exits 0.
 
 ## Rejected alternatives
 
-- **Reject the envelope on a poisoned value.** Consistent with the existing non-string `fetchedAt`
-  check, and wrong for the same reason loop 030 gave: `tryDelete` discards `cooldownUntil`, so one
-  poisoned byte becomes an authenticated fetch on every prompt render — §9.4's defect, which loop
-  029 shipped once already.
-- **Substitute the epoch for an unparseable `fetchedAt`** (keeps the type contract intact). Rejected
-  on measurement: `formatLocalTime(new Date(0))` renders `12:00 AM`, so `format.ts:437` would print
-  **"Fresh as of 12:00 AM"** for a snapshot whose age is unknown. A sentinel renders "Fresh as of
-  unknown". Trading a documented-contract nuance for a plausible falsehood on the user's statusline
-  is the wrong trade.
-- **Clamp a far-future `fetchedAt`** by symmetry with `cooldownUntil`. Rejected: the hazards are
-  opposite. A far-future cooldown *suppresses fetches forever*; a far-future `fetchedAt` suppresses
-  one fetch and is exactly what `detectClockSkew` reports. Clamping would delete that signal — the
-  same "destroyed signal" finding loop 029's security pass raised about TLS errors.
-- **Validate warnings via `categorizeWarning`.** Rejected on reading: it accepts every string.
-- **Narrow `normalizationWarnings` to a union at the producer**, making a bad warning a compile
-  error. Correct in principle and much larger: it changes `UsageSnapshot`, every fixture, and the
-  telemetry path. Out of scope by `intent.md`, and the reader-side check is what closes the actual
-  hole, since a cache file never saw the producer's compiler anyway.
-- **Include the spec-versus-fence harness check in this loop** (`intent.md`'s outcome 8 and open
-  question 3). **Deferred to its own loop**, and this is the answer to that question rather than a
-  punt: it is harness work with a different fence, different reviewers and no shared code, and
-  mixing it here is how a fence stops meaning anything. `intent.md` outcome 8 is therefore
-  **knowingly unmet by this spec** — recorded here because a dropped outcome that is not written
-  down is a dropped outcome nobody notices.
+- **Reject the envelope on a poisoned value.** `tryDelete` discards `cooldownUntil` — §9.4's defect,
+  which loop 029 shipped once. This is also why the non-string `fetchedAt` case moved to degrade.
+- **Substitute the epoch for an unparseable `fetchedAt`.** Rejected on measurement:
+  `formatLocalTime(new Date(0))` renders `12:00 AM`, so `format.ts:437` would print **"Fresh as of
+  12:00 AM"** for a snapshot of unknown age. A sentinel prints "Fresh as of unknown". A
+  documented-contract nuance is a better price than a plausible falsehood on the user's statusline.
+- **Clamp a far-future `fetchedAt`.** Deletes the signal `detectClockSkew` exists to report — loop
+  029's "destroyed signal" finding.
+- **Validate warnings via `categorizeWarning`.** Rejected on reading: it accepts every string,
+  falling through to `'shape'`. It is a bucketer, not a predicate.
+- **Narrow `normalizationWarnings` to a union at the producer.** Correct in principle, much larger,
+  and it does not close the hole — a cache file never saw the producer's compiler.
+- **Validate the whole snapshot in this loop**, which is what the draft's "every value" sentence
+  promised. A dozen fields with their own closed sets is a different change; it becomes **loop 032**
+  rather than being smuggled in behind a summary sentence.
+- **The harness spec-versus-fence check** (`intent.md` outcome 8). Deferred to loop 032 with the
+  lint budget. `intent.md` outcome 8 is **knowingly unmet by this spec**.
 
 ---
 
