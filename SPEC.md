@@ -628,7 +628,7 @@ Priority of truncation: remove secondary reset time first, then primary reset ti
 | Flag | Behavior |
 |---|---|
 | `--version` | Print version string and exit |
-| `--json` | Output the full UsageSnapshot as JSON instead of formatted text |
+| `--json` | Output the full UsageSnapshot as JSON instead of formatted text. When the snapshot came from the cache, `fetchedAt` may be the literal `unknown` — see §12. |
 | `--refresh` | Force a fresh API call, bypassing cache TTL (still respects cooldown) |
 | `--debug` | Print diagnostic info: cache age, state classification, cooldown status, credential path, normalization warnings. No secrets. |
 
@@ -740,11 +740,30 @@ ClaudeWatch is a local companion utility, not a credential manager.
   trailing text, so `2026-01-01 (/home/someone/.claude sk-ant-…)` parsed finite and was returned
   verbatim to `--debug` stdout. Checked by `packages/core/src/cache.test.ts` → "a parseable string
   carrying free text is canonicalised, not echoed".
-- **Known gap, recorded rather than implied.** Three further fields cross the `as CacheEnvelope`
-  assertion unvalidated and reach `--debug` stdout verbatim: `snapshot.fetchedAt` (type-checked
-  only), `snapshot.freshness.staleReason`, and `snapshot.rawMetadata.normalizationWarnings`. Each is
-  closed-set at every writer today — which is exactly the posture `sdlc/029` left `lastErrorMessage`
-  in, and which `sdlc/030` demonstrated is not a guarantee. Measured by `sdlc/030`'s security pass.
+- Since `sdlc/031` that guarantee also covers `snapshot.fetchedAt` (canonicalised when it parses,
+  else replaced with `UNKNOWN_FETCHED_AT`), `snapshot.freshness.staleReason` (falls back to `'none'`,
+  which changes no classification — measured), `snapshot.freshness.isStale` (non-boolean becomes
+  `false`), and `snapshot.rawMetadata.normalizationWarnings` (filtered to a closed set of nine, so a
+  real warning beside a poisoned one survives). Checked by `packages/core/src/security.test.ts` →
+  "§12: no value off a cache file reaches a surface unvalidated", by
+  `packages/core/src/closed-sets.test.ts`, and end to end against the compiled binary by
+  `packages/statusline/src/smoke.test.ts` on **both** `--debug` and `--json`.
+- **Known gap, restated because `sdlc/030`'s version of it was incomplete in two ways.** It named
+  `--debug` as the surface; the surface set is `{--debug, --json}`, and `--json`
+  (`main.ts:241`, `:256` → `:371`) serialises the **entire** snapshot. It also named three fields;
+  what remains after `sdlc/031` is everything else in `UsageSnapshot` — `source.usageEndpoint`,
+  `authState`, `tier`, `display.*`, and every window field — all of which reach `--json` verbatim.
+  Each is closed-set at every writer today, which is the posture `sdlc/029` left `lastErrorMessage`
+  in and `sdlc/030` disproved as a guarantee. Snapshot-level validation is `sdlc/032`.
+  The reason the old paragraph missed `--json` is worth keeping: it was written from a search for
+  readers of three field **names**, and `--json` names no field. A "which surfaces read this field"
+  search cannot find a caller that serialises the whole object.
+- **`readCacheResult` still rejects — and still discards the cooldown with the file — when
+  `snapshot`, `snapshot.display` or `snapshot.freshness` is missing or not an object.** There is
+  nothing coherent to substitute for those, so they are not degraded. The §9.4 exposure on that path
+  is real and open; closing it needs `cooldownUntil` stored separably from the snapshot. Pinned by
+  `packages/core/src/cache.test.ts` → "a structurally broken envelope still rejects, and still loses
+  the cooldown".
 - It must not include tokens in issue templates, screenshots, or debug output
 - It must not shell out with token values in process arguments
 - Cache files must never contain the access token
@@ -788,7 +807,11 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - Given a corrupt or unparseable cache file, the file is deleted and a fresh fetch is performed
 - Given `resets_at` in the past, the display shows "resets soon" rather than a negative duration
 - The compiled binary meets the performance targets in §11.7, measured by that section's stated method
-- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema
+- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema, with one documented
+  exception since `sdlc/031`: a snapshot read from the cache may carry `fetchedAt: "unknown"`
+  (`UNKNOWN_FETCHED_AT`) where the stored value could not be parsed. Substituting a sentinel is
+  preferred over deleting the envelope, which would discard the §9.4 cooldown, and over the epoch,
+  which would render a confident "Fresh as of 12:00 AM" for a snapshot of unknowable age.
 - `claudewatch --debug` outputs diagnostic info without any secrets
 
 ---
