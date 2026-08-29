@@ -41,12 +41,13 @@
  * the count. `commands.ts` was the fourth gap and is now covered by `commands.test.ts`
  * (sdlc/028).
  */
-import { describe, expect, test, mock, beforeAll, afterAll, afterEach } from 'bun:test';
+import { describe, expect, test, mock, beforeAll, beforeEach, afterAll, afterEach } from 'bun:test';
 import { homedir } from 'os';
 import { join } from 'path';
 import { makeTestSnapshot, setupTestCacheDir } from '@claudewatch/core/test-helpers';
 import { getCacheDir } from '@claudewatch/core';
 import type { UsageSnapshot } from '@claudewatch/core';
+import { vscodeStub, resetVscodeStub } from './vscode-stub.js';
 
 // --- layer 1: no egress, whatever else goes wrong ---
 
@@ -93,37 +94,16 @@ describe('the safety layers themselves', () => {
 
 // --- the vscode stub ---
 
-const registered = new Map<string, (...a: unknown[]) => unknown>();
 let intervalHandles: unknown[] = [];
 let clearedHandles: unknown[] = [];
 
-class MockMarkdownString { value = ''; appendText(t: string): this { this.value += t; return this; } }
+// One shared vscode stub; see vscode-stub.ts for why per-file factories do not compose. The
+// command registry this file drives lives in the stub's state, refreshed by `resetVscodeStub()`
+// so a command registered by one test cannot be invoked by the next. (sdlc/039)
+mock.module('vscode', () => vscodeStub);
 
-mock.module('vscode', () => ({
-  StatusBarAlignment: { Right: 2 },
-  MarkdownString: MockMarkdownString,
-  ThemeColor: class { constructor(public id: string) {} },
-  window: {
-    createStatusBarItem: () => ({
-      text: '', tooltip: undefined as unknown, command: undefined, name: undefined,
-      color: undefined, backgroundColor: undefined, show(): void {}, dispose(): void {},
-    }),
-    showInformationMessage: (): void => {},
-    showErrorMessage: (): void => {},
-  },
-  commands: {
-    registerCommand: (id: string, cb: (...a: unknown[]) => unknown) => {
-      registered.set(id, cb);
-      return { dispose(): void { registered.delete(id); } };
-    },
-  },
-  workspace: {
-    getConfiguration: () => ({ get: <T,>(_k: string, d: T): T => d }),
-    onDidChangeConfiguration: () => ({ dispose(): void {} }),
-  },
-  env: { isTelemetryEnabled: false },
-  Uri: { parse: (s: string) => s },
-}));
+/** The stub's live command registry. Re-pointed at a fresh Map by the reset in `beforeEach`. */
+let registered = resetVscodeStub().registered;
 
 // --- the bridge mock ---
 
@@ -233,6 +213,12 @@ const refresh = async (): Promise<void> => {
 };
 
 const names = (): string[] => calls.map((c) => c.name);
+
+beforeEach(() => {
+  // The stub is shared across every test file now, so each test starts from its pristine shape
+  // and a fresh command registry rather than inheriting whatever the last one left. (sdlc/039)
+  registered = resetVscodeStub().registered;
+});
 
 afterEach(() => {
   // Dispose BEFORE deactivate: deactivate clears only pollingTimer and statusBar, leaving the

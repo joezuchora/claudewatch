@@ -1,78 +1,11 @@
 import { describe, expect, test, mock } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
 import type { RuntimeState, UsageSnapshot } from '@claudewatch/core';
+import { vscodeStub } from './vscode-stub.js';
 
-// Mock vscode module — include all properties needed by any file that imports vscode,
-// since bun's mock.module leaks globally across test files.
-class MockMarkdownString {
-  value = '';
-  appendText(text: string): this {
-    this.value += text;
-    return this;
-  }
-}
-
-class MockThemeColor {
-  constructor(public id: string) {}
-}
-
-mock.module('vscode', () => ({
-  // env + commands are here for extension.test.ts, not for this file.
-  //
-  // `mock.module('vscode')` is process-wide, and the merge is a per-key COMPOSITE — NOT
-  // last-writer-wins, which is what an earlier revision of this comment said. Measured in sdlc/028
-  // with a probe in a whole-package run: the resolved module's `window` came from one stub while
-  // `Uri`, defined by another, was absent from the merged module entirely. So a stub here can end
-  // up serving extension.ts or commands.ts, key by key, and no single file's factory is
-  // authoritative. What is MEASURED by deleting each key and running the package (sdlc/027 Stage
-  // 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
-  //
-  // This is NOT a superset of what every file needs. `Uri` and `env.openExternal` WERE absent and
-  // are present now (below) — sdlc/028 added them because commands.ts finally got tests, and a
-  // key missing from the per-key composite cannot be installed by mutation from the consuming
-  // test. Still absent: `window.showInformationMessage` and `window.showErrorMessage`, both
-  // reached from commands.ts, latent only because commands.test.ts supplies its own `window`.
-  //
-  // An earlier revision of THIS PARAGRAPH listed `Uri` and `env.openExternal` as absent while
-  // declaring them six and eleven lines below, in the same hunk that added them — a replacement
-  // spliced into the middle of a sentence, leaving the leading list asserting the opposite. Caught
-  // by the sdlc/028 plan-to-diff audit, which noted the loop had introduced a false docstring in
-  // the very commit that fixed one two files over.
-  env: { isTelemetryEnabled: false, openExternal: (): void => {} },
-  // `Uri` is here for commands.test.ts. It CANNOT be installed by mutation from there: a module's
-  // top-level exports are readonly, so a key missing from the per-key composite is missing for
-  // good. Measured in sdlc/028 — `v.Uri = {...}` throws "Attempted to assign to readonly
-  // property", while nested properties assign fine.
-  Uri: { parse: (s: string) => s },
-  commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
-  MarkdownString: MockMarkdownString,
-  ThemeColor: MockThemeColor,
-  StatusBarAlignment: { Right: 2 },
-  window: {
-    createStatusBarItem: mock(() => ({
-      text: '',
-      tooltip: undefined,
-      command: undefined,
-      name: undefined,
-      color: undefined,
-      backgroundColor: undefined,
-      show: mock(() => {}),
-      dispose: mock(() => {}),
-    })),
-  },
-  workspace: {
-    // Defensive, and honestly labelled as such: deleting this from both stubs and running the
-    // package gives 0 failures, so unlike `env` it is NOT load-bearing in the current evaluation
-    // order. It stays because extension.ts:115 calls it unguarded and the order is not a
-    // guarantee. An earlier revision justified it by a whole-package throw that does not occur —
-    // asserting an invariant the code does not have, which is the exact shape this comment block
-    // exists to prevent. (sdlc/027 Stage 5, measured)
-    onDidChangeConfiguration: (): { dispose(): void } => ({ dispose(): void {} }),
-    getConfiguration: mock(() => ({
-      get: <T>(_key: string, defaultValue: T): T => defaultValue,
-    })),
-  },
-}));
+// The `vscode` stub lives in one place now — see vscode-stub.ts for why per-file factories do
+// not compose. This file depends on nothing mutable in it, so it needs no reset. (sdlc/039)
+mock.module('vscode', () => vscodeStub);
 
 const { buildTooltip } = await import('./tooltip.js');
 

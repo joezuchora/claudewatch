@@ -7,6 +7,12 @@ import {
   evaluate as realEvaluate,
 } from '@claudewatch/core';
 import type { UsageSnapshot } from '@claudewatch/core';
+import {
+  vscodeStub,
+  resetVscodeStub,
+  MockThemeColor,
+  type MockStatusBarItem,
+} from './vscode-stub.js';
 
 // `classify` and `evaluate` come straight from the package.
 //
@@ -33,91 +39,14 @@ mock.module('./statusbar-bridge.js', () => ({
   utilizationBucket: realUtilizationBucket,
 }));
 
-// --- Mock vscode module ---
+// --- the vscode stub ---
+//
+// One shared factory now; see vscode-stub.ts for why per-file ones do not compose. The item and
+// config map this file asserts on come back from `resetVscodeStub()` in `beforeEach`. (sdlc/039)
+mock.module('vscode', () => vscodeStub);
 
-class MockThemeColor {
-  constructor(public id: string) {}
-}
-
-class MockMarkdownString {
-  value = '';
-  appendText(text: string): MockMarkdownString {
-    this.value += text;
-    return this;
-  }
-}
-
-function createMockStatusBarItem() {
-  return {
-    text: '',
-    tooltip: undefined as unknown,
-    command: undefined as string | undefined,
-    name: undefined as string | undefined,
-    color: undefined as unknown,
-    backgroundColor: undefined as unknown,
-    show: mock(() => {}),
-    dispose: mock(() => {}),
-  };
-}
-
-let mockItem = createMockStatusBarItem();
-let configValues: Record<string, unknown> = {};
-
-// Store mock as module-level object so we can reference it directly
-// (avoids issues with mock.module leaking across test files in CI)
-const vscodeMock = {
-  // env + commands are here for extension.test.ts, not for this file.
-  //
-  // `mock.module('vscode')` is process-wide, and the merge is a per-key COMPOSITE — NOT
-  // last-writer-wins, which is what an earlier revision of this comment said. Measured in sdlc/028
-  // with a probe in a whole-package run: the resolved module's `window` came from one stub while
-  // `Uri`, defined by another, was absent from the merged module entirely. So a stub here can end
-  // up serving extension.ts or commands.ts, key by key, and no single file's factory is
-  // authoritative. What is MEASURED by deleting each key and running the package (sdlc/027 Stage
-  // 5): removing `env` -> 16 failures, the whole doRefresh suite. It is load-bearing.
-  //
-  // This is NOT a superset of what every file needs. `Uri` and `env.openExternal` WERE absent and
-  // are present now (below) — sdlc/028 added them because commands.ts finally got tests, and a
-  // key missing from the per-key composite cannot be installed by mutation from the consuming
-  // test. Still absent: `window.showInformationMessage` and `window.showErrorMessage`, both
-  // reached from commands.ts, latent only because commands.test.ts supplies its own `window`.
-  //
-  // An earlier revision of THIS PARAGRAPH listed `Uri` and `env.openExternal` as absent while
-  // declaring them six and eleven lines below, in the same hunk that added them — a replacement
-  // spliced into the middle of a sentence, leaving the leading list asserting the opposite. Caught
-  // by the sdlc/028 plan-to-diff audit, which noted the loop had introduced a false docstring in
-  // the very commit that fixed one two files over.
-  env: { isTelemetryEnabled: false, openExternal: (): void => {} },
-  // `Uri` is here for commands.test.ts. It CANNOT be installed by mutation from there: a module's
-  // top-level exports are readonly, so a key missing from the per-key composite is missing for
-  // good. Measured in sdlc/028 — `v.Uri = {...}` throws "Attempted to assign to readonly
-  // property", while nested properties assign fine.
-  Uri: { parse: (s: string) => s },
-  commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
-  StatusBarAlignment: { Right: 2 },
-  ThemeColor: MockThemeColor,
-  MarkdownString: MockMarkdownString,
-  window: {
-    createStatusBarItem: mock((_alignment: number, _priority: number) => mockItem),
-  },
-  workspace: {
-    // Defensive, and honestly labelled as such: deleting this from both stubs and running the
-    // package gives 0 failures, so unlike `env` it is NOT load-bearing in the current evaluation
-    // order. It stays because extension.ts:115 calls it unguarded and the order is not a
-    // guarantee. An earlier revision justified it by a whole-package throw that does not occur —
-    // asserting an invariant the code does not have, which is the exact shape this comment block
-    // exists to prevent. (sdlc/027 Stage 5, measured)
-    onDidChangeConfiguration: (): { dispose(): void } => ({ dispose(): void {} }),
-    getConfiguration: mock((_section: string) => ({
-      get: <T>(key: string, defaultValue: T): T => {
-        if (key in configValues) return configValues[key] as T;
-        return defaultValue;
-      },
-    })),
-  },
-};
-
-mock.module('vscode', () => vscodeMock);
+let mockItem: MockStatusBarItem;
+let configValues: Record<string, unknown>;
 
 const { StatusBarManager } = await import('./statusbar.js');
 
@@ -134,17 +63,13 @@ function makeSnapshot(overrides?: Partial<UsageSnapshot>): UsageSnapshot {
 
 describe('StatusBarManager', () => {
   beforeEach(() => {
-    mockItem = createMockStatusBarItem();
-    configValues = {};
-    (vscodeMock.window.createStatusBarItem as ReturnType<typeof mock>).mockImplementation(
-      () => mockItem,
-    );
+    ({ item: mockItem, configValues } = resetVscodeStub());
   });
 
   describe('constructor', () => {
     test('creates item with Right alignment and priority 100', () => {
       new StatusBarManager();
-      expect(vscodeMock.window.createStatusBarItem).toHaveBeenCalledWith(2, 100);
+      expect(vscodeStub.window.createStatusBarItem).toHaveBeenCalledWith(2, 100);
     });
 
     test('sets command to claudewatch.openDashboard', () => {
@@ -307,10 +232,10 @@ describe('StatusBarManager', () => {
 
   describe('custom thresholds', () => {
     test('uses configured warning and critical thresholds', () => {
-      configValues = {
+      Object.assign(configValues, {
         warningThresholdPct: 50,
         criticalThresholdPct: 80,
-      };
+      });
       const mgr = new StatusBarManager();
       // 60% would be normal with defaults, but warning with custom warn=50
       mgr.update(makeSnapshot({ display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 60, primaryResetsAt: '2026-03-07T17:00:00.000Z' } }));
@@ -319,10 +244,10 @@ describe('StatusBarManager', () => {
     });
 
     test('custom critical threshold triggers critical color', () => {
-      configValues = {
+      Object.assign(configValues, {
         warningThresholdPct: 50,
         criticalThresholdPct: 80,
-      };
+      });
       const mgr = new StatusBarManager();
       // 85% would be warning with defaults, but critical with custom crit=80
       mgr.update(makeSnapshot({ display: { primaryWindow: 'fiveHour', primaryUtilizationPct: 85, primaryResetsAt: '2026-03-07T17:00:00.000Z' } }));
@@ -390,10 +315,10 @@ describe('StatusBarManager', () => {
       expect(mockItem.color).toBeUndefined();
 
       // Now change config to lower thresholds
-      configValues = {
+      Object.assign(configValues, {
         warningThresholdPct: 50,
         criticalThresholdPct: 80,
-      };
+      });
       mgr.updateThresholds();
 
       // Now 60% should be warning with new thresholds

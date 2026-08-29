@@ -23,28 +23,16 @@
 import { describe, expect, test, mock, beforeEach, afterEach } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
 import type { CacheEnvelope } from '@claudewatch/core';
+import { vscodeStub, resetVscodeStub } from './vscode-stub.js';
 
 // --- the vscode stub ---
 //
-// This factory is required for RESOLUTION: `vscode` is not a real package, so without a
-// `mock.module('vscode')` in this file, `commands.ts`'s `import * as vscode` fails outright with
-// "Cannot find package 'vscode'". Measured. The per-key composite described above is a SEPARATE
-// problem: the factory makes the module exist, the mutation in `beforeEach` makes the sinks
-// reliable. An earlier draft of the plan treated these as alternatives; they are both needed.
-
-mock.module('vscode', () => ({
-  window: { showInformationMessage: (): void => {}, showErrorMessage: (): void => {} },
-  env: { openExternal: (): void => {}, isTelemetryEnabled: false },
-  Uri: { parse: (s: string) => s },
-  commands: { registerCommand: (): { dispose(): void } => ({ dispose(): void {} }) },
-  workspace: {
-    getConfiguration: () => ({ get: <T,>(_k: string, d: T): T => d }),
-    onDidChangeConfiguration: (): { dispose(): void } => ({ dispose(): void {} }),
-  },
-  StatusBarAlignment: { Right: 2 },
-  ThemeColor: class { constructor(public id: string) {} },
-  MarkdownString: class { value = ''; appendText(t: string): this { this.value += t; return this; } },
-}));
+// One shared factory now — see vscode-stub.ts for why per-file ones do not compose, and for the
+// reproduction that killed the composite model. The factory is still required for RESOLUTION:
+// `vscode` is not a real package, so without a `mock.module('vscode')` reachable from this file
+// `commands.ts`'s `import * as vscode` fails outright with "Cannot find package 'vscode'".
+// Measured. (sdlc/039)
+mock.module('vscode', () => vscodeStub);
 
 // --- the bridge mock ---
 
@@ -70,39 +58,23 @@ interface VscodeSinks {
   Uri: { parse: (s: string) => string };
 }
 
-let restore: Array<() => void> = [];
-
 beforeEach(async () => {
-  shown = []; opened = []; restore = [];
+  shown = []; opened = [];
+  // `resetVscodeStub()` restores every leaf this block overwrites, so the save/restore array and
+  // its `afterEach` are gone: one shared stub means one place that knows the pristine shape.
+  resetVscodeStub();
   const v = (await import('vscode')) as unknown as VscodeSinks;
 
-  const prevShow = v.window.showInformationMessage;
   v.window.showInformationMessage = (msg: string, opts?: unknown): void => { shown.push({ msg, opts }); };
-  restore.push(() => { v.window.showInformationMessage = prevShow; });
-
-  const prevOpen = v.env.openExternal;
   v.env.openExternal = (u: unknown): void => { opened.push(u); };
-  restore.push(() => { v.env.openExternal = prevOpen; });
 
-  // `Uri.parse`, not `Uri`. A module's TOP-LEVEL exports are readonly — `v.Uri = {...}` throws
-  // `TypeError: Attempted to assign to readonly property` (measured) — while NESTED properties are
-  // mutable, which is why the two assignments above work. So a top-level key missing from the
-  // merged composite CANNOT be rescued from here: it has to come from a stub that survives the
-  // merge. That is precisely why statusbar.test.ts and tooltip.test.ts must also carry `Uri`, and
-  // why this file passing alone proves nothing about the package run (criterion A10).
-  // MEASURED INERT in the current configuration: the audit removed this override, made both other
-  // stubs' Uri.parse return a wrong value, and the package run stayed green — this file's own
-  // factory Uri wins while three files define it. Kept as defence because the composite is
-  // count-dependent (M6: when THIS file is the only definer of Uri, its own Uri vanishes), and
-  // labelled inert rather than presented as load-bearing. The two sinks above are load-bearing;
-  // this one is not.
-  const prevParse = v.Uri.parse;
-  v.Uri.parse = (u: string) => u;
-  restore.push(() => { v.Uri.parse = prevParse; });
+  // NESTED properties are mutable while a module's TOP-LEVEL exports are readonly — `v.Uri = {...}`
+  // throws `TypeError: Attempted to assign to readonly property` (measured in sdlc/028), which is
+  // why the two assignments above work. With one shared stub the old worry behind this note is
+  // gone: there is no composite for a top-level key to fall out of.
 });
 
 afterEach(() => {
-  for (const r of restore) r();
   readCacheImpl = () => null;
   formatTooltipImpl = () => 'FORMATTED-TOOLTIP';
 });
