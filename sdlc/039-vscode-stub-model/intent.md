@@ -47,11 +47,22 @@ and ran it: delete `env` from `statusbar.test.ts`'s stub, run the whole package.
 
 | Predicted by the comment | Measured |
 |---|---|
-| "removing `env` -> 16 failures, the whole doRefresh suite" | **21 failures, every one of them in `extension.test.ts`** — the doRefresh suites, lifecycle, and showDiagnostics |
+| "removing `env` -> 16 failures, the whole doRefresh suite" | 21 failures — **16 in `extension.test.ts`, 5 in `commands.test.ts`** |
 
-A stub defined in `statusbar.test.ts` is load-bearing for tests in a different file. That is the
-composite, demonstrated. The count has drifted from 16 to 21 as tests were added since
-`sdlc/027`; the mechanism is exactly as described.
+A stub defined in `statusbar.test.ts` is load-bearing for tests in two other files. That is the
+mechanism, demonstrated.
+
+> **Second correction, from the Stage 2 review — and this one is mine.** The paragraph above
+> originally read "**21 failures, every one of them in `extension.test.ts`**", and explained the
+> gap from the docstring's 16 as a count that "drifted as tests were added since `sdlc/027`".
+> Both halves are false. `showDiagnostics` and `openDashboard` are `describe` blocks in
+> **`commands.test.ts`**, which I attributed to `extension.test.ts` by reading their names
+> instead of checking. The docstring's **16 is still exactly right** for `extension.test.ts`;
+> the other 5 come from a second file that `sdlc/028` added afterwards. Nothing drifted.
+>
+> So this loop corrected a docstring's number on a premise that was itself wrong, in the same
+> paragraph where it corrected its own framing for the same class of error. The docstring was
+> right; my correction of it was not.
 
 **Why my probe disagreed, and why both results are right.** My two-file experiment had each file
 *mock and import the specifier itself, inside its own test body*. The repo's shape is different:
