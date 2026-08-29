@@ -8,7 +8,7 @@
  * Guarantee: at-least-once for events that reach the spool. Events may still be dropped at
  * the spool cap or on filesystem error; both are counted in the sidecar.
  */
-import { readdirSync, readFileSync, renameSync, rmSync, existsSync, statSync, lstatSync } from 'fs';
+import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, existsSync, statSync, lstatSync } from 'fs';
 import { dirname, join, basename } from 'path';
 import { classifyFetchError } from '@claudewatch/core';
 import type { ShipFailure, ShipResult, SpoolErrno } from './types.js';
@@ -19,6 +19,11 @@ export const MAX_RETAINED_SHIPPING_FILES = 20;
 
 export const REQUEST_TIMEOUT_MS = 10_000;
 
+/** Matches the service's 90-day retention: nothing older than this is a spool file we wrote. */
+const RETENTION_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+/** Tolerates a clock that ran forward, without accepting a stamp from next century. */
+const CLOCK_SKEW_MS = 60 * 60 * 1000;
+
 /**
  * Map an errno onto the reported allowlist. Anything unrecognised is `'other'`, never echoed.
  *
@@ -26,8 +31,54 @@ export const REQUEST_TIMEOUT_MS = 10_000;
  * OS is validated where it enters, not where it prints.
  */
 const KNOWN_ERRNOS: ReadonlySet<string> = new Set([
-  'ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'ENOTDIR', 'EROFS', 'ENOSPC',
+  // ELOOP is what `O_NOFOLLOW` returns for a symlink, so `readSpoolFile`'s refusal reports as itself.
+  'ENOENT', 'EACCES', 'EPERM', 'EISDIR', 'ENOTDIR', 'EROFS', 'ENOSPC', 'ELOOP',
 ]);
+
+/**
+ * Read a spool file through a FILE DESCRIPTOR, re-checking what it is after it is open.
+ *
+ * `pendingShippingFiles` lstats at ENUMERATION; the delivery loop reads later. That gap is a TOCTOU,
+ * and sdlc/036's security pass demonstrated it end to end: plant two regular files, both passing the
+ * lstat filter, then swap the second for a symlink to `~/.claude/.credentials.json` while the first
+ * POST is in flight. The OAuth access token was serialized into a POST body carrying the
+ * `Authorization` header. Reproduced here before it was fixed.
+ *
+ * The precondition is the one sdlc/034 established as reachable: honouring `$XDG_CACHE_HOME` makes
+ * the spool directory an arbitrary absolute path another local user may own or write to. sdlc/034
+ * hardened the enumeration; the READ was still by path.
+ *
+ * **This loop widened the window and therefore owns the fix.** The prune used to run FIRST, cutting
+ * `pending` to at most 20 before any read; C2 moved it after the delivery loop, so an arbitrarily
+ * large pending set is now read one file at a time after a single enumeration. At a 10s request
+ * timeout that is minutes of race, not seconds.
+ *
+ * `O_NOFOLLOW` refuses a symlink AT OPEN TIME, atomically — a second lstat would just be a second
+ * racy check. `fstatSync` re-checks the OPEN FILE rather than the path, so what happens to the name
+ * afterwards cannot matter. The uid check refuses a regular file another user owns, which is the
+ * rest of sdlc/034's threat model.
+ *
+ * Windows has no `O_NOFOLLOW` (`constants.O_NOFOLLOW` is undefined), so the flag degrades to 0 and
+ * the fstat plus ownership check carry the guarantee there. Creating a symlink on Windows needs a
+ * privilege that is off by default, so the residual exposure is small — but it IS residual, and
+ * saying so beats implying the two platforms are equivalent.
+ */
+export function readSpoolFile(file: string, read: typeof readFileSync = readFileSync): string {
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error('not a regular file'), { code: 'ELOOP' });
+    const uid = process.getuid?.();
+    if (uid !== undefined && st.uid !== uid) {
+      throw Object.assign(new Error('spool file owned by another user'), { code: 'EACCES' });
+    }
+    // `readFileSync` accepts a descriptor, so the injected seam still replaces only the read itself
+    // and cannot be used to skip the guard above.
+    return String(read(fd, 'utf-8'));
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export function spoolErrno(e: unknown): SpoolErrno {
   const code = (e as { code?: unknown } | null)?.code;
@@ -112,7 +163,18 @@ export function pendingShippingFiles(spoolPath: string): string[] {
   try {
     return readdirSync(dir)
       .filter((f) => f.startsWith(prefix) && f.endsWith(shippingSuffix()))
-      .toSorted()
+      // Sorted by ROTATION STAMP, not lexically. The prune deletes `pending[0]` and the backlog line
+      // reports `Math.min(stamps)`; a lexical sort makes those two different files. sdlc/036's
+      // security pass showed the divergence is attacker-reachable: a planted
+      // `metrics-spool.jsonl.9.shipping` sorts after every 13-digit stamp, so it survives every prune
+      // while genuine spool files are deleted. Two notions of "oldest" are now one function.
+      .toSorted((a, b) => {
+        const sa = stampOf(a);
+        const sb = stampOf(b);
+        if (sa === null) return sb === null ? (a < b ? -1 : a > b ? 1 : 0) : 1;   // unparseable last
+        if (sb === null) return -1;
+        return sa - sb;
+      })
       .map((f) => join(dir, f))
       // The guard that stops a planted symlink being read and shipped. Applied HERE rather than at
       // the read site so that every consumer of this list inherits it — `shouldDrainLegacy` counts
@@ -210,12 +272,18 @@ export function describeFailure(f: ShipFailure): string {
     case 'unreadable':
       return `could not read a spool file (${f.code}).`;
     case 'spool':
-      return `could not ${f.op} a spool file (${f.code}). The spool directory may be read-only.`;
+      return f.op === 'unknown'
+        ? `the shipper failed before it could report (${f.code}).`
+        : `could not ${f.op} a spool file (${f.code}). The spool directory may be read-only.`;
   }
 }
 
 /** `1h 42m`, `3m`, `12s`. Coarse on purpose: this is a runbook hint, not a measurement. */
 export function formatAge(ms: number): string {
+  // Not reachable today — `stampOf` gates on `Number.isFinite` and `Date.now()` is finite — but
+  // `formatAge(NaN)` rendered as "NaNh NaNm", which is a diagnostic that misinforms rather than
+  // reports. Defence in depth, recorded as such.
+  if (!Number.isFinite(ms)) return 'unknown';
   if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
   const mins = Math.round(ms / 60_000);
   return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
@@ -300,7 +368,7 @@ export async function ship(opts: ShipOptions): Promise<ShipResult> {
   for (const file of pending) {
     let raw: string;
     try {
-      raw = String(doRead(file, 'utf-8'));
+      raw = readSpoolFile(file, doRead);
     } catch (e) {
       retain({ kind: 'unreadable', code: spoolErrno(e) });
       continue;
@@ -348,7 +416,12 @@ export async function ship(opts: ShipOptions): Promise<ShipResult> {
     clearTimeout(timer);
 
     if (!res.ok) {
-      retain({ kind: 'http', status: res.status });
+      // Clamped HERE, not only in `describeFailure`. `res.status` crosses a trust boundary, and
+      // SPEC.md §12's rule for `lastHttpStatus` is "validated where it enters" — which the render-only
+      // version contradicted while quoting it. Today `failures` has one consumer; a second one would
+      // inherit an unvalidated remote integer. The render check stays as the second guard.
+      const status = Number.isInteger(res.status) && res.status >= 100 && res.status <= 599 ? res.status : 0;
+      retain({ kind: 'http', status });
       continue;
     }
 
@@ -390,7 +463,12 @@ export async function ship(opts: ShipOptions): Promise<ShipResult> {
   left = pendingShippingFiles(opts.spoolPath);
   result.backlog = left.length;
   const stamps = left.map(stampOf).filter((n): n is number => n !== null);
-  result.oldestPendingAtMs = stamps.length === 0 ? null : Math.min(...stamps);
+  // A stamp outside a plausible window is not an age, it is a planted filename. sdlc/036's security
+  // pass planted `…jsonl.0.shipping` and the run reported `oldest 496662h 11m old`, falsifying the
+  // very diagnostic this loop exists to add. `null` renders as "unknown age", which is true.
+  const nowMs = now();
+  const plausible = stamps.filter((t) => t > nowMs - RETENTION_WINDOW_MS && t <= nowMs + CLOCK_SKEW_MS);
+  result.oldestPendingAtMs = plausible.length === 0 ? null : Math.min(...plausible);
 
   return result;
 }

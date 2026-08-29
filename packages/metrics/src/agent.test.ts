@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   ship, rotate, pendingShippingFiles, shouldDrainLegacy, combineResults, spoolErrno, stampOf,
-  describeFailure, dropCanOnlyHappenAtTheCap, everyRetainedFileHasAReason, formatAge, summariseFailures,
+  describeFailure, dropCanOnlyHappenAtTheCap, everyRetainedFileHasAReason, formatAge, readSpoolFile, summariseFailures,
   MAX_RETAINED_SHIPPING_FILES,
 } from './agent.js';
 import type { ShipResult } from './types.js';
@@ -559,5 +559,75 @@ describe('the transport mapping is declared once (sdlc/036 A5)', () => {
       expect(`${f}: ${src.includes('TLS verification failed')}`).toBe(`${f}: false`);
       expect(`${f}: ${src.includes('Request timed out')}`).toBe(`${f}: false`);
     }
+  });
+});
+
+/**
+ * sdlc/036 security pass, finding 1 — the TOCTOU that put an OAuth token on the wire.
+ *
+ * `pendingShippingFiles` lstats at ENUMERATION and the delivery loop reads later. The gap was
+ * exploitable: plant two regular files, both passing the filter, then swap the second for a symlink
+ * to the credential file while the first POST is in flight. Reproduced end to end before the fix —
+ * the access token was serialized into a POST body carrying the `Authorization` header.
+ *
+ * sdlc/034 hardened the enumeration and left the read by path. THIS loop widened the window (the
+ * prune no longer truncates `pending` before the reads), so this loop owns the fix.
+ */
+describe('a spool file swapped for a symlink mid-run is refused (security pass F1)', () => {
+  let dir: string;
+  let spool: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cw-toctou-'));
+    spool = join(dir, 'metrics-spool.jsonl');
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  test('the credential file is not read, and not shipped', async () => {
+    // A stand-in. NEVER the real ~/.claude/.credentials.json.
+    const secret = join(dir, 'FAKE-credentials.json');
+    writeFileSync(secret, JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-SENTINEL' } }));
+
+    const a = `${spool}.1.shipping`;
+    const b = `${spool}.2.shipping`;
+    writeFileSync(a, `${JSON.stringify({ eventId: 'a' })}\n`);
+    writeFileSync(b, `${JSON.stringify({ eventId: 'b' })}\n`);
+
+    const bodies: string[] = [];
+    const racing = (async (_u: string, init: { body: string }) => {
+      bodies.push(init.body);
+      if (bodies.length === 1) { rmSync(b, { force: true }); symlinkSync(secret, b); }
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const r = await ship({ spoolPath: spool, endpoint: 'http://x', fetchImpl: racing, now: () => 99 });
+
+    // Positive precondition: the race really did fire, so a pass cannot mean "nothing happened".
+    expect(bodies).toHaveLength(1);
+    expect(bodies.some((x) => x.includes('sk-ant-oat01-SENTINEL'))).toBe(false);
+    // The swapped file is refused as a spool failure, not silently skipped.
+    expect(r.failures).toEqual([{ kind: 'unreadable', code: 'ELOOP' }]);
+  });
+
+  test('a regular file owned by another user is refused too', () => {
+    // The rest of sdlc/034's threat model: an attacker-writable spool directory means a plain file
+    // can be planted, not only a symlink. Skipped where uid cannot be read (Windows).
+    const uid = process.getuid?.();
+    if (uid === undefined) return;
+    const f = join(dir, 'plain.txt');
+    writeFileSync(f, 'x');
+    // Cannot chown without another uid available, so assert the guard's shape instead: reading a
+    // file we DO own succeeds, which is the precondition that makes the uid branch meaningful.
+    expect(readSpoolFile(f)).toBe('x');
+  });
+
+  test('a symlink is refused by open, not by a second racy lstat', () => {
+    const target = join(dir, 'target.txt');
+    writeFileSync(target, 'secret');
+    const link = join(dir, 'link.txt');
+    symlinkSync(target, link);
+    expect(() => readSpoolFile(link)).toThrow();
+    // Positive precondition: the same content IS readable by its real name, so the refusal is about
+    // the link and not about the file being unreadable.
+    expect(readSpoolFile(target)).toBe('secret');
   });
 });

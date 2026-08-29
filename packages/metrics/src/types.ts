@@ -51,7 +51,11 @@ export interface Stats {
  * `SPEC.md §12` states for `lastHttpStatus` ("IS validated, because it reached `--debug` verbatim").
  * `'other'` exists so an unrecognised code is reported as unrecognised rather than echoed.
  */
-export type SpoolErrno = 'ENOENT' | 'EACCES' | 'EPERM' | 'EISDIR' | 'ENOTDIR' | 'EROFS' | 'ENOSPC' | 'other';
+export type SpoolErrno =
+  | 'ENOENT' | 'EACCES' | 'EPERM' | 'EISDIR' | 'ENOTDIR' | 'EROFS' | 'ENOSPC'
+  /** What `O_NOFOLLOW` returns for a symlink — see `readSpoolFile`. Added by sdlc/036's security pass. */
+  | 'ELOOP'
+  | 'other';
 
 /**
  * Why one spool file was not delivered.
@@ -70,7 +74,7 @@ export type ShipFailure =
   | { kind: 'http'; status: number }
   | { kind: 'transport'; message: TransportMessage }
   | { kind: 'unreadable'; code: SpoolErrno }
-  | { kind: 'spool'; op: 'rotate' | 'prune' | 'delete'; code: SpoolErrno };
+  | { kind: 'spool'; op: 'rotate' | 'prune' | 'delete' | 'unknown'; code: SpoolErrno };
 
 /**
  * Moved here from `agent.ts` in sdlc/036, because it now embeds `ShipFailure` and a type split

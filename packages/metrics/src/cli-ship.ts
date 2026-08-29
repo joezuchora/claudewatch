@@ -54,9 +54,15 @@ async function shipSafely(path: string): Promise<ShipResult> {
     return await ship({ spoolPath: path, endpoint: configuredEndpoint, token });
   } catch (e) {
     console.error(`ship failed before it could report: ${e instanceof Error ? e.name : 'unknown error'}`);
+    // `op: 'unknown'` and `filesRetained: 0`, NOT a fabricated rotate failure and a fabricated
+    // retained file. Not every escape from `ship()` is a rotate — `Math.min` and `JSON.stringify`
+    // sit outside its inner guards, so a crash AFTER a successful delivery would have printed
+    // "could not rotate a spool file". That is the same defect this loop exists to remove, one level
+    // up: a value meaning "I could not tell" printed as something specific. sdlc/036's security pass,
+    // finding 6.
     return {
-      shipped: 0, skippedUnparseable: 0, filesShipped: 0, filesRetained: 1, filesDropped: 0,
-      failures: [{ kind: 'spool', op: 'rotate', code: 'other' }], backlog: 0, oldestPendingAtMs: null,
+      shipped: 0, skippedUnparseable: 0, filesShipped: 0, filesRetained: 0, filesDropped: 0,
+      failures: [{ kind: 'spool', op: 'unknown', code: 'other' }], backlog: 0, oldestPendingAtMs: null,
     };
   }
 }
@@ -132,4 +138,6 @@ if (result.filesDropped > 0) {
 }
 // The COMBINED result. Exiting on `primary` alone would report success to systemd forever while a
 // failing legacy drain accumulated toward the 20-file drop.
-process.exit(result.filesRetained > 0 ? 1 : 0);
+// `failures`, not `filesRetained`. The crash fallback above reports zero retained files — correctly,
+// since it does not know — so an exit code driven off that count would report success on a crash.
+process.exit(result.failures.length > 0 ? 1 : 0);
