@@ -730,6 +730,8 @@ Inventing one would repeat the defect this amendment fixes.
 
 **Telemetry trust boundary** (added 2026-08-26, `sdlc/003-metrics-telemetry`): the product writes telemetry to a local spool file and never transmits it. Shipping is performed by a separate agent the user runs, to a service the user hosts. The product therefore has no telemetry destination to be misconfigured, redirected, or intercepted. Spool file mode `0600`, directory `0700`; modes are advisory on Windows, as for the cache.
 
+**Deployment secrets** (added 2026-08-29, `sdlc/038-env-file-secret-window`): the metrics environment file the install scripts write — `~/.config/claudewatch/metrics.env`, which under a LAN bind holds a bearer token — is **created with its final mode** `0600`, never created readable and restricted afterwards, and its immediate directory is `0700`. It is written to a temporary file in the destination directory and renamed, as every other private file this project writes is. The path is rejected if it is a symlink rather than followed. An installer that finds the file already present repairs a mode that grants group or other access; it never reads, rotates, or prints the token. This clause exists because the mode was previously applied one command too late, which no invariant in this section forbade.
+
 
 ClaudeWatch is a local companion utility, not a credential manager.
 

@@ -61,8 +61,12 @@ exposing an unauthenticated write endpoint on your network. `--lan` sets both up
 
 The token gates every route, including the dashboard, and is compared in constant time.
 
-Secrets live in `~/.config/claudewatch/metrics.env` (mode `0600`), never in the unit files,
-which are world-readable.
+Secrets live in `~/.config/claudewatch/metrics.env`, never in the unit files, which are
+world-readable. That file is created `0600`, not chmodded to `0600` afterwards — the
+difference is an interval during which a bearer token sat on disk world-readable, which is
+what `sdlc/038` closed. Its directory is `0700`. Re-running the installer over an env file
+that grants group or other access tightens it and says so; it never reads or rotates the
+token already in it.
 
 ## Running Claude Code itself on the NUC
 

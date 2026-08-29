@@ -38,23 +38,11 @@ BUN_BIN="$(command -v bun)"
 say "bun:  $BUN_BIN"
 
 # --- env file --------------------------------------------------------------
-mkdir -p "$(dirname "$ENV_FILE")"
-if [ ! -f "$ENV_FILE" ]; then
-  {
-    echo "# ClaudeWatch metrics configuration. This file holds a secret — keep it 0600."
-    echo "CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787"
-    if [ "$LAN" = "1" ]; then
-      # The service refuses a non-loopback bind without a token, so generate a real one.
-      TOKEN="$(head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 48)"
-      echo "CLAUDEWATCH_METRICS_HOST=0.0.0.0"
-      echo "CLAUDEWATCH_METRICS_TOKEN=$TOKEN"
-    fi
-  } > "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
-  say "wrote $ENV_FILE"
-else
-  say "kept existing $ENV_FILE"
-fi
+# The write lives in a sourceable library so it can be tested without systemd, and so the
+# file is created already protected rather than protected a moment later. (sdlc/038)
+# shellcheck source=lib/env-file.sh
+. "$REPO_DIR/deploy/lib/env-file.sh"
+claudewatch_write_env_file "$ENV_FILE" "$LAN"
 
 # --- units -----------------------------------------------------------------
 mkdir -p "$UNIT_DIR"
