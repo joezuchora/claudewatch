@@ -127,6 +127,28 @@ edit them), `SPEC.md`, `CLAUDE.md`, `deploy/**`, and `manifest.test.ts` (it mock
 - `vscodeStubCover` added to `STEPS` between `fenceCheck` and `test`, as a package script;
   declared in root `package.json`; added to `env.test.ts`'s sandbox `scripts` map (A12, A14).
 
+## What each stub actually needs from the shared module
+
+Read in Stage 4 before writing a line of it, because "hoist the object" would have lost three of
+these. The shared module's `resetVscodeStub()` owns all of it.
+
+| File | State it depends on | Consequence for the shared module |
+|---|---|---|
+| `statusbar.test.ts` | Module-level `mockItem`, rebuilt per test, and `createStatusBarItem` re-pointed at it in `beforeEach` via `mockImplementation`. Also `configValues`, consulted by `workspace.getConfiguration().get` | The stub's `createStatusBarItem` must return the **current** item, so reset swaps the item rather than the function |
+| `extension.test.ts` | A module-level `registered` Map that `commands.registerCommand` writes and `dispose()` deletes from; tests later invoke `registered.get('claudewatch.refresh')` | Reset must hand back a fresh Map, and `registerCommand` must write to the live one |
+| `commands.test.ts` | Overwrites `window.showInformationMessage` and `env.openExternal` with recording sinks in `beforeEach`, restoring in `afterEach` | Reset must restore both leaves, which is what lets the `afterEach` go |
+| `tooltip.test.ts` | Nothing mutable — its `createStatusBarItem` returns a fresh object per call and no test asserts identity | Safe either way; it is the one file consolidation cannot break |
+
+Two divergences to preserve deliberately rather than by accident: `statusbar` needs
+`createStatusBarItem` to return a **stable** item so it can assert on it, while `extension` and
+`tooltip` return a fresh one per call and assert nothing about identity. A single stable item
+satisfies all three — verified by A1b, not by this reasoning.
+
+Also note `extension.test.ts` and `statusbar.test.ts` each declare their **own**
+`MockMarkdownString` and `MockThemeColor`. These become one definition in the shared module; any
+test comparing `instanceof` across files would change meaning, and none does — but that is a
+claim A1b has to back, not this table.
+
 ## Tests
 
 | Criterion | Test | File |
