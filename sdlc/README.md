@@ -1103,3 +1103,81 @@ One gap is worth separating from the rest, because of *where* it was introduced:
 test file, so the drain's composition and exit code are unexercised. The plan's test mapping had
 already mapped that criterion only to `combineResults`. **The mapping was wrong before the code
 was** — a Stage 3 defect that Stage 4 inherited and only Stage 5 caught.
+
+---
+
+## Loop 035 — `unresolvedTokens` counted two populations, one of them noise
+
+`fenceCheck`'s baselined integer mixed identifier-shaped tokens the index genuinely cannot see with
+flags, environment variables, keywords and expressions no index will ever resolve. Split by shape;
+only the first class is baselined; two narrow resolution rules added. **25 → 14.**
+
+**The loop caught itself doing the thing it exists to stop.** Its first attempt at the number was to
+edit its own already-committed `spec.md`, removing two backticked heading tokens, justified by a
+fence trap that did not exist. The plan-to-diff audit returned FENCE VIOLATED and dismantled the
+justification: `package.json` produced zero findings either way, because the fence never named it —
+the trap lived only in a counterfactual. The rewrite's real effect was on `name:` and `UNRESOLVED`,
+which have nothing to do with manifests, and it moved the baselined number from 15 to 13.
+
+> **A disclosure is not a defence.** The rewrite *was* disclosed, in two places, and it destroyed no
+> information. It was still wrong, and the disclosure paragraph itself contained a false sentence
+> ("this spec still contributes tokens to both counts" — it contributed zero, because the rewrite had
+> removed them). Writing down that you did something does not make it the right thing, and the
+> writing-down is not exempt from being checked.
+
+The test that resolved it is worth keeping: *does removing this token hide a fact the number exists
+to report?* Four of the five headings named a **measurement** — patterns being described, not things
+the loop changes — and stayed prose. `UNRESOLVED` names a requirement, is identifier-shaped, and the
+index does not know it. That is the definition of the counted class, so it went back, and the number
+is 14.
+
+**Declining a proposal is not the same as declining its goal.** The intent asked to index type
+members. Measured: four new findings across two loops, *all four false positives*, because a bare
+field name in a heading names the field's behaviour, not the file that declares it. Declining that
+was right — but the Stage 2 review then showed the decline had been over-extended into two cases it
+did not cover. A root `package.json` script name is a **declared** mapping from a name to a file,
+hand-written in a committed file exactly as `export function verify` would be. And `Owner.member`
+resolves through the index that *already exists* — the dot is the author saying which declaration
+they mean. Three tokens, zero findings, no member index, and loop 034's contribution to the count
+went from 1 to 0. The headline claim only became true for the motivating loop because a reviewer
+refused to accept it as asserted.
+
+**Two mutation lessons, and the second is one level below the first.**
+
+Loops 033 and 034 both under-predicted by naming per-rule tests and forgetting cross-cutting suites.
+A10 was written for exactly that. This loop failed differently: M4 predicted five tests, five failed,
+and **only one was among the five named**. The commit message called it "as predicted or better" on a
+count match that concealed a four-in-five set mismatch, and the audit caught it.
+
+> **Trace the early returns, not just the rules.** `ENV_VAR`, `RESERVED` and `TYPE_KEYWORDS` are
+> checked before `IDENTIFIER` and return early, so mutating `IDENTIFIER` cannot reach any test whose
+> input is caught upstream. The rules were not independent; the predictions assumed they were. The
+> five mutations predicted afterwards, with the ordering traced, all came back correct on the set.
+
+**Two dead things, found only by mutating.** M1 predicted three failures for deleting the flag branch
+and produced **zero** — `-` already fails the identifier rule, so the branch had never decided
+anything and `a flag is not a symbol` could not fail. M11 predicted zero for deleting `readManifest`'s
+size-and-type guard, and that was the *right prediction and the wrong code*: a guard whose absence no
+test can detect is loop 034's A7 wearing a new hat. Exporting it with `stat`/`read` as parameters — the
+`scripts/spool-path.ts` remedy — turned zero into three.
+
+**The security pass found a regression this loop introduced, in a diff with no security surface.**
+Before the split, an ESC-bearing heading token landed in `unresolved`, whose count is baselined:
+committing one forced a mismatch and a red gate. After the split it classifies as `not-a-symbol` —
+printed, never asserted — so the same bytes print on a **green** run, and a `\x1b[8m` conceals every
+`FINDING` line after it.
+
+> **Splitting a number into a checked half and an unchecked half moves things into the unchecked
+> half.** That is what a split is for, and it is also the risk. Ask what used to be caught only
+> because it landed in the counted bucket. Loop 034's lesson was *follow the data, not the code*;
+> this is its sibling — *follow what stopped being asserted*.
+
+**Where the gate paid for itself again.** `lintBudget` rejected the security tests for shadowing
+`read`, and A11 says the budget holds, so the shadow got fixed rather than the record. `fenceCheck`
+now reports on loop 035 in its own output — the check counting its own spec's unreadable token, which
+is the correct behaviour and slightly uncomfortable to look at.
+
+**Found live, not by reading.** Running the telemetry round trip by hand exposed that `ship()`
+collapses a 404, a 500, a TLS failure and a DNS failure into one indistinguishable `retained 1` line.
+On the NUC that count walks toward the 20-file drop threshold with no way to tell why. A loop 036
+candidate — and a reminder that exercising the thing finds what reading it does not.
