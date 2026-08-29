@@ -157,6 +157,26 @@ export interface FetchSuccess {
  * called it, so a pre-029 cache file still printed free text. The check now runs where the value
  * enters the program, and this sentence is true.
  */
+/**
+ * The three members a THROWN fetch can produce, as opposed to an HTTP response.
+ *
+ * A subset, declared with `Extract` rather than as its own union, so it cannot drift from
+ * `SurfaceableMessage` and cannot widen it. `packages/metrics` consumes this and nothing else:
+ * `'Authentication failed (401)'`, `'Rate limited (429)'` and `` `Server error (${number})` `` are
+ * HTTP outcomes the shipper reports as `{ kind: 'http', status }`, and admitting them here would be
+ * two representations of one fact.
+ *
+ * `SurfaceableMessage` itself is NOT to be widened for a shipping-only message. It is load-bearing
+ * for SPEC.md §12's cache-read boundary and frozen by three separate mechanisms — the
+ * `free-text-message` type fixture, `isSurfaceableMessage`, and `exhaustive-guard.test.ts`'s count
+ * assertion. If the shipper ever needs a message of its own, `packages/metrics` declares its own
+ * union at that point. (sdlc/036 m-1)
+ */
+export type TransportMessage = Extract<
+  SurfaceableMessage,
+  'Network error' | 'TLS verification failed' | 'Request timed out'
+>;
+
 export type SurfaceableMessage =
   | 'Authentication failed (401)'
   | 'Rate limited (429)'

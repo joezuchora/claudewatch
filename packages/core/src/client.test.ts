@@ -1,5 +1,6 @@
 import { describe, expect, test, mock, afterEach } from 'bun:test';
 import {
+  classifyFetchError,
   isSurfaceableMessage,
   fetchUsage,
   resolveFetchTiming,
@@ -229,5 +230,43 @@ describe('client: the resolved timings are actually used (sdlc/011)', () => {
 
     await fetchUsage('test-token', { maxRetries: 0 });
     expect(callCount).toBe(1);
+  });
+});
+
+/**
+ * A5 — the mapping is now one exported function, so `packages/metrics` can call it instead of
+ * growing a second table.
+ *
+ * These assertions are not new coverage of new behaviour: `fetchUsage`'s existing tests already
+ * exercised this logic inline, and all 472 core tests passed unchanged across the extraction, which
+ * is what makes it a MOVE rather than a rewrite. What is new is that the mapping is reachable
+ * without an `AbortController`, a retry loop and a live socket — which is the only reason sdlc/036's
+ * agreement criterion is satisfiable at all. Its first draft asked for a second implementation
+ * taking only `err`, which could never have agreed on the timeout leg. (sdlc/034 A6, again.)
+ */
+describe('classifyFetchError (sdlc/036 A5)', () => {
+  test('the timeout flag wins over everything, including a TLS code', () => {
+    expect(classifyFetchError(Object.assign(new Error('x'), { code: 'CERT_HAS_EXPIRED' }), true)).toBe(
+      'Request timed out',
+    );
+  });
+
+  test('a TLS failure code is preserved rather than flattened to a dead link', () => {
+    for (const code of ['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED']) {
+      expect(classifyFetchError(Object.assign(new Error('x'), { code }), false)).toBe('TLS verification failed');
+    }
+  });
+
+  test('anything else is a network error', () => {
+    expect(classifyFetchError(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }), false)).toBe('Network error');
+    expect(classifyFetchError(new Error('bare'), false)).toBe('Network error');
+  });
+
+  /** `err.code` is read, `err.message` never is. A thrown string has neither. */
+  test('a non-Error throw does not crash the classifier', () => {
+    expect(classifyFetchError('a bare string', false)).toBe('Network error');
+    expect(classifyFetchError(null, false)).toBe('Network error');
+    expect(classifyFetchError(undefined, false)).toBe('Network error');
+    expect(classifyFetchError({ code: 42 }, false)).toBe('Network error');
   });
 });

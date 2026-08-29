@@ -139,9 +139,29 @@ systemctl --user status claudewatch-metrics
 systemctl --user list-timers 'claudewatch-*'
 journalctl --user -u claudewatch-sdlc-loop -f
 
+# The SHIPPER's journal. Read this when the store stops growing.
+journalctl --user -u claudewatch-ship --since -1h
+
 curl -s http://127.0.0.1:8787/v1/stats | jq          # aggregates
 curl -s 'http://127.0.0.1:8787/v1/events?kind=verify_run&limit=20' | jq
 ```
+
+
+**If the store stops growing, the shipper's journal is the only place that says why.** Since
+sdlc/036 a failed run names its cause — an HTTP status, a transport failure, a spool error — plus
+the backlog depth and the age of the oldest undelivered file. Before that it printed only
+`retained 1`, and a permanent misconfiguration was indistinguishable from a service down for thirty
+seconds.
+
+Two things that will NOT tell you: `systemctl --failed`, because
+`claudewatch-ship.service` declares `SuccessExitStatus=0 1` and a shipping failure exits 1; and
+`metrics:detect`, which evaluates the events that arrived and reports `healthy` on a store that
+stopped growing a year ago. Both are deliberate and both are recorded in
+`sdlc/036-silent-shipping-failure/`.
+
+**The backlog is capped at 20 files.** At a five-minute timer that is roughly 100 minutes of outage
+before the oldest undelivered events are deleted permanently. The `DATA LOST` line on stderr is the
+only warning, and it appears after the first deletion, not before.
 
 The store is `~/.local/share/claudewatch-metrics/metrics.db` (SQLite, WAL, mode `0600`).
 Events older than 90 days are pruned on startup and daily, so it will not grow without bound

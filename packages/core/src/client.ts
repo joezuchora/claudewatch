@@ -1,4 +1,4 @@
-import type { FailureClass, FetchResult, SurfaceableMessage } from './types.js';
+import type { FailureClass, FetchResult, SurfaceableMessage, TransportMessage } from './types.js';
 import { failurePolicy } from './cooldown.js';
 import { emitProcess, fetchResultEvent } from './telemetry.js';
 import type { StatusClass } from './telemetry.js';
@@ -168,6 +168,33 @@ const TLS_FAILURE_CODES = new Set([
 ]);
 
 /**
+ * Map a THROWN fetch error to the one message this repo will show for it.
+ *
+ * Extracted from `fetchUsage`'s catch in sdlc/036, unchanged in behaviour, so that
+ * `packages/metrics`' spool shipper reports the same three outcomes for the same three causes
+ * rather than growing a second table. Two vocabularies for "why did an HTTP call fail" in one repo
+ * is how they drift — the lesson `MAX_LINE_BYTES` and the cache-directory rule both taught, at the
+ * cost of a loop each.
+ *
+ * `timedOut` is a PARAMETER, not inferred from `err`, and that is the whole reason this is
+ * extractable at all. The abort timer's callback is the only code that knows a timeout happened; an
+ * `AbortError` on its own cannot distinguish "we timed out" from "the caller aborted". sdlc/036's
+ * first spec draft proposed a second implementation taking only `err` and a test asserting the two
+ * agree — unsatisfiable, because they would not have taken the same inputs. Same shape as sdlc/034's
+ * A6, and caught by the Stage 2 review rather than by the plan.
+ *
+ * Reads `err.code`, NEVER `err.message`: a code is a closed set of OpenSSL identifiers that maps to
+ * a literal we choose; a message is free text that varies by platform and Bun version. That
+ * distinction is the whole of sdlc/029, and the reason a TLS INTERCEPTION ATTEMPT is distinguishable
+ * from a dead link on every surface.
+ */
+export function classifyFetchError(err: unknown, timedOut: boolean): TransportMessage {
+  if (timedOut) return 'Request timed out';
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && TLS_FAILURE_CODES.has(code) ? 'TLS verification failed' : 'Network error';
+}
+
+/**
  * Is this string one of the messages this repo produces?
  *
  * The type closes the set at the PRODUCER. This closes it where a type cannot reach — at a value
@@ -266,11 +293,7 @@ export async function fetchUsage(
       // 1.3.11: connection-refused/TLS/DNS give "Unable to connect...", a timeout gives "The
       // operation was aborted." (a DOMException, which IS instanceof Error). Both generic today;
       // neither is a property this repo controls. (sdlc/029)
-      const code = (err as { code?: unknown } | null)?.code;
-      const message: SurfaceableMessage =
-        timedOut ? 'Request timed out'
-        : (typeof code === 'string' && TLS_FAILURE_CODES.has(code)) ? 'TLS verification failed'
-        : 'Network error';
+      const message = classifyFetchError(err, timedOut);
       lastError = {
         ok: false,
         status: null,
