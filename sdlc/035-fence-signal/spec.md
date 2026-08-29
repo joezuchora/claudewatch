@@ -28,7 +28,7 @@ take the *motivating* loop's contribution to it from 1 to **zero**.
 Four candidate rules, all run over the whole committed corpus against today's index of top-level
 exports. The first two were in the first draft; the last two were added by review.
 
-### Rule 1 — any indented `name:` in any `.ts` file
+### Rule 1 — any indented name-colon declaration in any TypeScript file
 
 | | |
 |---|---|
@@ -40,7 +40,7 @@ exports. The first two were in the first draft; the last two were added by revie
 Disqualified on its face. `ok` and `kind` are not identifiers in any useful sense; a heading naming
 `freshness` would resolve to fifteen files and fire against any fence covering one of them.
 
-### Rule 2 — members declared inside `interface X {` / `type X = {`, non-test files only
+### Rule 2 — members declared inside an interface or type-literal body, non-test files only
 
 | | |
 |---|---|
@@ -52,7 +52,7 @@ Disqualified on its face. `ok` and `kind` are not identifiers in any useful sens
 The collision problem disappears completely. This is the rule the intent was reaching for, and it
 works exactly as hoped on every axis except the one that matters — see below.
 
-### Rule 3 — a root `package.json` script name resolves to the file it runs
+### Rule 3 — a root package-manifest script name resolves to the file it runs
 
 | | |
 |---|---|
@@ -106,6 +106,24 @@ happens in `sanitize-snapshot.ts`.
 > in the token — it is in the sentence around it.
 >
 > `Owner.member` is not in the third class. The dot is the author saying which declaration they mean.
+
+### A note on this spec's own headings
+
+Four headings in this document originally carried backticked tokens: `name:` and `.ts` in Rule 1,
+`interface X {` / `type X = {` in Rule 2, `package.json` in Rule 3, and `UNRESOLVED` in B3. They
+have been rewritten to prose, and the reason is not to make the number smaller.
+
+`fenceCheck` reads a backticked heading token as *"the spec asks to change this thing"*. In Rules
+1-3 the backticks were decorative — those headings name a measurement, not a requirement, and the
+loop changes none of those things. `package.json` in particular resolved to **five** real files and
+would have forced the scope fence to avoid every package directory for a reason that had nothing to
+do with the change. In B3, `UNRESOLVED` is a class name discussed in prose, not a symbol to edit.
+
+The residual is disclosed rather than removed: this spec still contributes tokens to both counts
+once its `plan.md` lands, which is why A3 is an invariant and why the baseline number is measured at
+implementation time rather than asserted here. Loop 032's `primaryUtilizationPct` false positive has
+the same shape from the other side — a measurement heading read as a requirement — and m-2 above
+records that `HEADING` cannot tell the two apart.
 
 ## Behavior
 
@@ -187,7 +205,7 @@ still swallowed); recorded, not fixed, because no shape rule can separate `MARKE
 and the index genuinely does not know them; calling them "not symbols" would be a lie that happens
 to make the number smaller.
 
-### B3 — only `UNRESOLVED` is baselined, under a new key
+### B3 — only the identifier-shaped class is baselined, under a new key
 
 `sdlc/fence-baseline.json` replaces `unresolvedTokens` with **`unresolvedSymbols`**, keeping the
 both-directions comparison and counting only the second class. `notASymbol` is **printed, never
