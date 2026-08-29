@@ -18,7 +18,7 @@
 |---|---|
 | `94fbcf4` | intent |
 | `860c661` | spec, first draft |
-| `6400012` | spec revision 1 — findings from my own measurement, before the reviewer reported |
+| `47802cd` | spec revision 1 — findings from my own measurement, before the reviewer reported |
 | `253edb0` | plan, first draft |
 | `af9d326` | spec revision 2 + plan revision — the Stage 2 review's blockers, design changed to `mktemp`+`mv`, fence amended |
 | `e7758b4` | implementation |

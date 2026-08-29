@@ -15,7 +15,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
@@ -149,9 +149,11 @@ describe('creation mode', () => {
     const fileLines = r.observed.filter((line) => !line.endsWith(` ${configDir}`));
     expect(fileLines.length).toBeGreaterThan(0);
     expect(fileLines.filter((line) => !line.startsWith('600 '))).toEqual([]);
-    // The 0600 belongs to the env file or the temp file it is renamed from, not to something
-    // incidental that happened to be chmodded.
-    expect(fileLines.some((line) => line.includes('.metrics.env.') || line.endsWith(` ${envFile}`))).toBe(true);
+    // The 0600 belongs to the temp file the destination is renamed from. `|| endsWith(envFile)`
+    // used to be permitted here, and that disjunction is exactly what let the whole atomic-write
+    // design go untested -- the first draft's `umask 077` subshell chmods the destination and
+    // satisfied the other half.
+    expect(fileLines.some((line) => line.includes('.metrics.env.'))).toBe(true);
     expect(mode(envFile)).toBe('600');
   });
 
@@ -197,6 +199,70 @@ describe('creation mode', () => {
   });
 });
 
+describe('the atomic write', () => {
+  // Added in Stage 5. The plan-to-diff audit found that swapping the shipped `mktemp` + `mv`
+  // back to the first draft's `( umask 077; … > "$env_file" )` left all 23 tests passing:
+  // the entire reason for spec revision 2 shipped unarmed. Reproduced before fixing.
+
+  test('the destination is written through a temp file, never opened directly', () => {
+    const { sb, envFile, configDir } = sandbox();
+    const r = run(sb, call(envFile, '1'), { umask: '000', observe: true });
+    expect(r.status).toBe(0);
+
+    const fileLines = r.observed.filter((line) => !line.endsWith(` ${configDir}`));
+    // Every file chmodded on the create path is a temp sibling. A design that opens the
+    // destination directly chmods the destination, and fails here.
+    expect(fileLines.length).toBeGreaterThan(0);
+    expect(fileLines.filter((line) => !line.includes('.metrics.env.'))).toEqual([]);
+    expect(fileLines.some((line) => line.endsWith(` ${envFile}`))).toBe(false);
+    // ...and nothing is left lying around afterwards.
+    expect(readdirSync(configDir).toSorted()).toEqual(['metrics.env']);
+  });
+
+  test('a write that fails after the temp path is chosen leaves no destination file', () => {
+    const { sb, envFile, configDir } = sandbox();
+    mkdirSync(configDir, { recursive: true });
+    // The stubbed `mktemp` names a path inside a directory that does not exist, so the redirect
+    // fails with ENOENT. A read-only directory was tried first and does not work: this suite
+    // runs as root in CI and in the container, and root bypasses directory permissions, so the
+    // write succeeded and the test passed for the wrong reason. ENOENT is uid-independent.
+    //
+    // This is the partial-write hole that motivated the revision: a design that redirects
+    // straight at the destination truncates it at open time and leaves a header-only file
+    // behind, which the repair branch would then bless as `kept existing` forever.
+    const bin = join(sb, 'stub');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'mktemp'), `#!/bin/bash\necho ${join(sb, 'no-such-dir', 'doomed')}\n`, { mode: 0o755 });
+
+    const r = run(sb, call(envFile, '1'), { umask: '022', preamble: `PATH=${JSON.stringify(bin)}:$PATH` });
+    expect(r.status).not.toBe(0);
+    expect(existsSync(envFile)).toBe(false);
+  });
+
+  test('the file contents are exactly what the service parses', () => {
+    // Nothing asserted the bytes: mutating `printf '%s\\n'` to `printf '%s'` -- an env file
+    // with no trailing newline -- failed no test at all.
+    const loopback = sandbox();
+    expect(run(loopback.sb, call(loopback.envFile, '0'), { umask: '022' }).status).toBe(0);
+    expect(readFileSync(loopback.envFile, 'utf-8')).toBe(
+      '# ClaudeWatch metrics configuration. This file holds a secret \u2014 keep it 0600.\n' +
+        'CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787\n',
+    );
+
+    const lan = sandbox();
+    expect(run(lan.sb, call(lan.envFile, '1'), { umask: '022' }).status).toBe(0);
+    const text = readFileSync(lan.envFile, 'utf-8');
+    const token = /^CLAUDEWATCH_METRICS_TOKEN=(.+)$/m.exec(text)?.[1] ?? '';
+    expect(token.length).toBeGreaterThanOrEqual(32);
+    expect(text).toBe(
+      '# ClaudeWatch metrics configuration. This file holds a secret \u2014 keep it 0600.\n' +
+        'CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787\n' +
+        'CLAUDEWATCH_METRICS_HOST=0.0.0.0\n' +
+        `CLAUDEWATCH_METRICS_TOKEN=${token}\n`,
+    );
+  });
+});
+
 describe('the token', () => {
   test('the generated token appears in no output stream', () => {
     const { sb, envFile } = sandbox();
@@ -214,7 +280,7 @@ describe('the token', () => {
 
   test('the token does not leak under bash -x', () => {
     const { sb, envFile } = sandbox();
-    const r = run(sb, call(envFile, '1'), { umask: '022', xtrace: true });
+    const r = run(sb, `${call(envFile, '1')}\n: cw-xtrace-restored-marker`, { umask: '022', xtrace: true });
     expect(r.status).toBe(0);
 
     const token = /^CLAUDEWATCH_METRICS_TOKEN=(.+)$/m.exec(readFileSync(envFile, 'utf-8'))?.[1] ?? '';
@@ -222,8 +288,11 @@ describe('the token', () => {
     // xtrace prints the argv of every command it runs, so this covers the "never a process
     // argument" half of the claim as well as the "never in debug output" half.
     expect(r.stderr).not.toContain(token);
-    // The trace really did run — otherwise the assertion above proves nothing.
-    expect(r.stderr).toContain('+');
+    // `toContain('+')` used to stand here and was satisfied by the harness's own pre-call
+    // trace lines, so it would have held against a library that switched xtrace off and never
+    // switched it back. The marker runs AFTER the call: seeing it traced is what proves the
+    // setting was restored rather than merely disabled.
+    expect(r.stderr).toContain('cw-xtrace-restored-marker');
   });
 
   test('loopback writes neither host nor token', () => {
@@ -418,6 +487,10 @@ describe('the library and its caller', () => {
     // Same convention as scripts/env.test.ts: pin the sentence, so code and prose cannot drift
     // apart silently.
     expect(readFileSync(join(REPO, 'deploy', 'README.md'), 'utf-8')).toContain('created `0600`, not chmodded to `0600` afterwards');
-    expect(readFileSync(join(REPO, 'SPEC.md'), 'utf-8')).toContain('created with its final mode');
+    const spec = readFileSync(join(REPO, 'SPEC.md'), 'utf-8');
+    expect(spec).toContain('created with its final mode');
+    // The clause makes two claims; pinning only the first left the atomic-write half as
+    // unenforced prose, which is how the design went untested in the first place.
+    expect(spec).toContain('written to a temporary file in the destination directory and renamed');
   });
 });

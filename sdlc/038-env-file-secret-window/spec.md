@@ -200,10 +200,17 @@ missing optional fields are omitted, not guessed.
   file's permissions". That was wrong, and checking rather than assuming is what caught it.
   Line 64 reads: *"Secrets live in `~/.config/claudewatch/metrics.env` (mode `0600`), never in
   the unit files, which are world-readable."* The README already states the invariant this
-  change enforces. It therefore needs **no edit** — but for the opposite reason to the one
-  given: not because it is silent, but because this change is what finally makes it true. The
-  document was accurate about the intent and inaccurate about the artifact, on both the
-  creation window and the repair branch that never repaired anything.
+  change enforces.
+
+  **Superseded in Stage 5.** This paragraph concluded the README "therefore needs **no edit**",
+  and that conclusion did not survive the review that put the file in scope two sections
+  earlier — it was left standing because the amendment was applied by addition, so the committed
+  spec asserted both that the README was in scope and that it must not be touched. The README
+  *is* edited: it now says which `0600` it means, states the directory mode, and describes the
+  repair branch. The plan-to-diff audit also found that edit wider than the amendment's stated
+  reason, which was only about the ambiguous `0600`. The three added claims are each true of the
+  new code and inside the loop's subject, but the reason given was narrower than the diff taken,
+  and that is recorded rather than smoothed over.
 
 This change is not breaking.
 

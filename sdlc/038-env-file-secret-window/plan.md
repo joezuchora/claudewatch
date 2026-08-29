@@ -55,10 +55,14 @@ procedure that lesson asks for.
 If the set turns out unchanged, the entry goes unused and `review.md` says so — an unused
 fence entry is a smaller sin than a diff that steps outside one.
 
-**Explicitly not touched:** `packages/**` (nothing in the product changes), `deploy/README.md`
-(its `mode 0600` claim at line 64 becomes true rather than needing an edit — see `spec.md`
-*Backward compatibility*), `deploy/systemd/**`, `scripts/**`, `SPEC.md`, `CLAUDE.md`, and the
-Windows/macOS install paths.
+**Explicitly not touched:** `packages/**` (nothing in the product changes), `deploy/systemd/**`,
+`scripts/**`, `CLAUDE.md`, and the Windows/macOS install paths.
+
+> This list named `SPEC.md` and `deploy/README.md` until Stage 5 — fifteen lines below the
+> paragraph that put both in scope. The amendment was applied by addition and the text it
+> contradicted was left standing, so the committed plan asserted both that those files were
+> in scope and that they must not be touched. Found by the plan-to-diff audit; the same
+> correction is made in `spec.md`'s *Backward compatibility*.
 
 ## Changes
 
@@ -97,10 +101,17 @@ draft departed from that convention for the one file holding a bearer token with
   small enough that `tr` finishes before `head` closes the pipe, with the 0/300 and 20/20
   measurements, so nobody raises the constant for "more entropy" and gets an intermittent
   installer failure.
-- The write inside `( umask 077; { … } > "$env_file" )` — A1.
-- The repair branch: read the mode with `stat -c '%a'`; `600` prints `kept existing <path>`
-  unchanged; anything else `chmod 600` and prints `tightened permissions on <path> (was <mode>)`
-  — A5, A6. Contents are never read on this branch, so an existing token is never loaded into
+- The write into a `mktemp` file in the destination directory, `chmod 600`, then `mv` into
+  place — A1 and A23. (This bullet said `( umask 077; { … } > "$env_file" )` until Stage 5:
+  the plan revision added the *Design changed after review* section above and left the
+  superseded bullet standing, so the committed plan specified two mutually exclusive
+  mechanisms. Found by the plan-to-diff audit.)
+- The repair branch: read the mode with `stat -c '%a'`; a mode with **no group or other bits**
+  (`600`, `400`, `000`) prints `kept existing <path>` unchanged; anything else `chmod 600` and
+  prints `tightened permissions on <path> (was <mode>)` — A5, A6, A20. (This bullet described
+  a plain `= 600` comparison until Stage 5, which would loosen a `0400` file under a message
+  reading *tightened*; A20 was added in spec revision 2 and this bullet was not updated with
+  it. Found by the plan-to-diff audit.) Contents are never read on this branch, so an existing token is never loaded into
   a variable.
 
 ### `deploy/install-nuc.sh`
@@ -108,6 +119,14 @@ draft departed from that convention for the one file holding a bearer token with
 - Source the library after `REPO_DIR` is resolved, and replace the inline block at lines 40–57
   with a single call passing `"$ENV_FILE"` and `"$LAN"`. Nothing else in the script changes —
   same flags, same order, same output for the two cases that already existed.
+- **One behaviour change that follows from A18 and was unstated until Stage 5:** because the
+  library requires an absolute path, a relative `$XDG_CONFIG_HOME` now aborts the installer
+  where it previously worked. That is a necessary consequence of refusing to `chmod 700` the
+  caller's working directory, not scope creep — but it is a user-visible change and belongs in
+  the plan rather than only in the code. Found by the plan-to-diff audit.
+- The installer is also no longer self-contained: it sources a second file. Anyone who copied
+  `install-nuc.sh` alone to a box now gets a hard failure. Acceptable — it has always needed a
+  checkout for `REPO_DIR` and for `deploy/systemd/*` — and stated rather than assumed.
 
 ### `deploy/env-file.test.ts` (new)
 
@@ -123,7 +142,7 @@ draft departed from that convention for the one file holding a bearer token with
 | Spec criterion | Test | File |
 |---|---|---|
 | A1 | `creates the env file at 0600 even under umask 000` | `deploy/env-file.test.ts` |
-| A2 | `the harness catches the pre-change form` | `deploy/env-file.test.ts` |
+| A2 | `the recorder catches the pre-change form` | `deploy/env-file.test.ts` |
 | A3 | `the config directory ends up 0700` | `deploy/env-file.test.ts` |
 | A4 | `the parent directory is not tightened as collateral` | `deploy/env-file.test.ts` |
 | A5 | `an existing 0644 file is tightened, and the output says so` | `deploy/env-file.test.ts` |
@@ -133,12 +152,27 @@ draft departed from that convention for the one file holding a bearer token with
 | A9 | `an unrecognised lan value is treated as loopback` | `deploy/env-file.test.ts` |
 | A10 | `a missing path argument fails and creates nothing` | `deploy/env-file.test.ts` |
 | A11 | `sourcing the library prints nothing and creates nothing` | `deploy/env-file.test.ts` |
-| A12 | `both shell files parse, and the installer sources the library` | `deploy/env-file.test.ts` |
+| A12 | `both shell files parse, and the installer calls the library` | `deploy/env-file.test.ts` |
 | A15 | `a symlinked env path is refused and the target keeps its mode` | `deploy/env-file.test.ts` |
 | A16 | `a dangling symlink is refused and its target is not created` | `deploy/env-file.test.ts` |
 | A17 | `a failing token generator fails the call and leaves no file` | `deploy/env-file.test.ts` |
+| A18 | `a relative path is refused rather than chmodding the working directory` | `deploy/env-file.test.ts` |
+| A19 | `the token does not leak under bash -x` | `deploy/env-file.test.ts` |
+| A20 | `an existing 0400 file is not loosened under a message claiming otherwise` | `deploy/env-file.test.ts` |
+| A21 | `an absent lan argument is treated as loopback` | `deploy/env-file.test.ts` |
+| A22 | `the documented invariants still say what the code now does` | `deploy/env-file.test.ts` |
+| A23 | `a write that fails after the temp path is chosen leaves no destination file` | `deploy/env-file.test.ts` |
+| — | `the destination is written through a temp file, never opened directly` | `deploy/env-file.test.ts` |
+| — | `the file contents are exactly what the service parses` | `deploy/env-file.test.ts` |
+| — | `a token too short for the service is rejected at install time` | `deploy/env-file.test.ts` |
+| — | `a directory in place of the env file is refused` | `deploy/env-file.test.ts` |
 | A13 | not a test — read in Stage 5 review | `review.md` |
 | A14 | not a test — the gate | `bun run verify` |
+
+> Two rows in this table named tests that do not exist — `the harness catches…` for the
+> `the recorder catches…` test, and `…sources the library` for `…calls the library`. That is
+> loop 036's recorded defect, a record naming a test that was never written, recurring in the
+> document that cites it. Corrected above; found by the plan-to-diff audit, not by me.
 
 **A2 is a standing test, not a one-off measurement.** It embeds the pre-change four lines
 verbatim as a fixture, runs them through the same interposition harness, and asserts the
