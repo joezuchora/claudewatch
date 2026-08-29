@@ -1046,3 +1046,60 @@ unbackticked prose, so the extractor yields twelve tokens and none is a test fil
 because the parser is blind to the clause that was breached. Loop 026's fence has the same shape and
 reports passing over four tokens. Closing that needs a structured fence, which is deferred — and
 deferring it is a choice made with the hole measured, not assumed away.
+
+## Loop 034 — two correct decisions, composed into a token leak
+
+`SPEC.md` had claimed since loop 003 that the cache location follows `$XDG_CACHE_HOME`. It never
+read the variable. Loops 003 and 005 both recorded the divergence in their reviews; neither fixed
+it. Thirty loops of "recorded, not fixed" is what finally made it worth doing — the item had become
+proof that recorded items never get done.
+
+The resolver is four lines. Seventeen files moved with it.
+
+**The security pass found a blocking defect and demonstrated it: an OAuth access token leaving the
+machine.** Before this loop the spool directory was always `~/.cache/claudewatch`, created `0700`,
+so only its owner could put a file there. Honouring an environment variable made it an arbitrary
+absolute path — possibly one another local user owns. `pendingShippingFiles` selects by basename
+pattern; `ship()` reads with no `lstat`. A planted `.shipping` symlink pointing at
+`~/.claude/.credentials.json` was read and POSTed to the configured endpoint.
+
+> **A capability review has to follow the data, not the code.** Every token-handling invariant was
+> clean — no token in logs, argv, cache, or `--debug`; credentials read-only; TLS untouched — and
+> the diff contains no token-handling code at all. The token arrived as **file contents**. Honouring
+> the user's cache variable is right. Shipping what is in the spool directory is right. What changed
+> was *who can write to a directory this process reads*, and neither decision is visible as a defect
+> on its own.
+
+**A source grep tests spelling; only a behavioural test tests the invariant.** A7 was written as a
+grep of `verify.ts` for `join(homedir(), '.cache'`. The audit defeated it five ways — double quotes,
+a template literal, a destructured `homedir()`, an extracted constant — and then with the one that
+matters: leave the `mkdir` derived and construct the **append** independently. No event anywhere,
+gate at exit 0, A7 green. It now spawns the real gate against a fixture with `XDG_CACHE_HOME`
+pointing at a third directory and asserts the event lands there and nowhere else.
+
+**A fix is not exempt from review, and this loop proved it twice on its own work.** The A7 grep was
+introduced by the work meant to make the change safe. And pinning `XDG_CACHE_HOME` on the sandbox
+seed turned `extension.test.ts`'s block — literally named *"the safety layers themselves"* — from
+mutant-killing into mutant-surviving, because an ambient XDG value usually lives under `TMPDIR` and
+satisfied both of its negative assertions with the safety layer deleted.
+
+**On mutation prediction, the misses now have a name.** Nine mutations, zero survivors, four of nine
+exact. Four of the five misses are one mistake: *predicting the tests written for a rule and
+forgetting the suites written across rules* — here the six-cell agreement matrix, in loop 033 the
+live-tree baseline. Two consecutive loops, same cause. The other two misses are the inverse and more
+interesting: a test I expected to fail bound to a **different rule than I thought**, which is
+correct per-rule coverage and a wrong model of it.
+
+> **Name the cross-cutting suites, not just the per-rule tests.** And when a prediction over-shoots,
+> suspect two rules where you thought there was one.
+
+**The harness from loop 033 paid for itself in ways I did not predict.** `lintBudget` rejected one
+of my own commits for a warning I had *accidentally fixed* — the removal direction firing exactly as
+designed, with the asymmetric wording that distinguishes a fix from a regression. `fenceCheck` forced
+a baseline update into the same commit as the artifact that caused it. Neither was a judgement call,
+which is the whole point of moving a rule from prose into the gate.
+
+One gap is worth separating from the rest, because of *where* it was introduced: `cli-ship` has no
+test file, so the drain's composition and exit code are unexercised. The plan's test mapping had
+already mapped that criterion only to `combineResults`. **The mapping was wrong before the code
+was** — a Stage 3 defect that Stage 4 inherited and only Stage 5 caught.
