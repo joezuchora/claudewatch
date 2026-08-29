@@ -210,6 +210,9 @@ describe('checkLoop — script-name resolution', () => {
       { loop: 'fixture', specToken: 'verify', file: 'scripts/verify.ts', fenceEntry: 'scripts/verify.ts' },
     ]);
     expect(res?.unresolved).toEqual([]);
+    // A7 says "neither `unresolved` nor `notASymbol`". Implied by the finding above, but the
+    // criterion is cheap to assert literally, so it is asserted literally.
+    expect(res?.notASymbol).toEqual([]);
   });
 
   test('a script whose target is not tracked does not resolve — the map never invents a path', () => {
@@ -271,7 +274,10 @@ describe('checkLoop — dotted-prefix resolution', () => {
     ]);
   });
 
-  test('an unknown prefix stays unresolved rather than guessing', () => {
+  // NAME CORRECTED at Stage 5. It read "stays unresolved" while asserting `notASymbol` — and in a
+  // loop whose entire subject is that those two words name different populations, a test name that
+  // swaps them is the wrong kind of mistake to leave in the file. The behaviour was always right.
+  test('an unknown prefix does not resolve, and falls to not-a-symbol on the dot', () => {
     const res = run('### B1 — `enterprise.utilizationPct` is validated\n', '**Not touched:** `packages/core/src/format.ts`\n\n');
     expect(res?.findings).toEqual([]);
     expect(res?.notASymbol).toEqual(['enterprise.utilizationPct']);
@@ -561,11 +567,19 @@ describe('the live tree', () => {
      *
      * sdlc/033, sdlc/034 and sdlc/035's own first draft each hardcoded a token count and each got
      * it wrong, because a loop's artifacts join the corpus the moment its `plan.md` lands. The
-     * Disjointness is the structural half; it is NOT sufficient on its own. The plan predicted that
-     * this test would catch mutation 6 (deleting the dotted-prefix fallback) and that prediction is
-     * wrong: `MetricEvent.payload` would simply fall into `notASymbol`, which is disjoint and
-     * self-consistent. What catches it is the next test, which names the tokens the two new rules
-     * are supposed to resolve. Recorded here rather than corrected silently.
+     * Two things this test does NOT do, both found by the Stage 5 audit and recorded rather than
+     * papered over:
+     *
+     * 1. It does not verify A3's sum clause. `checkLoop` pushes each failed token into exactly ONE
+     *    array, so `unresolved.length + notASymbol.length` equals the failed-resolution count by
+     *    construction and asserting it would be tautological. `checkLoop` exposes no independent
+     *    failed-resolution count to compare against, and inventing one here would be a second
+     *    reading of the same rule. What is left — disjointness, no duplicates, and a classification
+     *    round-trip — is real.
+     * 2. It does not catch mutation 6 (deleting the dotted-prefix fallback), which the plan
+     *    predicted it would. `MetricEvent.payload` would simply fall into `notASymbol`: disjoint,
+     *    duplicate-free, and self-consistent. What catches it is the next test, which names the
+     *    tokens the two new rules are supposed to resolve.
      */
     const both = unresolved.filter((t) => notASymbol.includes(t));
     expect(both).toEqual([]);

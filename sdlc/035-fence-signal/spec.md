@@ -20,7 +20,7 @@ But declining the intent's proposal is not the same as declining its goal. Two n
 rules — **root `package.json` script names** and **dotted-prefix lookup against the existing index**
 — were measured after the first draft and both come back clean: three tokens resolved, **zero new
 findings, zero false positives, no member indexing.** They are adopted. Together with
-classification they take the baselined number from **25 to 13**, and — the point of the whole loop —
+classification they take the baselined number from **25 to 14**, and — the point of the whole loop —
 take the *motivating* loop's contribution to it from 1 to **zero**.
 
 ## The measurement that changed the design
@@ -109,21 +109,34 @@ happens in `sanitize-snapshot.ts`.
 
 ### A note on this spec's own headings
 
-Four headings in this document originally carried backticked tokens: `name:` and `.ts` in Rule 1,
-`interface X {` / `type X = {` in Rule 2, `package.json` in Rule 3, and `UNRESOLVED` in B3. They
-have been rewritten to prose, and the reason is not to make the number smaller.
+**Rewritten once, then partly reverted at Stage 5 after the plan-to-diff audit. The first version of
+this note was wrong, and how it was wrong is the useful part.**
 
-`fenceCheck` reads a backticked heading token as *"the spec asks to change this thing"*. In Rules
-1-3 the backticks were decorative — those headings name a measurement, not a requirement, and the
-loop changes none of those things. `package.json` in particular resolved to **five** real files and
-would have forced the scope fence to avoid every package directory for a reason that had nothing to
-do with the change. In B3, `UNRESOLVED` is a class name discussed in prose, not a symbol to edit.
+Five headings in this document originally carried backticked tokens: `name:` and `.ts` in Rule 1,
+`interface X {` / `type X = {` in Rule 2, `package.json` in Rule 3, and `UNRESOLVED` in B3. All five
+were rewritten to prose in the `plan.md` commit, justified by a fence trap around `package.json`.
 
-The residual is disclosed rather than removed: this spec still contributes tokens to both counts
-once its `plan.md` lands, which is why A3 is an invariant and why the baseline number is measured at
-implementation time rather than asserted here. Loop 032's `primaryUtilizationPct` false positive has
-the same shape from the other side — a measurement heading read as a requirement — and m-2 above
-records that `HEADING` cannot tell the two apart.
+The audit found three things wrong with that.
+
+1. **The stated reason accounts for none of the effect.** `package.json` produced **zero** findings
+   either way, because the fence never names it; the trap existed only in a counterfactual. The
+   rewrite's actual effect was on `name:` and `UNRESOLVED`, which have nothing to do with manifests.
+2. **It lowered the number this loop baselines, from 15 to 13** — in a loop whose whole thesis is
+   that hand-lowering that number is the disease.
+3. **It edited a committed `spec.md`**, which the *Backward compatibility* section below promises not
+   to do, from outside the plan's scope fence.
+
+Applying this spec's own test — *does removing this token hide a fact the number exists to report?* —
+separates the five cleanly. `name:`, `.ts`, `interface X {` and `type X = {` name a **measurement**,
+not a requirement: they are patterns being described, not things this loop changes, and `fenceCheck`
+reads a backticked heading token as *"the spec asks to change this"*. Those four stay prose.
+`UNRESOLVED` is different: it is a requirement heading, it is identifier-shaped, and the index does
+not know it. That is precisely what the `unresolved` class is for. **It is restored, and the
+baselined number is 14, not 13.**
+
+Loop 032's `primaryUtilizationPct` false positive has the same shape from the other side — a
+measurement heading read as a requirement — and m-2 above records that `HEADING` cannot tell the two
+apart. This loop has now been caught by that ambiguity from both directions in one afternoon.
 
 ## Behavior
 
@@ -205,14 +218,14 @@ still swallowed); recorded, not fixed, because no shape rule can separate `MARKE
 and the index genuinely does not know them; calling them "not symbols" would be a lie that happens
 to make the number smaller.
 
-### B3 — only the identifier-shaped class is baselined, under a new key
+### B3 — only `UNRESOLVED` is baselined, under a new key
 
 `sdlc/fence-baseline.json` replaces `unresolvedTokens` with **`unresolvedSymbols`**, keeping the
 both-directions comparison and counting only the second class. `notASymbol` is **printed, never
 asserted** — it is expected to rise with every loop, which is precisely why it must not be a gate.
 
 The rename is not cosmetic. Keeping the name across a redefinition would make `git log -p` on the
-baseline unreadable: a reader six months from now sees `25 → 13` under an unchanged key and cannot
+baseline unreadable: a reader six months from now sees `25 → 14` under an unchanged key and cannot
 tell whether the check improved or the definition moved. A new key makes the redefinition a visible
 event, and the parser rejecting the old key means no half-migrated baseline can pass.
 
@@ -234,14 +247,15 @@ not counted):
 | resolved by Rule 3 (script names) | **2** |
 | resolved by Rule 4 (dotted prefix) | **1** |
 | classified `not-a-symbol` | **9** |
-| classified `unresolved`, i.e. baselined | **13** |
+| classified `unresolved`, i.e. baselined | **13**, plus this loop's own `UNRESOLVED` = **14** |
 
 Per loop, `[not-a-symbol / unresolved]` after the change:
 
 ```
 022  0/1     029  3/1     032  2/3
-027  0/3     030  0/1     034  2/0
-028  1/1     031  1/3     033  —
+027  0/3     030  0/1     033  —      (dropped out entirely: Rule 3 resolved its only token)
+028  1/1     031  1/3     034  2/0    (1 -> 0: the loop that motivated this one)
+                          035  0/1    (this loop's own `UNRESOLVED`)
 ```
 
 **Loop 034 — the loop that motivated this one — goes from 1 to 0, and loop 033 drops out entirely.**
@@ -260,8 +274,8 @@ is Rule 3.
 
 Eight are interface members in `types.ts`; two are module-local declarations in `extension.ts`; two
 are the `vscode` API module, which is an external dependency and not in the corpus at all; one is a
-string-literal value. **Every one of them is unreachable under B1's declared rules**, so 13 is a
-floor, not a target. The number can still go *up*, which is the property loop 033 wanted: a future
+string-literal value; the fourteenth is this loop's own `UNRESOLVED`. **Every one of them is
+unreachable under B1's declared rules**, so 14 is a floor, not a target. The number can still go *up*, which is the property loop 033 wanted: a future
 heading naming an identifier the index cannot see raises it, and that is a signal.
 
 This is worth stating plainly because the intent implied the opposite — that the count "cannot go
@@ -291,9 +305,11 @@ export function indexScripts(packageJsonText: string, corpus: readonly string[])
 ## Backward compatibility
 
 - `bun run verify` still exits 0. The finding set is unchanged: exactly one, loop 030's.
-- `sdlc/fence-baseline.json` swaps `unresolvedTokens: 25` for `unresolvedSymbols: 13` in the same
+- `sdlc/fence-baseline.json` swaps `unresolvedTokens: 25` for `unresolvedSymbols: 14` in the same
   commit as the code, as the both-directions comparison requires.
-- No committed `spec.md` or `plan.md` is edited.
+- No committed `spec.md` or `plan.md` is edited **except this one**, at Stage 5, for the correction
+  recorded in *A note on this spec's own headings*. The plan's fence was amended to name it rather
+  than the edit being left unfenced — the same correction loop 034's plan made after its own audit.
 - **`scripts/fence-check.test.ts` must change**, so it is inside the fence:
   - *"matches the committed baseline"* (`the live tree`) accumulates `res.unresolved.length` and
     asserts it equals `baseline.unresolvedTokens`. Both the field and the key move.
@@ -319,9 +335,12 @@ export function indexScripts(packageJsonText: string, corpus: readonly string[])
       no token appears in both arrays; and `unresolved.length === baseline.unresolvedSymbols`.
       Stated as an invariant deliberately — loops 033, 034 and this spec's own first draft each
       hardcoded a token count and each got it wrong, because the loop's own artifacts join the
-      corpus the moment its `plan.md` lands. The *measured* split at this commit is 9/13; the
-      implementation commit records whatever the tree then holds, and A3 is what proves the two
-      agree.
+      corpus the moment its `plan.md` lands. The *measured* split after this loop's own artifacts
+      land is 9/14; the implementation commit records whatever the tree then holds, and A3 is what
+      proves the two agree. Note the sum clause is structural rather than checkable — `checkLoop`
+      pushes each failed token into exactly one array, so what the test can actually assert is
+      disjointness, no duplicates, and a classification round-trip. Recorded after the Stage 5 audit
+      called the sum tautological, which it is.
 - [ ] **A4** — the finding set is **unchanged**: exactly one, loop 030's. This is the criterion that
       catches Rules 3 and 4, or the classifier, leaking into resolution.
 - [ ] **A5** — a fixture loop whose headings name only flags and env vars adds to `notASymbol` and
@@ -388,7 +407,7 @@ with a smaller sample.
 **Keep one number and subtract the noise by hand each loop.** That is the current state with extra
 steps.
 
-**Drop the number entirely.** The remaining 13 are identifier-shaped tokens the index does not know,
+**Drop the number entirely.** The remaining 14 are identifier-shaped tokens the index does not know,
 which is the fact loop 033 wanted visible. Deleting the number because part of it was noise would
 discard the signal with it.
 
@@ -405,7 +424,7 @@ Recorded rather than silently patched, per loops 033 and 034.
 | B-2 | A3 asserts constants over "the committed tree" | Ignored that loop 035's own `spec.md` joins the corpus the moment its `plan.md` is committed — the third consecutive loop to make this mistake. Note that this spec's own heading token `UNRESOLVED` would have classified as not-a-symbol under the draft's env-var rule, which is what prompted the underscore narrowing. |
 | B-3 | "the gate stops firing for reasons that carry no information" | False for the motivating loop: loop 034 would still have moved the number by 1, via `verify`. Rule 3 was measured in response and takes it to 0. |
 | M-1 | `MetricEvent.payload` dismissed on the Rule-2 measurement | That measurement contains no dotted tokens. Measured separately: Rule 4 resolves it against the *existing* index, 0 findings, 0 false positives. Adopted. |
-| M-2 | silent on whether 13 can fall further | It cannot. The thirteen are enumerated above with the reason each is unreachable. |
+| M-2 | silent on whether the number can fall further | It cannot. They are enumerated above with the reason each is unreachable. |
 | M-3 | shape rules unspecified as to raw vs `bareSymbol` | Now `bareSymbol` throughout, stated, with the measured note that today's split is the same either way. |
 | M-4 | "TypeScript's reserved set … eight words" | `any` is not reserved; the set is 55 entries from two sources, now enumerated. |
 | M-5 | A7 asserts `notASymbol` absent via `parseBaseline` | Vacuous — `parseBaseline`'s return type cannot contain it. Now raw `JSON.parse`, and it also checks the old key is gone. |

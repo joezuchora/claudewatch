@@ -7,14 +7,17 @@
 
 ## Scope fence
 
-Three paths. This is the smallest fence any loop has had, and that is the point: the spec declined
-the intent's index widening, so nothing in `packages/` moves and no product code is touched.
+Four paths. **The fourth was added at Stage 5 after the plan-to-diff audit reported FENCE VIOLATED**
+— the same correction loop 034's plan made for the same reason. The first three are the point: the
+spec declined the intent's index widening, so nothing in `packages/` moves and no product code is
+touched.
 
 | Path | Change | Criterion |
 |---|---|---|
 | `scripts/fence-check.ts` | `indexScripts`, `classifyToken`, `TokenClass`; `resolveSymbol`'s two fallbacks; `checkLoop`'s sixth parameter and split return; `Baseline.unresolvedSymbols`; `parseBaseline`, `compareToBaseline`, `main`; the `HEADING` docstring | A2–A10, A12 |
 | `scripts/fence-check.test.ts` | six classifier tests, the two resolution-rule suites, the invariant, and the four sites the rename breaks | A2–A10 |
-| `sdlc/fence-baseline.json` | `unresolvedTokens: 25` → `unresolvedSymbols: 13` | A3, A9 |
+| `sdlc/fence-baseline.json` | `unresolvedTokens: 25` → `unresolvedSymbols: 14` | A3, A9 |
+| `sdlc/035-fence-signal/spec.md` | **added at Stage 5.** Four measurement headings rewritten to prose; `UNRESOLVED` restored to B3's; the disclosure corrected | A3, A12 |
 
 **Explicitly not touched:** `scripts/verify.ts`, `scripts/lint-budget.ts`, `scripts/spool-path.ts`,
 `scripts/junit.ts`, `scripts/env.ts`, `scripts/perf.ts`, `scripts/mock-topology.ts`,
@@ -27,11 +30,16 @@ the intent's index widening, so nothing in `packages/` moves and no product code
 
 > **`package.json` is deliberately absent from the fence, in both directions.** It is not changed —
 > `verify`, `perf`, `lintBudget` and `fenceCheck` are already declared there, which is exactly why
-> Rule 3 needs no manifest edit — but naming it on the negative fence would be a trap. `inFence`
-> matches a basename tail, so the entry `package.json` covers all five committed manifests, and this
-> spec's Rule-3 heading originally contained the backticked token. That heading is now prose (see the
-> spec's *A note on this spec's own headings*), so the trap is disarmed at the source rather than
-> worked around here.
+> Rule 3 needs no manifest edit. Naming it on the *negative* fence would still be a trap in principle:
+> `inFence` matches a basename tail, so the entry would cover all five committed manifests. Leaving it
+> off both sides does mean it is now a runtime input to the gate with no fence protection; recorded.
+>
+> **This paragraph originally also justified rewriting the spec's headings, and that justification was
+> wrong.** The audit established that `package.json` produced zero findings either way, because the
+> fence never named it — the trap existed only in a counterfactual. The rewrite's real effect was on
+> `name:` and `UNRESOLVED`, which have nothing to do with manifests, and it lowered the baselined
+> number from 15 to 13. `UNRESOLVED` has been restored and the number is **14**. The full correction
+> is in the spec's *A note on this spec's own headings*.
 
 **On `sdlc/README.md`:** Stage 6's retrospective lands in its own commit after `review.md`, as every
 prior loop's has, and is not in this fence.
@@ -131,16 +139,18 @@ tokens`, so a failure line cannot be confused with a pre-rename one in a CI log.
 
 ### 6. `sdlc/fence-baseline.json`
 
-`"unresolvedTokens": 25` → `"unresolvedSymbols": 13`. `uncheckable` stays 13 and the one baselined
+`"unresolvedTokens": 25` → `"unresolvedSymbols": 14`. `uncheckable` stays 13 and the one baselined
 finding is untouched.
 
-**13 is measured, not chosen.** 25 unresolved today, minus 2 resolved by Rule 3 (`verify` in loops
-033 and 034), minus 1 by Rule 4 (`MetricEvent.payload`), minus 9 classified `not-a-symbol`.
+**14 is measured, not chosen.** 25 unresolved today, minus 2 resolved by Rule 3 (`verify` in loops
+033 and 034), minus 1 by Rule 4 (`MetricEvent.payload`), minus 9 classified `not-a-symbol`, plus 1
+for this loop's own `UNRESOLVED` heading token.
 
-**This loop's own artifacts contribute zero** — verified after the spec's heading rewrite: `spec.md`
-now yields no backticked heading tokens at all, and this `plan.md` is read only for its fence. That
-is why 13 can appear as a constant here at all, and A3 is still written as an invariant, because the
-next loop will not be so lucky.
+**This loop's own `spec.md` contributes exactly one**, and that is the correct outcome rather than an
+embarrassment: `UNRESOLVED` is a requirement heading naming an identifier-shaped thing the index does
+not know, which is the definition of the class. The claim in this plan's first version — that the
+loop contributes zero — was true only because the token had been rewritten away, which the Stage 5
+audit correctly called out. A3 stays an invariant for exactly this reason.
 
 ## Test mapping
 
