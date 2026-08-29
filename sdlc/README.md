@@ -1181,3 +1181,70 @@ is the correct behaviour and slightly uncomfortable to look at.
 collapses a 404, a 500, a TLS failure and a DNS failure into one indistinguishable `retained 1` line.
 On the NUC that count walks toward the 20-file drop threshold with no way to tell why. A loop 036
 candidate — and a reminder that exercising the thing finds what reading it does not.
+
+---
+
+## Loop 036 — a permanent shipping failure was invisible at every layer
+
+`ship()` collapsed a 404, a 500, a TLS failure and a DNS failure into one indistinguishable
+`retained 1`. Found by *running* the telemetry round trip by hand in loop 035's Stage 5, not by
+reading anything.
+
+**The loop that was supposed to make failure visible widened a credential leak.** C2 moved the prune
+after the delivery loop — a correct fix for one permanent data loss per outage, measured. It also
+removed the truncation that capped how many files were read per directory enumeration, turning loop
+034's remaining TOCTOU from a seconds-long race into a minutes-long one. The security pass then
+demonstrated it end to end: two regular files pass the `lstat` filter, the second is swapped for a
+symlink to `~/.claude/.credentials.json` while the first POST is in flight, and the OAuth token goes
+out in a body carrying the `Authorization` header.
+
+> **A guard placed at enumeration does not protect a read that happens later.** Loop 034 hardened
+> `pendingShippingFiles` and left the read by path, which looked complete because the attack it was
+> written against was blocked. The fix is to stop checking the name at all: `O_NOFOLLOW` at open,
+> `fstat` on the descriptor, ownership on the descriptor. A second `lstat` would only have been a
+> second racy check.
+
+Second consecutive loop where a correct-looking change opened a path to the credential file, and
+second where only the security pass caught it. The pattern is not carelessness about credentials —
+neither diff contained credential-handling code. It is that **both changes altered *when* something
+happens, and the invariant was about *when*.**
+
+**Two entries in my own mutation record were false, and nothing caught them until Stage 5.** M3 was
+recorded correct against a test that does not exist, with the failure mode silently restated to
+match. M6 was recorded correct against a mutation that is a no-op on the shipped tree — run on an
+intermediate build whose test was later deleted.
+
+> **A mutation record is a claim like any other.** Loops 033–035 built the discipline of predicting
+> before running; this loop shows the record itself needs auditing. The predictions were checked
+> against what failed. Nothing checked that the test named in the prediction existed, or that the
+> mutation applied to the code being shipped.
+
+**An invariant the bug satisfies is not an invariant.** `failures.length === filesRetained` was
+chosen because it sounded strong. A prune failure incremented both sides together, so 21 files
+produced `filesRetained = 22` and the equality held throughout. The true relation is `>=`, and the
+weaker version catches what the stronger one could not.
+
+**Three tests could not fail, and mutation proved each.** The `DATA LOST` guard could be inverted so
+every clean run screamed data loss, with all nine tests green — the line writes to stderr and nothing
+read stderr. A duplication check was single-quote-specific and read one file. The prune's catch
+branch was executed by nothing at all.
+
+**One fix subsumed another, which is worth noticing rather than tidying away.** The review found the
+data-loss sentence false in a recovery case; the obvious remedy was a conditional. The prune reorder
+then made that case impossible, so the conditional's other branch was dead. Deleting it and replacing
+it with an asserted invariant is better than shipping a branch no test can reach — but only because
+the reorder was *measured*, not assumed.
+
+**Where declining was right and where it was over-general.** Indexing type members (loop 035) and a
+`source: 'product'` staleness bound both deserved declining. But the first draft declined *all*
+server-side staleness on the grounds that cadence is user behaviour — and `anomaly.ts` only ever
+consumes `verify_run`, whose cadence is a **timer**. The reviewer was right to reject the
+generalisation. `metrics:detect` still reports `healthy` on a store that stopped growing a year ago,
+and after this loop that is a deferral with its measurement named, not a claim that the question has
+no answer.
+
+**What this loop delivers, stated as narrowly as it deserves.** Diagnosis, not detection. A failing
+shipper now says why, in one line, on the machine. It remains invisible to `systemctl --failed`
+(deliberate) and to `metrics:detect` (deferred), and the only reader is a journal command this loop
+added to the runbook. That is less than the intent asked for, and the summary says so where a reader
+will see it rather than in a subordinate clause.
