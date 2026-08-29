@@ -21,7 +21,7 @@
  * routinely carry hostnames, proxy URLs and /home/<username>/ paths. Do not add a string
  * field to a payload unless it is constrained to a fixed set. See sdlc/003-metrics-telemetry.
  */
-import { appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, readFileSync } from 'fs';
+import { appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, readFileSync , lstatSync } from 'fs';
 import { join } from 'path';
 import { getCacheDir, getLegacyCacheDir } from './cache.js';
 import type { AccountTier, RuntimeState } from './types.js';
@@ -231,6 +231,22 @@ export function emit(config: TelemetryConfig, event: MetricEvent): void {
       }
     } catch {
       // Absent spool is fine — this is the first append.
+    }
+
+    // Never append THROUGH a symlink. `appendFileSync` follows one, so a spool symlinked at an
+    // attacker-writable path would have telemetry written into whatever it points at — sdlc/034's
+    // security pass demonstrated a JSON event landing in an unrelated file that way.
+    //
+    // Reachable only since sdlc/034 made `$XDG_CACHE_HOME` decide this directory; before that it
+    // was always inside `$HOME`. Dropping the event is the right failure: recording a metric must
+    // never be the reason something else gets written.
+    try {
+      if (!lstatSync(path).isFile()) {
+        recordDrop();
+        return;
+      }
+    } catch {
+      // Absent is fine — the append below creates it.
     }
 
     appendFileSync(path, line, { mode: 0o600 });

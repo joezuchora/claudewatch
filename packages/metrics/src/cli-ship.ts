@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 /** Ship spooled product telemetry to the metrics service. Run from a timer, or by verify. */
+import { basename, dirname } from 'path';
+import { realpathSync } from 'fs';
 import { combineResults, ship, shouldDrainLegacy } from './agent.js';
 import { getLegacySpoolPath, getSpoolPath } from '@claudewatch/core';
 
@@ -8,6 +10,16 @@ if (!endpoint) {
   // Not an error: the overwhelmingly common case is telemetry simply not being configured.
   console.log('CLAUDEWATCH_METRICS_ENDPOINT not set — nothing to do.');
   process.exit(0);
+}
+
+/** Resolves symlinks where it can; falls back to a string compare when a path does not exist. */
+function sameFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    return realpathSync(dirname(a)) === realpathSync(dirname(b)) && basename(a) === basename(b);
+  } catch {
+    return false;
+  }
 }
 
 const token = process.env.CLAUDEWATCH_METRICS_TOKEN ?? null;
@@ -24,14 +36,18 @@ const primary = await ship({ spoolPath, endpoint, token });
 const legacyPath = getLegacySpoolPath();
 let result = primary;
 let drained = false;
-if (legacyPath !== spoolPath && shouldDrainLegacy(legacyPath)) {
+// realpath, not a string compare. Two different strings can name the same file — sdlc/034's
+// security pass set XDG_CACHE_HOME to a symlink resolving to $HOME/.cache and watched the same
+// event POST twice in one run. `ship()` is at-least-once so a duplicate is tolerable, but shipping
+// a file twice in a single invocation is a bug, not a retry.
+if (!sameFile(legacyPath, spoolPath) && shouldDrainLegacy(legacyPath)) {
   drained = true;
   result = combineResults(primary, await ship({ spoolPath: legacyPath, endpoint, token }));
 }
 
 console.log(
   `shipped ${result.shipped} events from ${result.filesShipped} file(s)` +
-  `${drained ? ` (including a legacy spool at ${legacyPath})` : ''}; ` +
+  `${drained ? ' (including a legacy spool)' : ''}; ` +
   `retained ${result.filesRetained}, dropped ${result.filesDropped}, ` +
   `skipped ${result.skippedUnparseable} unparseable line(s)`,
 );

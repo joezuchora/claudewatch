@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, statSync, mkdtempSync, rmSync, symlinkSync, lstatSync } from 'fs';
 import { join } from 'path';
+import { tmpdir } from 'os';
 import {
   emit, makeEvent, getSpoolPath, getSpoolStatePath, getLegacySpoolPath, readSpoolState, clearSpoolState,
   fetchResultEvent, cacheEvent, renderEvent, schemaDriftEvent,
@@ -179,5 +180,38 @@ describe('spool paths follow XDG_CACHE_HOME (sdlc/034)', () => {
     setCacheBaseDir(null);
     delete process.env.XDG_CACHE_HOME;
     expect(getLegacySpoolPath()).toBe(getSpoolPath());
+  });
+});
+
+/**
+ * sdlc/034 security pass, F2 — never append THROUGH a symlink.
+ *
+ * `appendFileSync` follows one. Before this loop the spool was always inside `$HOME`; honouring
+ * `$XDG_CACHE_HOME` made the directory arbitrary, and the reviewer watched a JSON event land in an
+ * unrelated file that way. Dropping the event is the right failure: recording a metric must never
+ * be the reason something else gets written.
+ */
+describe('the spool is never appended through a symlink (sdlc/034 F2)', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cw-spool-link-')); setCacheBaseDir(dir); });
+  afterEach(() => { setCacheBaseDir(null); rmSync(dir, { recursive: true, force: true }); });
+
+  test('an event appended to a symlinked spool does not reach the target', () => {
+    const victim = join(dir, 'victim.txt');
+    writeFileSync(victim, 'original\n');
+    symlinkSync(victim, getSpoolPath());
+
+    // Positive precondition: the link is in place and resolves to the victim.
+    expect(lstatSync(getSpoolPath()).isSymbolicLink()).toBe(true);
+
+    emit(ON, makeEvent('product', 'render', true, 1, {}));
+
+    expect(readFileSync(victim, 'utf-8')).toBe('original\n');
+  });
+
+  test('a regular spool still receives the event — the guard is not a blanket refusal', () => {
+    emit(ON, makeEvent('product', 'render', true, 1, {}));
+    expect(existsSync(getSpoolPath())).toBe(true);
+    expect(readFileSync(getSpoolPath(), 'utf-8')).toContain('render');
   });
 });

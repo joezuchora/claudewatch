@@ -37,12 +37,6 @@
   },
   {
     "code": "unicorn(no-array-sort)",
-    "filename": "packages/metrics/src/agent.ts",
-    "message": "Use `Array#toSorted()` instead of `Array#sort()`.",
-    "count": 1
-  },
-  {
-    "code": "unicorn(no-array-sort)",
     "filename": "packages/metrics/src/anomaly.ts",
     "message": "Use `Array#toSorted()` instead of `Array#sort()`.",
     "count": 2

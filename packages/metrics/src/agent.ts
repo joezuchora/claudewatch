@@ -8,7 +8,7 @@
  * Guarantee: at-least-once for events that reach the spool. Events may still be dropped at
  * the spool cap or on filesystem error; both are counted in the sidecar.
  */
-import { readdirSync, readFileSync, renameSync, rmSync, existsSync, statSync } from 'fs';
+import { readdirSync, readFileSync, renameSync, rmSync, existsSync, statSync, lstatSync } from 'fs';
 import { dirname, join, basename } from 'path';
 
 export const MAX_RETAINED_SHIPPING_FILES = 20;
@@ -34,8 +34,33 @@ function shippingSuffix(): string {
 }
 
 /** Rename the live spool aside so emitters immediately start a fresh one. */
+/**
+ * A spool file is only ever a REGULAR file. Never a symlink.
+ *
+ * `lstat`, not `stat`, so the link itself is inspected rather than its target — the same guard
+ * `credentials.ts:15` already applies to the credential file, for the same reason.
+ *
+ * This became load-bearing in sdlc/034. Before it, the spool directory was always
+ * `~/.cache/claudewatch`, created 0700 by this tool, so only its owner could put a file there.
+ * Honouring `$XDG_CACHE_HOME` made the directory an arbitrary absolute path — possibly one another
+ * local user owns or can create in. sdlc/034's security pass then demonstrated the consequence end
+ * to end: a planted `metrics-spool.jsonl.<n>.shipping` symlinked to `~/.claude/.credentials.json`
+ * was read and POSTed to the configured endpoint, putting the OAuth access token on the wire. The
+ * shipper never touches token-handling code; the token arrived as file contents.
+ */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export function rotate(spoolPath: string, stamp: number): string | null {
   if (!existsSync(spoolPath)) return null;
+  // Refuse to rotate anything that is not a regular file: renaming a symlink would carry it into
+  // the pending set under a name the filter accepts.
+  if (!isRegularFile(spoolPath)) return null;
   try {
     if (statSync(spoolPath).size === 0) return null;
   } catch {
@@ -52,8 +77,13 @@ export function pendingShippingFiles(spoolPath: string): string[] {
   try {
     return readdirSync(dir)
       .filter((f) => f.startsWith(prefix) && f.endsWith(shippingSuffix()))
-      .sort()
-      .map((f) => join(dir, f));
+      .toSorted()
+      .map((f) => join(dir, f))
+      // The guard that stops a planted symlink being read and shipped. Applied HERE rather than at
+      // the read site so that every consumer of this list inherits it — `shouldDrainLegacy` counts
+      // these files, and a count that includes a symlink would drain a directory that holds nothing
+      // shippable.
+      .filter(isRegularFile);
   } catch {
     return [];
   }

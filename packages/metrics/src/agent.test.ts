@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync, existsSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, existsSync, readFileSync, symlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { ship, rotate, pendingShippingFiles, shouldDrainLegacy, combineResults, MAX_RETAINED_SHIPPING_FILES } from './agent.js';
@@ -156,5 +156,61 @@ describe('combineResults (sdlc/034)', () => {
     // forever while a failing legacy drain accumulates toward the 20-file drop.
     expect(a.filesRetained).toBe(0);                       // positive precondition
     expect(combineResults(a, b).filesRetained).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * sdlc/034 security pass, F1 — a planted symlink must never be read or shipped.
+ *
+ * Reachability is what this loop introduced. Before honouring `$XDG_CACHE_HOME` the spool directory
+ * was always `~/.cache/claudewatch`, created 0700, so only its owner could put a file there. An
+ * arbitrary absolute path can be a directory another local user owns or can create in — and the
+ * reviewer demonstrated the consequence end to end: a `.shipping` file symlinked to
+ * `~/.claude/.credentials.json` was read and POSTed, putting the OAuth access token on the wire.
+ *
+ * The shipper never touches token-handling code. The token arrived as file contents, which is why
+ * the guard belongs on file SELECTION rather than anywhere near a token.
+ */
+describe('pendingShippingFiles refuses non-regular files (sdlc/034 F1)', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cw-symlink-')); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  test('a regular .shipping file is selected', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    writeFileSync(`${spool}.1.shipping`, '{"a":1}\n');
+    expect(pendingShippingFiles(spool)).toHaveLength(1);
+  });
+
+  test('a SYMLINK named like a .shipping file is NOT selected', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    const secret = join(dir, 'secret.json');
+    writeFileSync(secret, '{"accessToken":"sk-ant-oat01-NOT-REAL"}\n');
+    symlinkSync(secret, `${spool}.1.shipping`);
+
+    // Positive precondition: the name really does match the filter, and the target really is
+    // readable — so exclusion is the guard working, not the fixture failing.
+    expect(existsSync(`${spool}.1.shipping`)).toBe(true);
+    expect(readFileSync(`${spool}.1.shipping`, 'utf-8')).toContain('sk-ant-oat01');
+
+    expect(pendingShippingFiles(spool)).toEqual([]);
+  });
+
+  test('a symlinked spool is not rotated into the pending set', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    const secret = join(dir, 'secret.json');
+    writeFileSync(secret, '{"accessToken":"sk-ant-oat01-NOT-REAL"}\n');
+    symlinkSync(secret, spool);
+
+    expect(existsSync(spool)).toBe(true);          // positive precondition
+    expect(rotate(spool, 1_700_000_000_000)).toBeNull();
+    expect(pendingShippingFiles(spool)).toEqual([]);
+  });
+
+  test('shouldDrainLegacy is false for a directory holding only a symlink', () => {
+    const spool = join(dir, 'metrics-spool.jsonl');
+    writeFileSync(join(dir, 'secret.json'), 'x\n');
+    symlinkSync(join(dir, 'secret.json'), `${spool}.1.shipping`);
+    expect(shouldDrainLegacy(spool)).toBe(false);
   });
 });
