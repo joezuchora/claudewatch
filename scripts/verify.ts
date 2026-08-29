@@ -51,6 +51,9 @@ const STEPS: Array<{ name: string; cmd: string[]; junit?: boolean }> = [
   // repo-relative path cannot be stubbed and the four sandbox cases went red.
   { name: 'lintBudget', cmd: ['bun', 'run', 'lintBudget'] },
   { name: 'fenceCheck', cmd: ['bun', 'run', 'fenceCheck'] },
+  // Keeps the ONE shared vscode stub covering what packages/vscode/src actually uses. Package
+  // script, not a path, for the same reason as the two above. (sdlc/039)
+  { name: 'vscodeStubCover', cmd: ['bun', 'run', 'vscodeStubCover'] },
   // `junit: true` makes runStep append --reporter=junit --reporter-outfile=<temp>. The report
   // names WHICH test failed; before sdlc/020 the spool recorded only that this step did.
   { name: 'test', cmd: ['bun', 'test'], junit: true },

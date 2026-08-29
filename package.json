@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "lintBudget": "bun run scripts/lint-budget.ts",
     "fenceCheck": "bun run scripts/fence-check.ts",
+    "vscodeStubCover": "bun run scripts/vscode-stub-cover.ts",
     "test": "bun test",
     "build": "bun run --filter @claudewatch/core build && bun run --filter @claudewatch/statusline build && bun run --filter claudewatch-vscode build",
     "perf": "bun run scripts/perf.ts",
