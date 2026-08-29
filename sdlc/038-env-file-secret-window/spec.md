@@ -33,6 +33,27 @@ than depending on a `say` the caller may or may not have defined.
 
 ### What the function does
 
+0. **Refuse a symlink at the env-file path**, before deciding which branch to take. If
+   `[ -L "$env_file" ]`, print a message on stderr and return non-zero without creating,
+   writing, or chmodding anything.
+
+   This is not defensive garnish; it is required twice over, and one of the two is a hole this
+   change would otherwise *open*. Measured:
+
+   | Fact | Consequence |
+   |---|---|
+   | `[ -f ]` is **true** for a symlink to a regular file | The repair branch's `chmod 600` acts on the link's **target**. Measured: `chmod 600` through a link set a `0644` victim file to `0600`. That is an arbitrary-file chmod primitive that does not exist in today's script, because today's repair branch does nothing. |
+   | `[ -f ]` is **false** for a dangling symlink, `[ -L ]` is true | Today's script therefore takes the *create* branch and the redirect **follows the link and creates its target**. Measured: the write landed in the link's target path, token and all. This one is pre-existing. |
+
+   `REVIEW.md` Pass 2 already requires "symlink targets checked with `lstat` before write" as
+   standing policy. `[ -L ]` is `lstat` in shell; `[ -f ]` is `stat`, and the difference is the
+   whole finding.
+
+   The threat model is honest about its own limits: creating that symlink requires write access
+   to `~/.config/claudewatch`, which is `0700`-or-tighter and owned by the user, so an attacker
+   who can do it can usually do worse directly. The guard is cheap, the policy already demands
+   it, and the alternative is shipping a fix that adds a way to chmod any file on the box.
+
 1. `dir=$(dirname "$env_file")`; `mkdir -p "$dir"` under the **ambient** umask, then
    `chmod 700 "$dir"`.
 
@@ -63,7 +84,25 @@ than depending on a `say` the caller may or may not have defined.
 Generation is unchanged: `head -c 48 /dev/urandom | base64 | tr -d '/+=' | head -c 48`. It is
 assigned to a function-local variable inside the subshell that writes it, so it is not exported,
 not passed as an argument to any command, and not in the environment of anything the installer
-runs later. It is written to the file and nowhere else. `SPEC.md §12` — no access token in
+runs later. It is written to the file and nowhere else.
+
+Two shell mechanics govern how it must be written, both measured rather than assumed:
+
+- **`local` swallows `set -e`.** In `bash`, `local TOKEN="$(cmd)"` takes its exit status from
+  `local`, not from `cmd`, so a failing generator is silently ignored; a plain
+  `TOKEN="$(cmd)"` aborts under `set -e` as intended. Measured both ways. The extraction into
+  a function is exactly what introduces this risk — the current inline code is a plain
+  assignment and is safe — so the function must declare and assign on separate lines:
+  `local TOKEN; TOKEN="$(...)"`. An implementation that writes the one-liner has quietly
+  removed an existing protection while appearing to preserve the code.
+- **The generator pipeline is safe only because 48 is small.** `... | tr -d '/+=' | head -c 48`
+  ends in a `head` that closes the pipe; under `pipefail` a `SIGPIPE` in `tr` would fail the
+  pipeline and, under `set -e`, abort the installer. Measured: 0 failures in 300 runs at the
+  real 48-byte input, and 20 failures in 20 runs when the input is raised to 100000 bytes. The
+  current size is safe and stays unchanged, but the margin is a property of the constant, not
+  of the code, so it gets a comment saying so. Raising 48 for "more entropy" would make the
+  installer fail intermittently, which is precisely the kind of change that looks obviously
+  safe. `SPEC.md §12` — no access token in
 logs, cache files, debug output, or process arguments — governs; this change amends nothing in
 that section, it brings a file that was already covered by its intent into compliance with it.
 
@@ -77,6 +116,11 @@ previously printed the misleading `kept existing`.
 ## Data and types
 
 No TypeScript types change. Nothing is added to any package's public surface.
+
+Reading a file's mode uses GNU `stat -c '%a'`. That is not portable to BSD/macOS `stat -f`,
+and it does not need to be: the script's own preflight requires `systemd`, and it already
+depends on GNU-only `grep -oP` at its final line. The dependency is pre-existing and is
+recorded here so it is a decision rather than an accident.
 
 The shell contract is the only new interface, and it is positional:
 
@@ -104,6 +148,11 @@ missing optional fields are omitted, not guessed.
 | `lan=1` | Output contains no occurrence of the token that was written to the file, on stdout or stderr |
 | `lan=0` | No `CLAUDEWATCH_METRICS_TOKEN` and no `CLAUDEWATCH_METRICS_HOST` line is written at all |
 | `lan` is `""`, `2`, or `yes` | Treated as loopback-only; no token generated |
+| Env file path is a symlink to a regular file | Non-zero exit, message on stderr; the link's target is **not** chmodded and **not** written |
+| Env file path is a dangling symlink | Non-zero exit; the target path is **not** created |
+| Env file path is a symlink to a directory | Same refusal; caught by the same `[ -L ]` check before any branch |
+| Env file path exists but is a directory | Non-zero exit rather than a confusing redirect failure |
+| Token generator fails | Non-zero exit propagates; no partial file is left behind |
 | `$1` empty or missing | Non-zero exit, message on stderr, no file created anywhere |
 | Library sourced but no function called | Nothing created, nothing printed |
 
@@ -116,9 +165,14 @@ missing optional fields are omitted, not guessed.
   not change. `--lan` and `--help` behave as before.
 - **The systemd units** read the env file by path; neither the path nor the variable names
   change.
-- **`deploy/README.md`** documents the flags, not the file's permissions, so it needs no edit;
-  if that turns out to be wrong when the plan reads it, the plan says so rather than the
-  implementation quietly widening.
+- **`deploy/README.md`** — the draft of this spec asserted it "documents the flags, not the
+  file's permissions". That was wrong, and checking rather than assuming is what caught it.
+  Line 64 reads: *"Secrets live in `~/.config/claudewatch/metrics.env` (mode `0600`), never in
+  the unit files, which are world-readable."* The README already states the invariant this
+  change enforces. It therefore needs **no edit** — but for the opposite reason to the one
+  given: not because it is silent, but because this change is what finally makes it true. The
+  document was accurate about the intent and inaccurate about the artifact, on both the
+  creation window and the repair branch that never repaired anything.
 
 This change is not breaking.
 
@@ -163,6 +217,19 @@ This change is not breaking.
 - [ ] **A13 — no real `$HOME` is touched.** Every test operates under a `mktemp -d` sandbox
       passed as an explicit path; none reads or writes `$HOME`, `~/.config`, or
       `~/.local/share`. Verified by reading the test file in Stage 5 review.
+- [ ] **A15 — a symlinked env path is refused on the repair branch.** Pre-create a regular
+      file at `0644` and a symlink to it at the env path; run; assert non-zero exit, a message
+      on stderr, and that the victim's mode is **still `0644`**. Verified by `bun test`. This
+      criterion fails against a fix that adds the repair branch without the `[ -L ]` guard —
+      i.e. against the most likely implementation of this very spec.
+- [ ] **A16 — a dangling symlink is refused on the create branch.** Symlink the env path at a
+      non-existent target; run; assert non-zero exit and that the target path was **not**
+      created. Verified by `bun test`. This one fails against the *current* script too, which
+      writes the token through the link.
+- [ ] **A17 — `set -e` is not masked by `local`.** With a stubbed generator forced to fail, the
+      function exits non-zero and leaves no env file. Verified by `bun test`. Written because
+      the natural one-line `local TOKEN="$(...)"` passes every other criterion here while
+      silently discarding the failure.
 - [ ] **A14 — the gate is green.** `bun run verify` exits 0, and the `oxlint` warning set is
       unchanged against `.oxlint-budget.json`.
 
@@ -190,11 +257,28 @@ This change is not breaking.
 - **Port the fix to the Windows and macOS install paths too.** Out of scope per `intent.md`:
   POSIX modes do not carry over, and neither script generates a token, so there is no secret
   to expose.
+- **Resolve the symlink and operate on its target instead of refusing.** It sounds
+  accommodating and it is the wrong call: the whole reason the path is checked is that the
+  target is not necessarily a file this tool should be writing a secret into or chmodding.
+  Following it "helpfully" is the vulnerability, not the mitigation. Refusing costs an
+  operator who deliberately symlinked their env file one manual step, and tells them why.
 - **Regenerate the token when tightening a loose file.** A file that was world-readable may
   have been read, so rotation is arguably the safer default. Rejected because a script that
   silently invalidates a working credential during what the user asked to be an idempotent
   re-run causes an outage to fix a hypothetical. `intent.md` puts rotation out of scope and
   leaves the decision with the operator.
+
+## Adjacent finding, recorded and not fixed here
+
+`deploy/README.md:166` states the metrics store is *"(SQLite, WAL, mode `0600`)"*. Measured on
+this host: `metrics.db` is **`644`**. The exposure is nil today because its directory is `700`
+(measured), which is exactly the asymmetry that makes the env file the urgent one — that file
+sits in a `0755` config directory instead. But a shipped document asserting a file mode the
+code does not set is the same defect class as the one this loop is fixing, one directory over.
+
+Not fixed here: the remedy lives in `packages/metrics/src/store.ts`, well outside this fence,
+and the choice between tightening the file and correcting the sentence is a real decision
+rather than a typo. It goes on the queue.
 
 ---
 
