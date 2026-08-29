@@ -71,13 +71,19 @@ describe('cli-ship prints why, not just how many (sdlc/036 A4)', () => {
     expect(code).toBe(0);
   });
 
-  test('a clean run prints no reason line and no backlog line', async () => {
+  test('a clean run prints no reason line, no backlog line, and no data-loss line', async () => {
     // Positive precondition for the two above: the lines are absent because nothing failed, not
     // because they are never printed.
-    const { code, out } = await run({ CLAUDEWATCH_METRICS_ENDPOINT: 'http://127.0.0.1:9187' });
+    //
+    // The `err` assertion was MISSING until sdlc/036's Stage 5 audit, and the gap was mutation-proven:
+    // changing `if (result.filesDropped > 0)` to `>= 0` in cli-ship.ts — so every clean run screams
+    // DATA LOST — left all nine tests in this file green. DATA LOST goes to stderr, and nothing here
+    // read stderr.
+    const { code, out, err } = await run({ CLAUDEWATCH_METRICS_ENDPOINT: 'http://127.0.0.1:9187' });
     expect(out).toContain('shipped 0 events');
     expect(out).not.toContain('retained:');
     expect(out).not.toContain('backlog:');
+    expect(err).not.toContain('DATA LOST');
     expect(code).toBe(0);
   });
 
@@ -118,20 +124,23 @@ describe('no configured secret reaches any output (sdlc/036 A12)', () => {
    */
   const ENDPOINT = `https://${USER}:${PASS}@127.0.0.1:9187/${PATHSENT}`;
 
-  const cases: Array<[label: string, seed: () => void]> = [
-    ['a clean run', () => {}],
-    ['a transport failure', () => writeFileSync(spool(), EVENT)],
+  const cases: Array<[label: string, seed: () => void, precondition: string]> = [
+    // The clean case genuinely cannot reach the endpoint — there is nothing to send — so its
+    // precondition is the shape that proves the run completed with the sentinel-bearing config
+    // rather than bailing out early.
+    ['a clean run', () => {}, 'shipped 0 events from 0 file(s)'],
+    ['a transport failure', () => writeFileSync(spool(), EVENT), 'retained: Network error'],
     ['a retained backlog', () => {
       writeFileSync(spool(), EVENT);
       for (let i = 1; i <= 3; i++) writeFileSync(`${spool()}.${i}.shipping`, EVENT);
-    }],
+    }, 'backlog: 4 file(s)'],
     ['a drop at the cap', () => {
       for (let i = 1; i <= 25; i++) writeFileSync(`${spool()}.${i}.shipping`, EVENT);
-    }],
-    ['an unparseable spool', () => writeFileSync(spool(), 'not json at all\n')],
+    }, 'DATA LOST'],
+    ['an unparseable spool', () => writeFileSync(spool(), 'not json at all\n'), 'skipped 1 unparseable'],
   ];
 
-  for (const [label, seed] of cases) {
+  for (const [label, seed, precondition] of cases) {
     test(`${label} leaks neither credential, host, nor an absolute path`, async () => {
       seed();
       const { out, err } = await run({
@@ -139,11 +148,13 @@ describe('no configured secret reaches any output (sdlc/036 A12)', () => {
         CLAUDEWATCH_METRICS_TOKEN: TOKEN,
       });
       const all = `${out}${err}`;
-      // Positive precondition: the child ran with the configured endpoint and got far enough to
-      // report on it. Without this, an empty output or an early exit would pass every assertion
-      // below — the vacuous shape sdlc/033 and sdlc/035 both caught.
+      // Positive precondition. `toContain('shipped ')` alone was too weak — the Stage 5 audit
+      // pointed out it is satisfied by the first line of ANY completed run, so the `a clean run`
+      // case passed without the endpoint or token ever being used. Each case now asserts the
+      // OUTPUT SHAPE its seed produces, which cannot happen unless the run really took that path.
       expect(all).toContain('shipped ');
       expect(all).not.toContain('not set');
+      expect(all).toContain(precondition);
 
       for (const secret of [USER, PASS, TOKEN, PATHSENT]) {
         expect(all).not.toContain(secret);

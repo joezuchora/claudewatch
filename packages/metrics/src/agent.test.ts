@@ -1,11 +1,11 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, existsSync, readFileSync, symlinkSync } from 'fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync, appendFileSync, existsSync, readFileSync, symlinkSync } from 'fs';
 import { readFileSync as realReadFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   ship, rotate, pendingShippingFiles, shouldDrainLegacy, combineResults, spoolErrno, stampOf,
-  describeFailure, dropCanOnlyHappenAtTheCap, formatAge, summariseFailures,
+  describeFailure, dropCanOnlyHappenAtTheCap, everyRetainedFileHasAReason, formatAge, summariseFailures,
   MAX_RETAINED_SHIPPING_FILES,
 } from './agent.js';
 import type { ShipResult } from './types.js';
@@ -225,8 +225,9 @@ describe('agent: shipping', () => {
     for (const { label, opts } of runs) {
       writeFileSync(spool, line(1));
       const r = await ship({ spoolPath: spool, endpoint: 'http://x', now: () => Math.random(), ...opts });
-      expect(`${label}:${r.failures.length}`).toBe(`${label}:${r.filesRetained}`);
+      expect(`${label}:${everyRetainedFileHasAReason(r)}`).toBe(`${label}:true`);
       expect(r.filesRetained).toBeGreaterThan(0);   // positive precondition: each path DID fail
+      expect(r.failures.length).toBeGreaterThan(0);
       rmSync(`${spool}`, { force: true });
       for (const f of pendingShippingFiles(spool)) rmSync(f, { force: true });
     }
@@ -236,6 +237,32 @@ describe('agent: shipping', () => {
     expect(stampOf('/a/b/metrics-spool.jsonl.1234.shipping')).toBe(1234);
     expect(stampOf('/a/b/metrics-spool.jsonl.shipping')).toBeNull();
     expect(stampOf('/a/b/metrics-spool.jsonl.abc.shipping')).toBeNull();
+  });
+
+  test('a prune failure records a reason without double-counting the file (Stage 5 audit)', async () => {
+    // Twenty-one files that all 404, plus a prune that throws. Before the fix `filesRetained` was
+    // 22 for 21 files, and `failures.length === filesRetained` did NOT catch it because the buggy
+    // code incremented both together — which is why the invariant is now `>=`.
+    const ev = line(1);
+    for (let i = 1; i <= 21; i++) writeFileSync(`${spool}.${i}.shipping`, ev);
+    let calls = 0;
+    const oneBadRm = ((p: string, o?: object) => {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error('x'), { code: 'EPERM' });
+      return rmSync(p, o as Parameters<typeof rmSync>[1]);
+    }) as unknown as typeof rmSync;
+    const r = await ship({ spoolPath: spool, endpoint: 'http://x', fetchImpl: failFetch, now: () => 1, rmImpl: oneBadRm });
+    expect(r.filesRetained).toBe(21);
+    expect(r.failures).toHaveLength(22);            // 21 HTTP + 1 prune
+    expect(everyRetainedFileHasAReason(r)).toBe(true);
+    expect(r.failures.filter((f) => f.kind === 'spool' && f.op === 'prune')).toHaveLength(1);
+  });
+
+  test('the reason invariant is falsifiable', () => {
+    // Positive precondition: `>=` must still reject a result with fewer reasons than retained files,
+    // or it is satisfied by everything and catches nothing.
+    expect(everyRetainedFileHasAReason({ failures: [], filesRetained: 1 })).toBe(false);
+    expect(everyRetainedFileHasAReason({ failures: [{ kind: 'http', status: 500 }], filesRetained: 2 })).toBe(false);
   });
 
   test('a drop can only happen at the cap, which is what lets the loss message be unconditional', async () => {
@@ -513,13 +540,24 @@ describe('describeFailure and summariseFailures (sdlc/036 A13, B6)', () => {
  * for want of this check.
  */
 describe('the transport mapping is declared once (sdlc/036 A5)', () => {
-  test('agent.ts contains no classification table of its own', () => {
-    const src = realReadFileSync(new URL('./agent.ts', import.meta.url), 'utf8');
+  test('no file in packages/metrics declares a transport message of its own', () => {
+    const agent = realReadFileSync(new URL('./agent.ts', import.meta.url), 'utf8');
     // Positive precondition: we are reading the right file and it does use the shared mapping.
-    expect(src).toContain("import { classifyFetchError } from '@claudewatch/core'");
-    expect(src).toContain('classifyFetchError(e, timedOut)');
-    // The regression: any local literal is a second table waiting to drift.
-    expect(src).not.toContain("'TLS verification failed'");
-    expect(src).not.toContain("'Request timed out'");
+    expect(agent).toContain("import { classifyFetchError } from '@claudewatch/core'");
+    expect(agent).toContain('classifyFetchError(e, timedOut)');
+
+    // WIDENED after sdlc/036's Stage 5 audit on two counts. It was single-quote-specific, so a
+    // double-quoted or template-literal copy passed; and it read agent.ts alone, so a second table
+    // in cli-ship.ts or anywhere else in the package was invisible. Both are exactly how a
+    // duplication check goes green while the duplication comes back.
+    const dir = new URL('.', import.meta.url).pathname;
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'));
+    expect(files.length).toBeGreaterThan(5);   // precondition: the scan found the package
+    for (const f of files) {
+      const src = realReadFileSync(join(dir, f), 'utf8');
+      // Quote-agnostic: the literal itself, however it is delimited.
+      expect(`${f}: ${src.includes('TLS verification failed')}`).toBe(`${f}: false`);
+      expect(`${f}: ${src.includes('Request timed out')}`).toBe(`${f}: false`);
+    }
   });
 });

@@ -118,9 +118,16 @@ if (result.filesDropped > 0) {
   // unreachable, and a branch no test can distinguish from its absence gets deleted rather than kept
   // as documentation (sdlc/035 M1). `dropCanOnlyHappenAtTheCap` asserts the implication, so this
   // sentence is backed by a check rather than by my reading of the ordering.
+  // States the backlog it MEASURED rather than asserting the cap. The Stage 5 audit found two ways
+  // the cap claim can be false while `filesDropped > 0`: `pendingShippingFiles` swallows a readdir
+  // error and returns `[]`, so a spool directory that vanishes mid-run reports `backlog: 0`; and
+  // `combineResults` sums two capped spools, which can report 40 above a sentence claiming 20. Both
+  // are narrow, and both are the same shape as the defect this loop exists to remove — a value that
+  // means "I could not tell" printed as if it meant "zero".
   console.error(
     `  DATA LOST: ${result.filesDropped} spool file(s) deleted, and they exist nowhere else. ` +
-    `The backlog is at the ${MAX_RETAINED_SHIPPING_FILES}-file cap, so every further run deletes one more.`,
+    `Backlog is now ${result.backlog} file(s); the cap is ${MAX_RETAINED_SHIPPING_FILES} per spool ` +
+    'and every run at the cap deletes the oldest.',
   );
 }
 // The COMBINED result. Exiting on `primary` alone would report success to systemd forever while a

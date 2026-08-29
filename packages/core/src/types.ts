@@ -157,6 +157,16 @@ export interface FetchSuccess {
  * called it, so a pre-029 cache file still printed free text. The check now runs where the value
  * enters the program, and this sentence is true.
  */
+export type SurfaceableMessage =
+  | 'Authentication failed (401)'
+  | 'Rate limited (429)'
+  | 'Network error'
+  | 'Request timed out'
+  | 'Malformed response'
+  | 'TLS verification failed'
+  | `Server error (${number})`
+  | `Unexpected status ${number}`;
+
 /**
  * The three members a THROWN fetch can produce, as opposed to an HTTP response.
  *
@@ -176,16 +186,6 @@ export type TransportMessage = Extract<
   SurfaceableMessage,
   'Network error' | 'TLS verification failed' | 'Request timed out'
 >;
-
-export type SurfaceableMessage =
-  | 'Authentication failed (401)'
-  | 'Rate limited (429)'
-  | 'Network error'
-  | 'Request timed out'
-  | 'Malformed response'
-  | 'TLS verification failed'
-  | `Server error (${number})`
-  | `Unexpected status ${number}`;
 
 export interface FetchFailure {
   ok: false;

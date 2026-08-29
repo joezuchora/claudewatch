@@ -255,6 +255,19 @@ export function dropCanOnlyHappenAtTheCap(r: Pick<ShipResult, 'filesDropped' | '
   return r.filesDropped === 0 || r.backlog >= MAX_RETAINED_SHIPPING_FILES;
 }
 
+/**
+ * The true invariant between `failures` and `filesRetained`.
+ *
+ * `>=`, not `===`. A prune failure records a reason for a file the delivery loop already counted, so
+ * reasons can legitimately outnumber retained files. The equality version shipped first and the
+ * Stage 5 audit showed it could not catch the double-count it was written to protect against —
+ * because the buggy code incremented both sides together. A weaker invariant that is TRUE beats a
+ * stronger one that is satisfied by the bug.
+ */
+export function everyRetainedFileHasAReason(r: Pick<ShipResult, 'failures' | 'filesRetained'>): boolean {
+  return r.failures.length >= r.filesRetained;
+}
+
 export async function ship(opts: ShipOptions): Promise<ShipResult> {
   const now = opts.now ?? Date.now;
   const doFetch = opts.fetchImpl ?? fetch;
@@ -364,7 +377,13 @@ export async function ship(opts: ShipOptions): Promise<ShipResult> {
       doRm(oldest, { force: true });
       result.filesDropped++;
     } catch (e) {
-      retain({ kind: 'spool', op: 'prune', code: spoolErrno(e) });
+      // `failures.push`, NOT `retain`. The prune only ever runs on files that survived the delivery
+      // loop, and every one of those was already counted by `retain` there — so incrementing
+      // `filesRetained` here counts the same file twice. sdlc/036's Stage 5 audit found it by
+      // constructing 21 files that all 404 plus one failed prune: `filesRetained = 22` for 21 files.
+      // `failures.length === filesRetained` did NOT catch it, because both were incremented
+      // together; the invariant is now the weaker, TRUE `>=`.
+      result.failures.push({ kind: 'spool', op: 'prune', code: spoolErrno(e) });
     }
   }
 
