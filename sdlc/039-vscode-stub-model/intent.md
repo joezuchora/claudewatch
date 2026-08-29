@@ -40,6 +40,55 @@ mechanism that the obvious experiment contradicts, and nothing in the repo settl
 right.** A future change to those stubs will be designed against whichever the author reads
 first.
 
+## Correction, Stage 2 — the model reproduces, and this intent had it wrong
+
+**The per-key composite is real.** I read the comment properly, took its own falsifiable claim,
+and ran it: delete `env` from `statusbar.test.ts`'s stub, run the whole package.
+
+| Predicted by the comment | Measured |
+|---|---|
+| "removing `env` -> 16 failures, the whole doRefresh suite" | **21 failures, every one of them in `extension.test.ts`** — the doRefresh suites, lifecycle, and showDiagnostics |
+
+A stub defined in `statusbar.test.ts` is load-bearing for tests in a different file. That is the
+composite, demonstrated. The count has drifted from 16 to 21 as tests were added since
+`sdlc/027`; the mechanism is exactly as described.
+
+**Why my probe disagreed, and why both results are right.** My two-file experiment had each file
+*mock and import the specifier itself, inside its own test body*. The repo's shape is different:
+the consumer is a **source module** (`extension.ts` imports `vscode`), which resolves once and
+keeps what it got. So:
+
+- a file that mocks and imports directly sees its own factory — what I measured;
+- a source module imported across files resolves once, and its binding is assembled per key from
+  whichever factories have run — what `sdlc/028` measured.
+
+One model, both observations. Neither result was wrong; my *framing* was.
+
+> This intent led with "a mechanism that the obvious experiment contradicts". It did not. I ran a
+> **different experiment** and treated the difference as a contradiction — the claim-made-by-reading
+> failure in mirror image, and on a docstring that turned out to be more carefully founded than my
+> summary of it. The original text stands below rather than being edited away, because getting this
+> wrong is part of what the loop found.
+
+**What survives, and it is better than what I started with.** Two things are now measured rather
+than suspected:
+
+1. **Nothing checks that the merged stub covers what the source actually needs.** Deleting one key
+   from one file silently breaks 21 tests in another. The stubs are a distributed, hand-maintained
+   contract with no verification and a failure mode that points at the wrong file.
+2. **A docstring in two files makes a claim the code does not support.** `statusbar.test.ts:82`
+   and `tooltip.test.ts:33` both say `window.showInformationMessage` and `window.showErrorMessage`
+   are "both reached from commands.ts". Measured: `commands.ts` reaches `showInformationMessage`,
+   `env.openExternal` and `Uri.parse`. **`showErrorMessage` appears nowhere in any source file** —
+   only in two stubs that define it and the two docstrings that claim it is needed.
+
+The value positions the source genuinely requires at runtime are: `window.createStatusBarItem`,
+`window.showInformationMessage`, `workspace.getConfiguration`, `workspace.onDidChangeConfiguration`,
+`commands.registerCommand`, `env.isTelemetryEnabled`, `env.openExternal`, `Uri.parse`,
+`StatusBarAlignment.Right`, and the constructors `MarkdownString` and `ThemeColor`.
+`ExtensionContext`, `StatusBarItem` and `Disposable` appear only in **type** positions and need no
+runtime value — a distinction any check has to make, or it will demand stubs for interfaces.
+
 ## Who is affected
 
 Nobody today: every test passes alone and together, and no assertion currently depends on the
