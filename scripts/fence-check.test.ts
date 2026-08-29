@@ -703,6 +703,7 @@ describe('indexScripts does not backtrack on adversarial manifest content', () =
       'upgrade-all:linux',
       'upgrade-all:windows',
       'verify',
+      'vscodeStubCover',
     ]);
   });
 

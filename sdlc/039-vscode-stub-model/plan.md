@@ -56,6 +56,7 @@ scripts/vscode-stub-cover.ts
 scripts/vscode-stub-cover.test.ts
 scripts/verify.ts
 scripts/env.test.ts
+scripts/fence-check.test.ts
 package.json
 .oxlint-budget.json
 sdlc/039-vscode-stub-model/intent.md
@@ -63,6 +64,19 @@ sdlc/039-vscode-stub-model/spec.md
 sdlc/039-vscode-stub-model/plan.md
 sdlc/039-vscode-stub-model/review.md
 ```
+
+**Fence amended in Stage 4, before the edits.** `scripts/fence-check.test.ts` was not on the
+first list and is now: it pins the exact set of root package scripts, and adding `vscodeStubCover`
+grows it. That is an inventory tracking the tree, not a behaviour change to the guard, and leaving
+it stale would turn the gate red for a reason unrelated to what it checks.
+
+`scripts/mock-topology.test.ts` was briefly amended in too, and then was not needed. Its pinned
+inventory of files that mock `vscode` grew because the new `scripts/vscode-stub-cover.test.ts`
+contained `mock.module('vscode', …)` inside its **fixture strings** — the topology scanner cannot
+tell a call from the same characters in a string literal, so it counted the file three times.
+Padding the inventory would have been recording a falsehood: that file mocks nothing. The fixtures
+are assembled from parts instead, the inventory is untouched, and the scanner's blind spot is a
+finding for the queue rather than something to weaken a guard over.
 
 `scripts/env.test.ts` is fenced because `verify`'s sandbox stubs every step **by script name**;
 adding a step without adding it there turns the four sandbox cases red. `verify.ts` records that
