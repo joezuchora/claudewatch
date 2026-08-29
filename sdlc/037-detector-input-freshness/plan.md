@@ -7,7 +7,12 @@
 
 ## Scope fence
 
-Five paths, one package plus one script. No product surface, no `deploy/`, no `SPEC.md`.
+Six paths, one package plus one script. No product surface, no `deploy/`, no `SPEC.md`.
+
+**The sixth was added at Stage 4**, before writing it rather than after being caught: A6's CLI half
+needs a subprocess, and the first draft of this fence listed only `anomaly.test.ts`. Putting a CLI
+ordering test in the wrong file to stay inside a fence would be smuggling; amending the fence and
+saying so is the correction loops 035 and 036 both had to make retroactively.
 
 | Path | Change | Criterion |
 |---|---|---|
@@ -16,6 +21,7 @@ Five paths, one package plus one script. No product surface, no `deploy/`, no `S
 | `packages/metrics/src/cli-detect.ts` | render the line **above** the `insufficient-data` exit at `:176` | A6 |
 | `scripts/arrival-dist.ts` | **new** — both clocks, plus the kind census | A13 |
 | `scripts/arrival-dist.test.ts` | **new** — so the script is not a second `cli-ship.ts` | A13 |
+| `packages/metrics/src/cli-detect.test.ts` | **new, added at Stage 4** — the subprocess half of A6, which only running the process can observe | A6 |
 
 **Explicitly not touched:** `packages/metrics/src/detector-input.ts`,
 `packages/metrics/src/store.ts`, `packages/metrics/src/server.ts`,

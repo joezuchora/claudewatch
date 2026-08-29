@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { durationRatioBand, detect, BOUNDS, formatBaseline, type Suppression } from './anomaly.js';
+import {
+  durationRatioBand, detect, BOUNDS, formatBaseline, measureFreshness, formatFreshness, formatAgeMs,
+  ANOMALY_KINDS, type Suppression,
+} from './anomaly.js';
 import type { StoredEvent } from './types.js';
 
 const T0 = Date.parse('2026-08-26T08:00:00.000Z');
@@ -621,5 +624,193 @@ describe('A6/A7 — suppression across different and same conditions', () => {
     // bug. The existing suppression test three describes up has the right shape.
     expect(r.status).toBe('healthy');
     expect(r.status === 'healthy' ? r.suppressed.map(a => a.fingerprint) : []).toContain(hangFp);
+  });
+});
+
+/**
+ * sdlc/037 — the detector reports its input's freshness and judges none of it.
+ *
+ * Three ages, not two. The first spec draft shipped an all-kinds arrival age beside a `verify_run`
+ * emission age, so the two differed along the CLOCK axis and the POPULATION axis at once; a
+ * difference could not be attributed to either. Each test below therefore uses a population where
+ * the other two ages give a DIFFERENT answer — otherwise none of them establishes which axis moved.
+ */
+describe('measureFreshness (sdlc/037 A2)', () => {
+  const NOW = T0;
+
+  test('the arrival age is the newest event of ANY kind', () => {
+    const f = measureFreshness([
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(5), ts: hoursAgo(5) }),
+      ev({ kind: 'fetch_result', receivedAt: hoursAgo(1), ts: hoursAgo(1) }),
+    ], NOW);
+    expect(f.newestArrivalAgeMs).toBe(3_600_000);
+    // Positive precondition: the run ages are OLDER, so this assertion is about the population and
+    // not merely about there being one event.
+    expect(f.newestRunArrivalAgeMs).toBe(5 * 3_600_000);
+  });
+
+  test('the run arrival age ignores other kinds', () => {
+    const f = measureFreshness([
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(9), ts: hoursAgo(9) }),
+      ev({ kind: 'schema_drift', receivedAt: hoursAgo(1), ts: hoursAgo(1) }),
+      ev({ kind: 'render', receivedAt: hoursAgo(2), ts: hoursAgo(2) }),
+    ], NOW);
+    expect(f.newestRunArrivalAgeMs).toBe(9 * 3_600_000);
+    expect(f.newestArrivalAgeMs).toBe(3_600_000);   // and the other kinds ARE newer
+  });
+
+  test('the run emitted age uses ts, not receivedAt', () => {
+    // One batch: a single receivedAt, ts values hours apart. This is the real store's shape —
+    // 311 events share 70 distinct receivedAt values — so ordering by receivedAt alone cannot pick
+    // the newest run.
+    const f = measureFreshness([
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(1), ts: hoursAgo(7) }),
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(1), ts: hoursAgo(4) }),
+    ], NOW);
+    expect(f.newestRunArrivalAgeMs).toBe(3_600_000);
+    expect(f.newestRunEmittedAgeMs).toBe(4 * 3_600_000);
+  });
+});
+
+describe('the drained-backlog discriminator (sdlc/037 A3)', () => {
+  /**
+   * B4 rests on this shape. A hole in `receivedAt` FILLED with `ts` values is a shipping outage —
+   * events kept being emitted and spooled while delivery failed. A hole in both is an absence.
+   * That is what makes broken-vs-absent decidable in the past tense, and it is the reason two
+   * clocks exist rather than one.
+   */
+  test('a batch delivered late reads as fresh arrival, old emission', () => {
+    const batch = [3, 2, 1].map((h) =>
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(0.1), ts: hoursAgo(h + 5) }));
+    const f = measureFreshness(batch, T0);
+    expect(f.newestRunArrivalAgeMs).toBe(360_000);              // 0.1h — just arrived
+    expect(f.newestRunEmittedAgeMs).toBe(6 * 3_600_000);        // emitted six hours ago
+    expect(f.newestRunEmittedAgeMs! - f.newestRunArrivalAgeMs!).toBeGreaterThan(5 * 3_600_000);
+  });
+});
+
+describe('freshness edge cases (sdlc/037 A4, A5, A9)', () => {
+  test('an input with no verify_run reports a fresh arrival and null run ages', () => {
+    // SYNTHETIC. The live store has never held a non-verify_run event — zero schema_drift, zero
+    // fetch_result — so this blind spot is architecturally real and empirically unobserved.
+    const f = measureFreshness([ev({ kind: 'fetch_result', receivedAt: hoursAgo(1) })], T0);
+    expect(f.newestArrivalAgeMs).toBe(3_600_000);
+    expect(f.newestRunArrivalAgeMs).toBeNull();
+    expect(f.newestRunEmittedAgeMs).toBeNull();
+  });
+
+  test('an empty input yields null for all three', () => {
+    expect(measureFreshness([], T0)).toEqual({
+      newestArrivalAgeMs: null, newestRunArrivalAgeMs: null, newestRunEmittedAgeMs: null,
+    });
+  });
+
+  test('an unparseable timestamp is excluded from the max rather than poisoning it', () => {
+    const f = measureFreshness([
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(3), ts: hoursAgo(3) }),
+      ev({ kind: 'verify_run', receivedAt: 'not a date', ts: 'not a date' }),
+    ], T0);
+    expect(f.newestRunArrivalAgeMs).toBe(3 * 3_600_000);
+    expect(Number.isFinite(f.newestRunArrivalAgeMs!)).toBe(true);
+  });
+
+  test('every member unparseable is null, not NaN', () => {
+    const f = measureFreshness([ev({ kind: 'verify_run', receivedAt: 'x', ts: 'x' })], T0);
+    expect(f.newestArrivalAgeMs).toBeNull();
+  });
+
+  test('a known age comes back exactly (A9)', () => {
+    const f = measureFreshness([ev({ kind: 'verify_run', receivedAt: hoursAgo(2), ts: hoursAgo(2) })], T0);
+    expect(f.newestArrivalAgeMs).toBe(7_200_000);
+  });
+
+  test('a future event yields a NEGATIVE age on the result, clamped only at render', () => {
+    // Emitter clock skew (sdlc/003). store.ts takes `ts` verbatim off the wire with no range check,
+    // so this is reachable — the first spec draft called the shape "impossible" twelve lines before
+    // documenting skew as an edge case.
+    const f = measureFreshness([ev({ kind: 'verify_run', receivedAt: hoursAgo(-1), ts: hoursAgo(-1) })], T0);
+    expect(f.newestArrivalAgeMs).toBeLessThan(0);
+    expect(formatAgeMs(f.newestArrivalAgeMs)).toBe('0s');
+  });
+});
+
+describe('formatAgeMs renders every ladder boundary (sdlc/037 A5)', () => {
+  test('the ladder is exactly what the spec pinned', () => {
+    expect(formatAgeMs(null)).toBe('never');
+    expect(formatAgeMs(-1)).toBe('0s');
+    expect(formatAgeMs(0)).toBe('0s');
+    expect(formatAgeMs(59_000)).toBe('59s');
+    expect(formatAgeMs(60_000)).toBe('1m');
+    expect(formatAgeMs(59 * 60_000)).toBe('59m');
+    expect(formatAgeMs(3_600_000)).toBe('1h 0m');
+    expect(formatAgeMs(23 * 3_600_000)).toBe('23h 0m');
+    expect(formatAgeMs(24 * 3_600_000)).toBe('1d 0h');
+    expect(formatAgeMs(365 * 24 * 3_600_000)).toBe('365d 0h');
+  });
+
+  test('NaN renders unknown, not NaNh NaNm', () => {
+    expect(formatAgeMs(Number.NaN)).toBe('unknown');
+    expect(formatAgeMs(Number.POSITIVE_INFINITY)).toBe('unknown');
+  });
+
+  test('formatFreshness names all three ages', () => {
+    const line = formatFreshness({
+      newestArrivalAgeMs: 60_000, newestRunArrivalAgeMs: null, newestRunEmittedAgeMs: 3_600_000,
+    });
+    expect(line).toContain('newest arrived 1m ago');
+    expect(line).toContain('newest verify run arrived never ago');
+    expect(line).toContain('emitted 1h 0m ago');
+  });
+});
+
+describe('freshness reaches every verdict (sdlc/037 A6, A7)', () => {
+  test('insufficient-data carries it — the case a broken pipeline lands in first', () => {
+    const r = detect([ev({ kind: 'verify_run', receivedAt: hoursAgo(4), ts: hoursAgo(4) })], T0);
+    expect(r.status).toBe('insufficient-data');
+    expect(r.freshness.newestRunArrivalAgeMs).toBe(4 * 3_600_000);
+  });
+
+  test('a year-old store is still HEALTHY, and says how old it is', () => {
+    // SYNTHETIC: RETENTION_DAYS is 90, so 365 days is unreachable in a real store — after a 90-day
+    // outage `prune()` empties it and this number degrades to `never`. Accepted, recorded.
+    //
+    // The status NOT changing is the point. This loop adds a fact, not a verdict.
+    const year = 365 * 24;
+    // Built directly rather than spread over `baselineRuns`'s output: `oxc(no-map-spread)` is in the
+    // enforced warning budget, and A11 pins it at 8 rows / 10 warnings. The gate rejected the first
+    // version of this test, which is the budget working as designed.
+    const old = Array.from({ length: BOUNDS.minVerifyRuns }, () =>
+      ev({ kind: 'verify_run', durationMs: 30_000, receivedAt: hoursAgo(year), ts: hoursAgo(year), payload: { outcome: 'pass' } }));
+    const r = detect(old, T0);
+    expect(r.status).toBe('healthy');
+    expect(r.freshness.newestArrivalAgeMs).toBeGreaterThan(300 * 24 * 3_600_000);
+    expect(formatAgeMs(r.freshness.newestArrivalAgeMs)).toBe('365d 0h');
+  });
+});
+
+/**
+ * A8 — a change-detector, in both directions.
+ *
+ * `AnomalyKind` used to be a hand-written union, and a union is erased at runtime: the only way to
+ * "assert" it was a source grep, which is the vacuous form sdlc/014's review recorded. Checked
+ * before writing this: the type appears in exactly two places and there is NO exhaustive switch on
+ * it, so a fifth member typechecks silently and nothing else in the repo notices.
+ *
+ * What it protects: sdlc/037 ships no staleness bound, on the reasoning in that loop's spec B4. A
+ * future loop adding one should have to edit a test that says so.
+ */
+describe('the bound set is pinned (sdlc/037 A8)', () => {
+  test('ANOMALY_KINDS is exactly the four current members', () => {
+    expect([...ANOMALY_KINDS]).toEqual([
+      'verify_duration_outlier', 'verify_pass_rate', 'schema_drift_spike', 'fetch_failure_rate',
+    ]);
+  });
+
+  test('BOUNDS has exactly its ten current keys', () => {
+    expect(Object.keys(BOUNDS).toSorted()).toEqual([
+      'driftSpikeCount', 'durationOutlierMultiple', 'maxFetchFailureRate', 'minFetchSample',
+      'minOutlierMs', 'minPassRate', 'minVerifyRuns', 'passRateWindow', 'suppressionHours',
+      'verifyBaselineWindow',
+    ]);
   });
 });

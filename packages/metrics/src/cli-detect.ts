@@ -10,7 +10,7 @@
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { MetricsStore, defaultDbPath } from './store.js';
-import { detect, BOUNDS, formatBaseline, type Anomaly, type Suppression } from './anomaly.js';
+import { detect, BOUNDS, formatBaseline, type Anomaly, type Suppression, formatFreshness } from './anomaly.js';
 import { collectDetectorInput } from './detector-input.js';
 
 const repoRoot = process.env.CLAUDEWATCH_REPO ?? process.cwd();
@@ -172,6 +172,15 @@ const store = new MetricsStore(process.env.CLAUDEWATCH_METRICS_DB ?? defaultDbPa
 const now = Date.now();
 const events = collectDetectorInput(store, now);
 const result = detect(events, now, readSuppressions());
+
+// ABOVE the insufficient-data exit, deliberately. `cli-detect` returns and exits at the branch
+// below, before `formatBaseline` and the suppression lines, so a line printed after it would be
+// missing from exactly the case a broken pipeline lands in first.
+//
+// Printed on every verdict and asserted on none of them. sdlc/037's B4: a staleness THRESHOLD would
+// have to encode a claim about whether someone's machine ought to be on, which is not a fact the
+// detector has. The age is; a human can apply the judgement they actually possess.
+console.log(formatFreshness(result.freshness));
 
 if (result.status === 'insufficient-data') {
   console.log(`insufficient data: ${result.have} verify runs, need ${result.need}. No verdict.`);

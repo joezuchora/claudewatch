@@ -52,11 +52,27 @@ export const BOUNDS = {
   suppressionHours: 24,
 } as const;
 
-export type AnomalyKind =
-  | 'verify_duration_outlier'
-  | 'verify_pass_rate'
-  | 'schema_drift_spike'
-  | 'fetch_failure_rate';
+/**
+ * A VALUE, with the type derived from it, so a fifth member can be pinned by a test.
+ *
+ * `AnomalyKind` used to be a hand-written union. sdlc/037's Stage 2 review suggested pinning it was
+ * redundant with the plan-to-diff audit; checking the code says otherwise. This type appears in
+ * exactly two places — here and `Anomaly.kind` — and **there is no exhaustive switch on it
+ * anywhere**, so adding a fifth member typechecks silently and no existing test notices. A type
+ * union is erased at runtime and can only be "asserted" by grepping the source, which is the vacuous
+ * form sdlc/014's review already recorded. An array can be compared.
+ *
+ * What it protects: sdlc/037 deliberately ships NO staleness bound, and the reasoning is in that
+ * loop's spec. A future loop that quietly adds one should have to edit a test that says so.
+ */
+export const ANOMALY_KINDS = [
+  'verify_duration_outlier',
+  'verify_pass_rate',
+  'schema_drift_spike',
+  'fetch_failure_rate',
+] as const;
+
+export type AnomalyKind = (typeof ANOMALY_KINDS)[number];
 
 export interface Anomaly {
   kind: AnomalyKind;
@@ -95,12 +111,38 @@ export interface Suppression {
   raisedAt: string;
 }
 
+/**
+ * How old the detector's input is. THREE ages, not two, and not one.
+ *
+ * One number cannot answer the question. Two could not either: sdlc/037's first spec draft shipped
+ * an all-kinds arrival age beside a `verify_run` emission age, so the two differed along the CLOCK
+ * axis and the POPULATION axis at once and a difference could not be attributed to either. The draft
+ * noticed and accepted it, two lines after declaring that "two numbers describing one run that can
+ * differ is the defect class this repo keeps finding".
+ *
+ * `null` when the population is empty OR every member's timestamp is unparseable — omitted, not
+ * guessed. A zero would read as "just now", which is the opposite of the truth.
+ *
+ * Negative ages are kept RAW here and clamped only at render, so a test can see the sign. An emitter
+ * with a fast clock produces `ts > receivedAt` (sdlc/003), and `store.ts` takes `ts` verbatim off the
+ * wire with no range check.
+ */
+export interface InputFreshness {
+  /** Newest event of ANY kind, by `receivedAt` — when the store last learned anything. */
+  newestArrivalAgeMs: number | null;
+  /** Newest `verify_run`, by `receivedAt` — when the store last learned about a gate run. */
+  newestRunArrivalAgeMs: number | null;
+  /** Newest `verify_run`, by `ts` — when the gate last STARTED (verify.ts stamps at process start). */
+  newestRunEmittedAgeMs: number | null;
+}
+
 export type DetectResult =
-  | { status: 'insufficient-data'; have: number; need: number }
+  | { status: 'insufficient-data'; have: number; need: number; freshness: InputFreshness }
   | {
       status: 'healthy';
       evaluated: number;
       suppressed: Anomaly[];
+      freshness: InputFreshness;
       durationBaseline?: DurationBaseline;
     }
   | {
@@ -108,10 +150,85 @@ export type DetectResult =
       anomalies: Anomaly[];
       suppressed: Anomaly[];
       evaluated: number;
+      freshness: InputFreshness;
       durationBaseline?: DurationBaseline;
     };
 
 const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Newest parsed timestamp in a population, or `null` if none parses. */
+function newestAge(events: readonly StoredEvent[], pick: (e: StoredEvent) => string, now: number): number | null {
+  let newest: number | null = null;
+  for (const e of events) {
+    const t = Date.parse(pick(e));
+    // `Number.isFinite`, not a try/catch: `Date.parse` returns NaN rather than throwing.
+    //
+    // Its real job is narrower than it looks, and the M3 mutation showed which: a NaN can never win
+    // the `t > newest` comparison, because every comparison with NaN is false. So a MIXED population
+    // is safe without this line. What it catches is the ALL-unparseable case — without it, the first
+    // event sets `newest = NaN` through the `newest === null` branch and the function returns NaN
+    // instead of `null`. The first version of this comment said "one NaN poisons the whole result",
+    // which is a claim made by reading.
+    if (!Number.isFinite(t)) continue;
+    if (newest === null || t > newest) newest = t;
+  }
+  return newest === null ? null : now - newest;
+}
+
+/**
+ * The detector's input, aged three ways.
+ *
+ * Exported separately from `detect` so the shapes in sdlc/037's B1 table are plain unit tests rather
+ * than four constructions of a whole `DetectResult`.
+ *
+ * Derived ONLY from the arguments. `anomaly.ts` imports one thing — `type { StoredEvent }` — so
+ * there is no store in scope and this cannot disagree with `evaluated`.
+ */
+export function measureFreshness(events: readonly StoredEvent[], now: number): InputFreshness {
+  const runs = events.filter((e) => e.kind === 'verify_run');
+  return {
+    newestArrivalAgeMs: newestAge(events, (e) => e.receivedAt, now),
+    newestRunArrivalAgeMs: newestAge(runs, (e) => e.receivedAt, now),
+    newestRunEmittedAgeMs: newestAge(runs, (e) => e.ts, now),
+  };
+}
+
+/**
+ * The unit ladder, pinned in sdlc/037's spec so two engineers cannot write two formatters.
+ *
+ * NOT `agent.ts`'s `formatAge`. That is the shipper's vocabulary, tuned to a five-minute timer and
+ * with no day unit — it renders a 365-day age as `8760h 0m`. Detector ages are legitimately days.
+ * The duplication this repo has been bitten by (`MAX_LINE_BYTES`, the cache-directory rule) was
+ * duplication of a RULE; this is a formatting preference, and sharing it would force one of the two
+ * callers to render badly.
+ */
+export function formatAgeMs(ms: number | null): string {
+  if (ms === null) return 'never';
+  if (!Number.isFinite(ms)) return 'unknown';
+  if (ms < 0) return '0s';
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < HOUR_MS) return `${Math.round(ms / 60_000)}m`;
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h ${Math.round((ms % HOUR_MS) / 60_000)}m`;
+  return `${Math.floor(ms / DAY_MS)}d ${Math.round((ms % DAY_MS) / HOUR_MS)}h`;
+}
+
+/**
+ * One line. Printed on every verdict, never asserted on.
+ *
+ * The shape combinations are the point: all fresh = alive; all old = nothing arriving; arrival fresh
+ * with run-arrival old = other emitters live and the gate stopped; run-arrival fresh with
+ * run-emitted old = a backlog just drained. That last one is the discriminator sdlc/037's B4 rests
+ * on — a hole in `receivedAt` FILLED with `ts` values is a shipping outage; a hole in both is an
+ * absence.
+ */
+export function formatFreshness(f: InputFreshness): string {
+  return (
+    `input: newest arrived ${formatAgeMs(f.newestArrivalAgeMs)} ago; ` +
+    `newest verify run arrived ${formatAgeMs(f.newestRunArrivalAgeMs)} ago, ` +
+    `emitted ${formatAgeMs(f.newestRunEmittedAgeMs)} ago`
+  );
+}
 
 /**
  * Nearest-rank: `sorted[floor(q * n)]`. Exported so `scripts/perf.ts` shares this exact
@@ -358,10 +475,14 @@ export function detect(
   );
   const runs = ordered.filter((e) => e.kind === 'verify_run');
 
+  // Computed BEFORE the branch, so `insufficient-data` carries it too. That is where a pipeline
+  // which broke early lands, and where the detector previously said nothing at all.
+  const freshness = measureFreshness(events, now);
+
   if (runs.length < BOUNDS.minVerifyRuns) {
     // Distinct from healthy, deliberately. A p95 over three samples is noise wearing a
     // statistic's clothes, and "healthy" would be a confident wrong answer.
-    return { status: 'insufficient-data', have: runs.length, need: BOUNDS.minVerifyRuns };
+    return { status: 'insufficient-data', have: runs.length, need: BOUNDS.minVerifyRuns, freshness };
   }
 
   const duration = detectDurationOutlier(runs);
@@ -381,9 +502,10 @@ export function detect(
   // Suppressed anomalies are reported, never silently dropped — a detector that hides its
   // own decisions cannot be debugged.
   if (raised.length === 0) {
-    return { status: 'healthy', evaluated: runs.length, suppressed, ...baselineField };
+    return { status: 'healthy', evaluated: runs.length, suppressed, freshness, ...baselineField };
   }
   return {
-    status: 'anomalies', anomalies: raised, suppressed, evaluated: runs.length, ...baselineField,
+    status: 'anomalies', anomalies: raised, suppressed, evaluated: runs.length, freshness,
+    ...baselineField,
   };
 }
