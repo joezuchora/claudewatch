@@ -1307,3 +1307,74 @@ threshold from its data would be fabricated.
 **What the loop delivers, stated as narrowly as it deserves.** A fact on every verdict, and no verdict
 about that fact. `metrics:detect` still reports `healthy` on a year-old store — the thing the intent
 led with — and that remains open by design rather than by oversight.
+
+---
+
+## Loop 038 — the install script exposes the metrics bearer token before it protects it
+
+`deploy/install-nuc.sh` wrote the metrics env file — which under `--lan` holds a generated
+bearer token — with a plain `>` redirect and only then ran `chmod 600`. Measured with a stub
+`chmod` on `PATH` recording the mode before delegating: `666` under `umask 000`, `644` under the
+default, inside a config directory at `755`. A re-run over a file left at `644` left it there
+and printed `kept existing`.
+
+**The trap was the test, and it was visible from the start.** Asserting the env file ends at
+`0600` *passes against the broken script*, because the trailing `chmod` really does set it. The
+intent said so, the spec said so, and the plan recorded the design tension it created. That
+foresight was worth something — and it was not worth as much as it felt like at the time.
+
+**Three blocking findings, one shape.** Every one was a claim with no check behind it:
+
+- The `mktemp` + `mv` design — adopted in spec revision 2 *specifically* to close a
+  partial-write hole — passed **23 of 23** when swapped back to the design it replaced. One
+  disjunction in A1 (`.metrics.env.* || the destination`) was the entire gap.
+- The `SPEC.md` §12 clause **this loop wrote** says the repair branch "never reads, rotates, or
+  prints the token". Making it `cat` the file into its own success message left **26 of 26**
+  green: the test asserted the file's contents were unchanged and never looked at `stdout`.
+- A comment claimed the `bash -x` test covered "never a process argument", on the reasoning that
+  xtrace prints every argv. It cannot — the library disables xtrace for exactly that section, so
+  argv is the one thing that trace cannot show.
+
+> **Writing the invariant down is not testing it, and writing it down in the same commit is not
+> testing it either.** Loops 033–037 built the discipline for *a test named for a guard it does
+> not exercise*. This loop extended the class: a **specification clause**, a **design decision**,
+> and a **comment about coverage** can each assert something no check enforces, and each reads as
+> settled precisely because it was written deliberately. The spec clause was the worst of the
+> three — it is the source of truth, and it shipped with the invariant true only by accident.
+
+**The foresight and the failure were in the same document.** `spec.md` correctly identified two
+vacuity traps in A7's own text, and then A7 shipped with a third — an extraction that could
+silently return `""`, against which `not.toContain('')` is true of everything. The reviewer found
+it. Naming a defect class in a paragraph does not clear the paragraph below it.
+
+**Amending a fence by addition leaves it saying both things.** Loop 035's lesson was that
+stepping outside a fence and rationalising it afterwards is the violation, and this loop did the
+right thing: it amended the fence *before* implementing, in writing, with the reason. Then it
+left the contradicted text standing — `plan.md` still specified the superseded `umask` design
+thirty-five lines after superseding it, and both artifacts still listed the two newly-fenced
+files under "explicitly not touched". A reader auditing this loop against the plan alone gets
+whichever answer they read first.
+
+> **An amendment that only adds is half an amendment.** The correction has to delete or mark the
+> text it replaces, or the document asserts both.
+
+**Recording a finding at the wrong severity is a way of not fixing it.** I logged the symlinked
+*parent directory* as a minor, described as a `chmod` following a link, and moved on. The
+security pass measured what actually happens: `mkdir`, `chmod`, `mktemp` and `mv` all follow it,
+so the **token file itself** is written inside the link's target — and the realistic trigger is
+not an attacker but `~/.config` symlinked into a dotfiles repo or a sync root, which puts a live
+bearer token under version control. The finding is left in `review.md` at its original wording,
+superseded rather than deleted, because getting it wrong is the finding.
+
+**Two process failures worth their own line.** Two mutation runs measured a misapplied patch
+rather than the code — caught only because ten failures for a one-line change looked wrong. And
+the test I added to arm a guard that mutation testing had just proved unreachable was itself
+**flaky**: its stub never drained stdin, so an upstream `SIGPIPE` failed the pipeline about once
+in four hundred runs. It flaked on its second run. Weeks later it would have looked like an
+infrastructure flake, which this repo's rules say is never a root cause.
+
+**What the loop delivers.** The token file is created at its final mode rather than corrected to
+it, written atomically and renamed into place, refused on a symlinked path or a symlinked
+directory, kept out of `bash -x` output and out of any `argv`, and repaired rather than blessed
+when found too permissive. `SPEC.md` §12 gained the clause that was missing — the reason a future
+installer edit could have violated nothing.
