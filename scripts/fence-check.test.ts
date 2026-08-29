@@ -3,6 +3,7 @@ import {
   buildIndex,
   checkLoop,
   classifyToken,
+  readManifest,
   compareToBaseline,
   extractFence,
   gitFiles,
@@ -637,5 +638,122 @@ describe('the live tree', () => {
     expect(keys).toContain('unresolvedSymbols');
     expect(keys).not.toContain('notASymbol');
     expect(keys).not.toContain('unresolvedTokens');
+  });
+});
+
+/**
+ * sdlc/035 Stage 5 — the security pass, as tests.
+ *
+ * Finding 1 is the one that mattered, and it is a REGRESSION THIS LOOP INTRODUCED rather than a
+ * pre-existing hole. Before the split, an ESC-bearing heading token landed in `unresolved`, whose
+ * count is baselined, so committing one forced a mismatch and a red gate. After the split it
+ * classifies as `not-a-symbol` — printed, never asserted — so the same bytes print on a GREEN run.
+ * A `\x1b[8m` in a spec heading conceals every FINDING line printed after it, and the ESC byte is
+ * invisible in a diff viewer. The exit code is unaffected; what is hidden is the explanation.
+ */
+describe('control characters are bounded where tokens enter, not where they print', () => {
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+
+  test('a heading token carrying a terminal escape is scrubbed before it can be printed', () => {
+    const res = run(`### B1 — \`${ESC}[8mnoSuchSymbol\`\n`, '**Not touched:** `packages/core/src/format.ts`\n\n');
+    const all = [...(res?.unresolved ?? []), ...(res?.notASymbol ?? [])];
+    expect(all).toHaveLength(1);
+    expect(all[0]).not.toContain(ESC);
+    // Positive: the token still arrives, scrubbed rather than dropped. A guard that silently
+    // discards the token would also pass the assertion above, and would be worse.
+    expect(all[0]).toContain('noSuchSymbol');
+  });
+
+  test('a fence entry carrying an escape is scrubbed too — both callers of ticks()', () => {
+    expect(extractFence(`**Not touched:** \`${ESC}[31msnapshot.ts${BEL}\`\n\n`)).toEqual(['[31msnapshot.ts']);
+  });
+
+  test('ordinary tokens are untouched, so the scrub cannot be silently breaking resolution', () => {
+    expect(headingTokens('### B1 — `extractLastError` moves\n')).toEqual(['extractLastError']);
+    expect(extractFence('**Not touched:** `packages/core/src/snapshot.ts`\n\n')).toEqual([
+      'packages/core/src/snapshot.ts',
+    ]);
+  });
+});
+
+/**
+ * Finding 3 — `SCRIPT_TARGET` was unanchored, with `.` in both the character class and the literal
+ * that follows it. Quadratic: 8.2s on 64 KB of dots, a hang to the 300s step timeout on 1 MB.
+ *
+ * The budget is deliberately loose (100ms against a pre-fix 8200ms) so this asserts the complexity
+ * class, not the machine. A timing test that fails on a slow CI runner gets deleted, and then the
+ * regression it guards comes back.
+ */
+describe('indexScripts does not backtrack on adversarial manifest content', () => {
+  test('64 KB of dots with no valid suffix parses in well under a second', () => {
+    const manifest = JSON.stringify({ scripts: { evil: `bun run ${'.'.repeat(64 * 1024)}` } });
+    const started = performance.now();
+    expect(indexScripts(manifest, CORPUS).size).toBe(0);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  test('the anchoring did not change what the real manifest resolves to', async () => {
+    const real = indexScripts(await Bun.file('package.json').text(), await gitFiles());
+    expect(real.get('verify')).toBe('scripts/verify.ts');
+    expect([...real.keys()].toSorted()).toEqual([
+      'fenceCheck',
+      'lintBudget',
+      'perf',
+      'upgrade-all:linux',
+      'upgrade-all:windows',
+      'verify',
+    ]);
+  });
+
+  test('an array under `scripts` is refused rather than walked with numeric keys', () => {
+    expect(indexScripts(JSON.stringify({ scripts: ['bun run scripts/verify.ts'] }), CORPUS).size).toBe(0);
+  });
+});
+
+/**
+ * Finding 2 — the manifest read was the diff's only new file read, and it bypassed the bound every
+ * other read in this module goes through.
+ *
+ * `statSync`, NOT `lstatSync`, and the asymmetry with `readableSource` is the point. There the path
+ * comes from `git ls-files`, so a file's NAME decides what is read and a symlink is a redirection
+ * attack. Here nothing chooses the path, and a monorepo that symlinks its manifest is legitimate —
+ * refusing it would turn the gate red with a baffling count mismatch. What must still be refused is
+ * a non-regular TARGET, because that is the `/dev/zero` unbounded read that killed the gate in
+ * sdlc/033.
+ */
+describe('readManifest bounds the one read that is not corpus-derived', () => {
+  const ok = { isFile: () => true, size: 100 };
+  // `readOk`, not `read` — the module-level fixture reader is already called `read`, and
+  // `eslint(no-shadow)` is in the enforced warning budget. The gate rejected the first version.
+  const readOk = ((): string => '{"scripts":{}}') as unknown as (p: string, e: 'utf8') => string;
+
+  test('a regular file under the cap is read', () => {
+    expect(readManifest('package.json', () => ok, readOk)).toBe('{"scripts":{}}');
+  });
+
+  test('a character device is refused — isFile() is false for /dev/zero', () => {
+    expect(readManifest('package.json', () => ({ isFile: () => false, size: 0 }), readOk)).toBe('');
+  });
+
+  test('a file over the 1 MiB cap is refused', () => {
+    expect(readManifest('package.json', () => ({ isFile: () => true, size: 1024 * 1024 + 1 }), readOk)).toBe('');
+  });
+
+  test('exactly the cap is allowed — the boundary is inclusive', () => {
+    expect(readManifest('package.json', () => ({ isFile: () => true, size: 1024 * 1024 }), readOk)).toBe('{"scripts":{}}');
+  });
+
+  test('a stat that throws yields empty text, not a crashed gate', () => {
+    expect(readManifest('package.json', () => { throw new Error('ENOENT'); }, readOk)).toBe('');
+  });
+
+  test('a read that throws in the TOCTOU window yields empty text too', () => {
+    const boom = ((): string => { throw new Error('vanished'); }) as unknown as (p: string, e: 'utf8') => string;
+    expect(readManifest('package.json', () => ok, boom)).toBe('');
+  });
+
+  test('the real manifest goes through it and still parses', () => {
+    expect(indexScripts(readManifest(), CORPUS).size).toBeGreaterThan(0);
   });
 });

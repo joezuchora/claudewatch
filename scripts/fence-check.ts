@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'fs';
 
 /**
  * Compare each loop's `spec.md` against its `plan.md` scope fence.
@@ -67,7 +67,24 @@ const EXPORTED =
  */
 const INDEX_EXCLUDE = 'packages/core/src/typefixtures/';
 
-const ticks = (md: string): string[] => [...md.matchAll(TOKEN)].map((m) => m[1]!.trim());
+/**
+ * The single point where every backticked token enters this module — heading tokens and fence
+ * entries alike — and therefore the right place to bound control characters.
+ *
+ * `scrubControls` already guards `parseBaseline` for exactly this reason: a record field carrying a
+ * raw CSI sequence is invisible in a diff viewer and reaches a terminal intact. sdlc/035's security
+ * pass found the same hole one door down, and found that THIS DIFF made it quieter rather than
+ * louder. Before the split, an ESC-bearing heading token landed in `unresolved`, whose count is
+ * baselined, so committing one forced a count mismatch and a red gate. After the split it classifies
+ * as `not-a-symbol` — printed, never asserted — so the same bytes print on a GREEN run, and a
+ * `\x1b[8m` conceals every `FINDING` line after it.
+ *
+ * Scrubbing here rather than at each print site is the same choice loop 032 made for
+ * `disabledReason`: a positive bound at the boundary, not a blacklist at the printer. No committed
+ * artifact contains a control character today, so this changes no current output.
+ */
+const ticks = (md: string): string[] =>
+  [...md.matchAll(TOKEN)].map((m) => scrubControls(m[1]!).trim());
 
 /**
  * Windows separators, so a `readdir` corpus does not make every finding silently vanish.
@@ -231,8 +248,16 @@ function resolveSymbol(token: string, index: SymbolIndex, scripts: ScriptIndex):
   return [];
 }
 
-/** First path-shaped argument in a script command. `bun run scripts/verify.ts` -> `scripts/verify.ts`. */
-const SCRIPT_TARGET = /([\w./@-]+\.(?:ts|sh|ps1|js))\b/;
+/**
+ * First path-shaped WORD in a script command. `bun run scripts/verify.ts` -> `scripts/verify.ts`.
+ *
+ * Whitespace-anchored on both ends, deliberately. The unanchored first version was quadratic: `.` is
+ * inside the character class AND the following literal, so a long run of dots with no valid suffix
+ * backtracks at every start position — sdlc/035's security pass measured 8.2s on 64 KB and a hang to
+ * the 300s step timeout on 1 MB. Not an escalation, since anyone who can edit a `scripts` entry
+ * already has code execution in CI, but a gate should not be a CPU sink on input it does not trust.
+ */
+const SCRIPT_TARGET = /(?:^|\s)([\w./@-]+\.(?:ts|sh|ps1|js))(?=\s|$)/;
 
 /**
  * Root `package.json` script names, mapped to the file each one runs.
@@ -241,9 +266,19 @@ const SCRIPT_TARGET = /([\w./@-]+\.(?:ts|sh|ps1|js))\b/;
  * the corpus resolves to nothing rather than inventing a path. `"lint": "oxlint"` and
  * `"build": "bun run --filter …"` name no file and contribute nothing.
  *
- * A missing or malformed manifest yields an EMPTY MAP rather than throwing. The consequence is that
- * two tokens stop resolving and the unresolved count rises, which FAILS the gate — the safe
- * direction. A gate that dies on a missing optional input is worse than one that resolves less.
+ * A missing or malformed manifest yields an EMPTY MAP rather than throwing. A gate that dies on a
+ * missing optional input is worse than one that resolves less.
+ *
+ * The failure direction is safe for the tokens that exist TODAY but is NOT universal, and saying so
+ * is the point. `verify` is identifier-shaped, so losing it raises the baselined count and the gate
+ * goes red. A HYPHENATED script name would not: `upgrade-all` fails `IDENTIFIER` and lands in
+ * `notASymbol`, which is printed and never asserted, so losing it is silent. The same is true of a
+ * dotted token if its owner ever stops being a top-level export — including `MetricEvent.payload`,
+ * the one this module's own comments call the telemetry security boundary. What actually pins those
+ * is the live-tree test that names them (`fence-check.test.ts`, "the two resolution rules still
+ * resolve the three tokens they were added for"), not this fallback's direction. Recorded by
+ * sdlc/035's security pass, finding 4; a general fix means routing would-have-resolved tokens into
+ * `unresolved`, which is a loop of its own.
  */
 export function indexScripts(packageJsonText: string, corpus: readonly string[]): ScriptIndex {
   const out = new Map<string, string>();
@@ -255,13 +290,19 @@ export function indexScripts(packageJsonText: string, corpus: readonly string[])
   }
   if (typeof parsed !== 'object' || parsed === null) return out;
   const { scripts } = parsed as Record<string, unknown>;
-  if (typeof scripts !== 'object' || scripts === null) return out;
+  // `Array.isArray` matters: an array passes `typeof === 'object'` and would be walked with numeric
+  // string keys. Harmless today — `"0"` cannot match an identifier-shaped heading token — but it is
+  // unvalidated shape, and this module's house rule is to validate rather than rely on that.
+  if (typeof scripts !== 'object' || scripts === null || Array.isArray(scripts)) return out;
   const tracked = new Set(corpus.map(toPosix));
   for (const [name, command] of Object.entries(scripts as Record<string, unknown>)) {
     if (typeof command !== 'string') continue;
     const m = SCRIPT_TARGET.exec(command);
     if (m === null) continue;
-    const target = toPosix(m[1]!);
+    // Leading `./` stripped. Two of this repo's own scripts write `./scripts/upgrade-all.ps1`, and
+    // `git ls-files` never emits the prefix, so without this they silently never resolve — a gap the
+    // first version of the sdlc/035 test encoded as an expectation before the test was run.
+    const target = toPosix(m[1]!).replace(/^\.\//, '');
     if (tracked.has(target)) out.set(name, target);
   }
   return out;
@@ -496,6 +537,40 @@ export function compareToBaseline(
   return problems;
 }
 
+/**
+ * The manifest read, bounded — the diff's only new file read, and sdlc/035's security pass flagged
+ * that it bypassed the guard the rest of this module goes through.
+ *
+ * `statSync`, NOT the `lstatSync` in `readableSource`, and the difference is deliberate. There the
+ * path comes from `git ls-files`, so a repository file's NAME decides what is read and a symlink is
+ * a redirection attack — refused. Here the path is a fixed constant, nothing chooses it, and a
+ * monorepo that symlinks its manifest is a legitimate setup that should not turn the gate red with a
+ * baffling count mismatch. What is still refused is a non-regular TARGET: `/dev/zero` is a character
+ * device, so `isFile()` is false and the unbounded read that killed the gate in sdlc/033 cannot
+ * happen. The size cap is the same 1 MiB.
+ *
+ * Returns `''` on anything unreadable, including the TOCTOU window between the check and the read.
+ * `indexScripts` turns that into an empty map, whose consequences its own docstring states.
+ *
+ * Exported, and taking `stat`/`read` as parameters, for the reason `scripts/spool-path.ts` states at
+ * length: a guard whose absence no test can detect is not a guard. The first version read a fixed
+ * path through the ambient `fs`, and the A10 mutation deleting the guard produced ZERO failures —
+ * the same shape as sdlc/034's A7, caught here before it shipped rather than after.
+ */
+export function readManifest(
+  path = 'package.json',
+  stat: (p: string) => { isFile: () => boolean; size: number } = statSync,
+  read: (p: string, enc: 'utf8') => string = readFileSync,
+): string {
+  try {
+    const st = stat(path);
+    if (!st.isFile() || st.size > MAX_INDEXED_BYTES) return '';
+    return read(path, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
 export async function gitFiles(): Promise<string[]> {
   const proc = Bun.spawn(['git', 'ls-files'], { stdout: 'pipe', stderr: 'pipe' });
   const out = await new Response(proc.stdout).text();
@@ -506,9 +581,7 @@ export async function gitFiles(): Promise<string[]> {
 async function main(): Promise<number> {
   const corpus = await gitFiles();
   const index = buildIndex(corpus);
-  // Read, not required: a repository without a manifest resolves fewer tokens, which raises the
-  // count and fails the gate. See `indexScripts`.
-  const scripts = indexScripts(existsSync('package.json') ? readFileSync('package.json', 'utf8') : '', corpus);
+  const scripts = indexScripts(readManifest(), corpus);
 
   const findings: Finding[] = [];
   const unresolved: string[] = [];
