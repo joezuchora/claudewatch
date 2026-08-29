@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { distributionsFor, gapDistribution, renderDistribution } from './arrival-dist.js';
+import { distributionsFor, formatCensus, gapDistribution, renderDistribution } from './arrival-dist.js';
 
 /**
  * `cli-ship.ts` went four loops with no test file and only got one when sdlc/036 happened to need a
@@ -101,5 +101,45 @@ describe('distributionsFor pairs each column with its own clock (sdlc/037 M9)', 
     expect(d.ts!.p50).not.toBe(d.receivedAt!.p50);
     expect(d.ts!.overOneHour).toBe(0);
     expect(d.receivedAt!.overOneHour).toBe(2);
+  });
+});
+
+/**
+ * sdlc/037's security pass, finding 1 — the census line was the first human-facing print site for
+ * `kind` anywhere in the repo, and `kind` is free text from an ingest endpoint that binds loopback
+ * with no token by default.
+ *
+ * Reproduced before fixing: a planted row whose `kind` carries `ESC[2J ESC[1;1H` cleared the
+ * operator's screen, printed a FORGED census, and used `ESC[8m` to conceal the gap lines the script
+ * was run to read. An instrument anyone able to write one row can forge is not an improvement on
+ * the untrustworthy measurement this script replaced.
+ */
+describe('formatCensus bounds what a planted row can print (security pass F1)', () => {
+  const ESC = String.fromCharCode(27);
+
+  test('terminal escapes are scrubbed, so a row cannot drive the cursor', () => {
+    const out = formatCensus([{ kind: `${ESC}[2J${ESC}[1;1Hforged`, c: 1 }]);
+    expect(out).not.toContain(ESC);
+    // Positive precondition: the row IS reported, scrubbed rather than dropped — a guard that
+    // silently discarded it would also pass the assertion above and would hide a real kind.
+    expect(out).toContain('forged');
+  });
+
+  test('a megabyte of kind is truncated', () => {
+    const out = formatCensus([{ kind: 'k'.repeat(1_000_000), c: 1 }]);
+    expect(out.length).toBeLessThan(200);
+    expect(out).toContain('k'.repeat(64));
+  });
+
+  test('a non-string kind or non-numeric count is dropped, not coerced', () => {
+    // SQLite type affinity: TEXT NOT NULL does not guarantee a string comes back.
+    expect(formatCensus([{ kind: 42, c: 1 }])).toBe('kinds: (empty store)');
+    expect(formatCensus([{ kind: 'ok', c: 'not a number' }])).toBe('kinds: (empty store)');
+    expect(formatCensus([])).toBe('kinds: (empty store)');
+  });
+
+  test('ordinary rows are unchanged', () => {
+    expect(formatCensus([{ kind: 'verify_run', c: 320 }, { kind: 'render', c: 4 }]))
+      .toBe('kinds: verify_run=320 render=4');
   });
 });

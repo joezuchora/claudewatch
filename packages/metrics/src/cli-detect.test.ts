@@ -48,6 +48,12 @@ async function run(): Promise<{ code: number; out: string }> {
     env: {
       PATH: process.env.PATH ?? '', HOME: dir, XDG_CACHE_HOME: join(dir, '.cache'),
       CLAUDEWATCH_METRICS_DB: dbPath, CLAUDEWATCH_REPO: dir,
+      // TWO write paths, not one. The first version of this comment named only draft(); the security
+      // pass found writeSuppressions() (cli-detect.ts:39), which resolves
+      // `CLAUDEWATCH_SUPPRESSIONS ?? join(dirname(defaultDbPath()), 'suppressions.json')` and was
+      // contained only by HOME flowing through os.homedir(). On Windows homedir() reads USERPROFILE,
+      // which this replacement env drops, so it would fall back to the real profile directory.
+      CLAUDEWATCH_SUPPRESSIONS: join(dir, 'suppressions.json'),
     },
     stdout: 'pipe', stderr: 'pipe',
   });
