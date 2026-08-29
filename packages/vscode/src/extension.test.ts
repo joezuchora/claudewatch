@@ -42,7 +42,7 @@
  * (sdlc/028).
  */
 import { describe, expect, test, mock, beforeAll, afterAll, afterEach } from 'bun:test';
-import { homedir, tmpdir } from 'os';
+import { homedir } from 'os';
 import { join } from 'path';
 import { makeTestSnapshot, setupTestCacheDir } from '@claudewatch/core/test-helpers';
 import { getCacheDir } from '@claudewatch/core';
@@ -51,6 +51,7 @@ import type { UsageSnapshot } from '@claudewatch/core';
 // --- layer 1: no egress, whatever else goes wrong ---
 
 const realFetch = globalThis.fetch;
+let sandboxCacheDir: string;
 let cacheCleanup: (() => void) | null = null;
 
 beforeAll(() => {
@@ -59,6 +60,7 @@ beforeAll(() => {
   }) as unknown as typeof fetch;
   const t = setupTestCacheDir();
   cacheCleanup = t.cleanup;
+  sandboxCacheDir = t.tempDir;
 });
 
 afterAll(() => {
@@ -70,8 +72,18 @@ describe('the safety layers themselves', () => {
   test('the spool is redirected away from the real cache dir', () => {
     // The assertion that would have caught the inert-HOME defect had it been written against the
     // thing that matters rather than against the env var.
+    //
+    // POSITIVE identity, not two negatives. Until sdlc/034 this read `not.toBe(legacy)` plus
+    // `startsWith(tmpdir())`, and sdlc/034's audit showed that combination goes GREEN with the
+    // `setupTestCacheDir` override deleted — because `getCacheDir()` then honours an ambient
+    // `$XDG_CACHE_HOME`, which on a container or CI runner usually lives under TMPDIR and satisfies
+    // both checks. A describe block named "the safety layers themselves" was passing with the
+    // safety layer removed. Asserting the exact directory the override installed kills that mutant
+    // and does not depend on where anyone's cache happens to live.
+    expect(getCacheDir()).toBe(sandboxCacheDir);
+    // Kept as a standing statement of intent: whatever the override installs must not be the real
+    // location. Redundant while the line above holds, and the one that fails loudest if it stops.
     expect(getCacheDir()).not.toBe(join(homedir(), '.cache', 'claudewatch'));
-    expect(getCacheDir().startsWith(tmpdir())).toBe(true);
   });
 
   test('global fetch throws', () => {

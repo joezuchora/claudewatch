@@ -834,6 +834,10 @@ describe('getCacheDir — XDG_CACHE_HOME (sdlc/034)', () => {
     setCacheBaseDir(null);
     process.env.XDG_CACHE_HOME = '/xdg-abs';
     expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+    // getCachePath() asserted here rather than left to derivation. A3's own rationale is that a
+    // fix to the resolver is not automatically a fix to its consumers, and sdlc/034's audit found
+    // this was the one of six paths never checked under an absolute value.
+    expect(getCachePath()).toBe(join('/xdg-abs', 'claudewatch', 'usage.json'));
     // Positive precondition: the value really is different from the fallback, so the assertion
     // above cannot pass by accident on a machine where they coincide.
     expect(getCacheDir()).not.toBe(legacy);

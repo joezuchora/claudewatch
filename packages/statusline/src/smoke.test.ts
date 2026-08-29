@@ -11,8 +11,9 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test';
 import { spawnSync, spawn } from 'child_process';
-import { rmSync, existsSync, statSync, readdirSync } from 'fs';
-import { resolve } from 'path';
+import { rmSync, existsSync, statSync, readdirSync, mkdtempSync } from 'fs';
+import { resolve, join } from 'path';
+import { tmpdir } from 'os';
 import * as net from 'net';
 import { seedSandboxHome, makeTestSnapshot, type SandboxSeed } from '@claudewatch/core/test-helpers';
 
@@ -475,6 +476,55 @@ describe('smoke: 26 poisoned values reach neither --debug nor --json (sdlc/032)'
       expect(SNAPSHOT_KEYS.filter((k) => r.stdout.includes(M(k)))).toEqual([]);
     } finally {
       rmSync(seedP.home, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+/**
+ * sdlc/034 A15 — `--debug` reports the RESOLVED cache path.
+ *
+ * Network-inert by the same two independent mechanisms as the block above: the seeded credential is
+ * deliberately expired, and `--debug` without `--refresh` returns before `resolveCredentials` and
+ * before any fetch is reachable. The cache miss this case deliberately causes is therefore harmless.
+ *
+ * `XDG_CACHE_HOME` points at a THIRD directory, not the seed's `<home>/.cache`. That matters:
+ * `test-helpers.ts` pins the seed's value to `join(home, '.cache')`, so the XDG branch and the
+ * legacy branch produce the SAME string under `seed.env` alone — an assertion built on the seed
+ * would pass whether or not the resolver reads the variable at all. sdlc/034's audit measured that
+ * and named it as the way this criterion would have been satisfied vacuously.
+ */
+describe('smoke: --debug reports the resolved cache path (sdlc/034 A15)', () => {
+  test('cachePath follows XDG_CACHE_HOME to a directory the seed never mentions', async () => {
+    const s = seedSandboxHome({ prefix: 'cw-smoke-xdg-', accessToken: FAKE_TOKEN });
+    const xdg = mkdtempSync(join(tmpdir(), 'cw-smoke-xdgroot-'));
+
+    try {
+      const r = await new Promise<RunResult>((res) => {
+        const started = Date.now();
+        const child = spawn(BIN, ['--debug'], {
+          env: { ...process.env, ...s.env, XDG_CACHE_HOME: xdg },
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        let stdout = '';
+        child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 20000);
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          res({ code, stdout, timedOut, ms: Date.now() - started });
+        });
+      });
+      expect(r.timedOut).toBe(false);
+
+      const out = JSON.parse(r.stdout) as Record<string, unknown>;
+      expect(out.cachePath).toBe(join(xdg, 'claudewatch', 'usage.json'));
+      // Positive precondition: the seed's own location is a DIFFERENT string, so the assertion
+      // above cannot hold by coincidence.
+      expect(out.cachePath).not.toBe(s.cachePath);
+      expect(join(xdg, 'claudewatch', 'usage.json')).not.toBe(s.cachePath);
+    } finally {
+      rmSync(s.home, { recursive: true, force: true });
+      rmSync(xdg, { recursive: true, force: true });
     }
   }, 30_000);
 });

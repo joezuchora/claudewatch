@@ -7,7 +7,10 @@
 
 ## Scope fence
 
-Nineteen paths — counted against the table, not asserted. The table has **nineteen** rows.
+Twenty paths across twenty rows. The first draft said nineteen and tabulated nineteen — but row 18
+bundled `README.md` with `CONTRIBUTING.md`, so the row count and the path count were never the same
+number, and `sdlc/fence-baseline.json` was missing entirely. Both corrected at Stage 5 after the
+audit; the baseline change was disclosed in Risks but a disclosure is not a fence entry.
 
 | Path | Change | Criterion |
 |---|---|---|
@@ -30,6 +33,7 @@ Nineteen paths — counted against the table, not asserted. The table has **nine
 | `SPEC.md` | §9.6's paragraph, plus `:1073`, `:1191`, `:1256` | A9 (doc), B8 |
 | `README.md` + `CONTRIBUTING.md` | the two approximate sites | B8 |
 | `deploy/README.md` | B6's `ReadWritePaths` note with exact syntax | B6 |
+| `sdlc/fence-baseline.json` | `unresolvedTokens` 22 → 25, forced by this loop becoming checkable | A12 |
 
 **Explicitly not touched:** `packages/core/src/snapshot.ts`, `packages/core/src/normalize.ts`,
 `packages/core/src/format.ts`, `packages/core/src/state.ts`, `packages/core/src/client.ts`,

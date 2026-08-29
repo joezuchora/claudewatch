@@ -368,3 +368,43 @@ describe('A9 — the switch is documented where it needs to be', () => {
     expect(text.toLowerCase()).toContain('records nothing');
   });
 });
+
+/**
+ * sdlc/034 A7 — the gate writes its event to the RESOLVED spool, end to end.
+ *
+ * This replaces a source-reading assertion that could not catch the defect it named. The first
+ * version of A7 grepped `verify.ts` for `join(homedir(), '.cache'` and paired it with a property
+ * test over `spool-path.ts`. sdlc/034's audit defeated it in five ways — double quotes, a template
+ * literal, a destructured `homedir()`, an extracted constant — and, worst, with the mkdir left
+ * DERIVED while the append was independently constructed. That last mutant produced no event
+ * anywhere, in the fixture home or under XDG, with the gate still exiting 0: total silent loss of
+ * the record, and the old A7 stayed green.
+ *
+ * A source grep tests spelling. This tests the invariant: the event lands where the resolver says.
+ * `XDG_CACHE_HOME` points at a THIRD directory — neither the fixture home's `.cache` nor the
+ * ambient one — so the assertion cannot pass by coincidence.
+ */
+describe('A7 — the spool follows XDG_CACHE_HOME through the real gate (sdlc/034)', () => {
+  test('the event lands under $XDG_CACHE_HOME, and not under the fixture home', () => {
+    const f = makeFixture(false);
+    const xdg = mkdtempSync(join(tmpdir(), 'cw-xdg-'));
+    try {
+      expect(runGate(f, { CLAUDEWATCH_VERIFY_METRICS: '1', XDG_CACHE_HOME: xdg })).toBe(0);
+
+      const resolved = join(xdg, 'claudewatch', 'metrics-spool.jsonl');
+      expect(existsSync(resolved)).toBe(true);
+      const lines = readFileSync(resolved, 'utf-8').trim().split('\n').filter(Boolean);
+      expect(lines).toHaveLength(1);
+
+      // The other half of the invariant: nothing was left at the legacy location. Without this the
+      // test would pass for a gate that wrote to BOTH, which is the state a half-applied fix
+      // produces.
+      expect(existsSync(spool(f.home))).toBe(false);
+      expect(existsSync(cacheDir(f.home))).toBe(false);
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+      rmSync(f.home, { recursive: true, force: true });
+      rmSync(xdg, { recursive: true, force: true });
+    }
+  }, 180_000);
+});
