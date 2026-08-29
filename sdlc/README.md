@@ -1248,3 +1248,62 @@ shipper now says why, in one line, on the machine. It remains invisible to `syst
 (deliberate) and to `metrics:detect` (deferred), and the only reader is a journal command this loop
 added to the runbook. That is less than the intent asked for, and the summary says so where a reader
 will see it rather than in a subordinate clause.
+
+---
+
+## Loop 037 — the detector reports its input's freshness, and says what it cannot judge
+
+`metrics:detect` printed `healthy` for a store that stopped growing a year ago. It now prints three
+ages on every verdict — when the store last learned anything, when it last learned about a gate run,
+and when the gate last started — and still ships no staleness bound.
+
+**The same defect class three times in one loop, and I caught one of them.** A test named for a guard
+that does not exercise it: M9 in the implementation commit, which I found by running the mutation;
+the `Number.isFinite` test in that *same* commit, which the audit found; and a security guard left
+inline in `main()` where no test could reach it, which the security pass found *in the same file where
+I had been corrected for exactly that one commit earlier*.
+
+> **Finding a defect class does not inoculate you against it.** Loops 033–036 built the mutation
+> discipline precisely for this shape, and this loop ran it, caught one instance, and shipped two
+> more — one of them in the commit that fixed the first.
+
+**A correction can be worse than the claim it replaces.** The guard's comment said "one NaN poisons
+the whole result". Over-claimed: this is not `Math.max`, and NaN never wins a comparison. So I
+corrected it to "a mixed population is safe" — and *that* was the dangerous one, because
+`newest === null ||` short-circuits and admits NaN unconditionally, so a bad event in first position
+does poison it. Measured both ways after being told. A reader who believed the correction had a
+stated licence to delete a live guard.
+
+> **When you correct a claim, measure the correction.** The original was wrong in a direction that
+> made the guard look more necessary than it was. The fix was wrong in the direction that made it
+> look unnecessary. Only the second one costs anything.
+
+**Getting a principle right in one place is not evidence of applying it in the next.** This loop
+deliberately does *not* share `formatAgeMs` with `agent.ts`'s `formatAge`, on the correct ground that
+a unit ladder is a formatting preference and not a rule — and then, one file over, wrote a fourth
+copy of the percentile rule two hundred lines from the docstring explaining why there should not be a
+third. The distinction was stated correctly and applied backwards in the same diff.
+
+**The replacement instrument was forgeable.** `scripts/arrival-dist.ts` exists because the first spec
+draft trusted a measurement whose provenance it had not checked — it published a `ts` distribution
+under the heading "the arrival distribution" and decided the loop's central question on it. The
+script's census line then became the first human-facing print site for `kind` anywhere in the repo,
+and `kind` is free text from an endpoint that binds loopback with no token. A planted row cleared the
+operator's screen, printed a forged census, and concealed the real output.
+
+> **An instrument anyone able to write one row can forge is not an improvement on an unchecked
+> measurement.** The fix was three lines. Noticing that the fix belonged there at all took a reviewer
+> who followed the data rather than the diff's stated subject — the third loop running.
+
+**Where the decline finally became honest.** Loop 036 declined a staleness bound and its reviewer
+called that over-generalized. This loop declined it again, on a measurement — and *that* reviewer
+showed the measurement was on the wrong clock, that a **retrospective** bound resolves broken-vs-absent
+in the past tense, and that zero firings on known-good data is the *precondition* for shipping a bound
+here, not an argument against one. The decline that survives is narrow and evidentiary: the
+discriminator is named — *a hole in `receivedAt` filled with `ts` values is a shipping outage; a hole
+in both is an absence* — and it is not built because the measured host has no systemd, so any
+threshold from its data would be fabricated.
+
+**What the loop delivers, stated as narrowly as it deserves.** A fact on every verdict, and no verdict
+about that fact. `metrics:detect` still reports `healthy` on a year-old store — the thing the intent
+led with — and that remains open by design rather than by oversight.
