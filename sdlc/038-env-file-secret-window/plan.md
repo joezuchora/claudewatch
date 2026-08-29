@@ -32,12 +32,23 @@ depend on — the library must call bare `chmod`, not `/bin/chmod` — recorded 
 deploy/lib/env-file.sh
 deploy/install-nuc.sh
 deploy/env-file.test.ts
+deploy/README.md
+SPEC.md
 .oxlint-budget.json
 sdlc/038-env-file-secret-window/intent.md
 sdlc/038-env-file-secret-window/spec.md
 sdlc/038-env-file-secret-window/plan.md
 sdlc/038-env-file-secret-window/review.md
 ```
+
+**Fence amended after the Stage 2 review, before any implementation.** `deploy/README.md` and
+`SPEC.md` were on the "explicitly not touched" list of the first draft and are now in scope.
+The reason is spelled out in `spec.md`: §12 has no clause covering the installer's env file, so
+without an amendment this loop's invariant would exist only inside `sdlc/038-*/` where nothing
+could violate it; and the README's line 64 already asserted `mode 0600` without saying which
+`0600` it meant. Loop 035's lesson was that stepping outside a fence and rationalising it
+afterwards is the violation — amending the fence first, in writing, with the reason, is the
+procedure that lesson asks for.
 
 `.oxlint-budget.json` is on the fence because a new TypeScript test file may change the
 `oxlint` warning set, and loops 033 and 035 both stalled on discovering that after the fact.
@@ -50,6 +61,17 @@ fence entry is a smaller sin than a diff that steps outside one.
 Windows/macOS install paths.
 
 ## Changes
+
+### Design changed after review: `mktemp` + `mv`, not a `umask 077` subshell
+
+The first draft's whole mechanism was `( umask 077; { … } > "$env_file" )`. It closes the
+window and nothing else. Review found that a plain redirect truncates at open time, so a
+failure partway leaves a header-only file — which the new repair branch would then bless as
+`kept existing` on every future run, with no token in it. `mktemp` creates at `0600` under an
+ambient `umask 000` (measured) and `mv` preserves it, so the mode is still a property of
+creation, and the rename makes the destination either absent or complete. It is also the atomic
+write `CLAUDE.md` and `SECURITY.md` already require of every other private file here; the first
+draft departed from that convention for the one file holding a bearer token without noticing.
 
 ### `deploy/lib/env-file.sh` (new)
 
@@ -138,14 +160,16 @@ running, per the discipline from loops 033–037:
 
 | # | Mutation | Prediction |
 |---|---|---|
-| M1 | Delete `umask 077` from the write subshell | A1 fails (records `666`); every other test still passes — the demonstration that the redundant `chmod` really does mask it |
-| M2 | Replace the write subshell with `touch; chmod 600; >` | A1 fails; a final-mode assertion would not have |
-| M3 | Change `[ -L ]` to `[ -f ]` on the guard | A15 and A16 fail |
-| M4 | Drop the guard entirely | A15 and A16 fail |
-| M5 | Make the repair branch chmod unconditionally without reading the mode | A6 fails on the output assertion only |
-| M6 | Write `local TOKEN="$(…)"` as a one-liner | A17 fails, nothing else |
-| M7 | Raise `umask 077` around the `mkdir` and drop the leaf `chmod` | A4 fails, A3 passes |
-| M8 | Accept any truthy `lan` instead of the exact string `1` | A9 fails |
+| M1 | Replace `mktemp` + `mv` with a plain `> "$env_file"`, keeping the trailing `chmod 600` | `creates the env file at 0600 even under umask 000` fails, recording `666`. `the recorder catches the pre-change form` still passes. `a failing token generator…` still passes, because generation happens before the write either way |
+| M2 | Delete the `[ -L ]` guard | `a symlinked env path is refused…` and `a dangling symlink is refused…` both fail |
+| M3 | Change `[ -L ]` to `[ -f ]` in that guard | Only the **dangling** case fails. `[ -f ]` is true for a link to a regular file, so the symlink-to-file test still passes — the mutation is half-caught, and the half it misses is the one the old script already had |
+| M4 | Write `local token="$(…)"` as a one-liner | `a failing token generator fails the call and leaves no file` fails, nothing else |
+| M5 | Delete the absolute-path guard | `a relative path is refused rather than chmodding the working directory` fails |
+| M6 | Delete the xtrace suppression | `the token does not leak under bash -x` fails, nothing else |
+| M7 | Make the repair branch `chmod 600` unconditionally, dropping the `*00` case | `an existing 0400 file is not loosened…` fails, and `an existing 0600 file is left alone…` fails on its `not.toContain('tightened')` half |
+| M8 | Raise `umask 077` around the `mkdir` and drop the leaf `chmod 700` | `the parent directory is not tightened as collateral` fails. `the config directory ends up 0700` passes, and `a pre-existing parent keeps its own mode` passes — the shortcut only harms a directory it creates |
+| M9 | Delete the 32-character token length check | **Zero tests fail.** Predicted before running and recorded as such: nothing in the suite produces a short token, so this guard ships unarmed. If the prediction holds, the fix is a test, not a shrug |
+| M10 | Restore the inline block in the installer alongside the `source` line | `both shell files parse, and the installer calls the library` fails on its `not.toContain('> "$ENV_FILE"')` half |
 
 A mutation whose result differs from its prediction is a finding about the test, not a
 correction to the prediction, and goes in `review.md` either way. Each mutation is verified to
