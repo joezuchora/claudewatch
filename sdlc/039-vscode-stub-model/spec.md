@@ -169,6 +169,16 @@ self-contradictory, so both get tests.
 - Each of `packages/vscode/src/*.test.ts` must pass **run alone** as well as in the package run.
   That is `intent.md`'s fifth outcome, dropped by the first draft without a note, and it is the
   guard that would have caught `sdlc/025`. It becomes a criterion below.
+- **There are SIX test files, not five.** Corrected in Stage 4 before implementing: the earlier
+  artifacts enumerated five and the per-file totals summed to 70 against a package total of 77.
+  The missing 7 are `telemetry-gate.test.ts`. It mocks nothing and `telemetry-gate.ts` never
+  imports `vscode` — its only mention is the JSDoc at `:19` that A6 must strip — so it is out of
+  scope for the consolidation and **in** scope for A1b, which must run all six.
+
+  The load order I quoted from the review (`statusbar, telemetry-gate, manifest, extension,
+  commands, tooltip`) names the file I had not counted. Quoting a measurement that contradicts
+  your own enumeration and not reconciling them is the failure this loop keeps finding; here it
+  would have left a file unchecked by the criterion I called the most important one.
 - `verify` gains a step. It is static text analysis over ~10 files, so its cost is comparable to
   `fenceCheck`'s.
 - The check must pass on the tree **as it stands today**. If it does not, that is a finding about

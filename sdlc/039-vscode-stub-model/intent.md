@@ -20,7 +20,7 @@ this is a loop rather than a chore:
 
 | Measured | Result |
 |---|---|
-| Each of the five `packages/vscode/src/*.test.ts` files run **alone** | All pass — 5, 20, 29, 10, 6 |
+| Each `packages/vscode/src/*.test.ts` file run **alone** | All pass — commands 5, extension 20, statusbar 29, tooltip 10, manifest 6, telemetry-gate 7 |
 | Top-level keys defined by each of the four stubs | **Identical**: `window`, `workspace`, `commands`, `env`, `Uri`, `StatusBarAlignment`, `ThemeColor`, `MarkdownString` |
 | Sub-keys of `window` | **Divergent**: `extension` defines three (`createStatusBarItem`, `showInformationMessage`, `showErrorMessage`), `statusbar` and `tooltip` define one |
 | Two files mocking one **bare** specifier with different keys, run together | Each file saw **only its own** — no composite, and no cross-file key |

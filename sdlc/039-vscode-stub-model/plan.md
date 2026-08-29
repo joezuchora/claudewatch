@@ -75,7 +75,8 @@ actually touched.
 
 **Explicitly not touched:** every non-test `.ts` under `packages/vscode/src` (`extension.ts`,
 `commands.ts`, `statusbar.ts`, `tooltip.ts`, `core-bridge.ts`, `extension-bridge.ts`,
-`telemetry-gate.ts`), `packages/core/**`, `packages/statusline/**`, `packages/metrics/**`,
+`telemetry-gate.ts`), `packages/vscode/src/telemetry-gate.test.ts` (it mocks nothing and its
+subject never imports `vscode`), `packages/core/**`, `packages/statusline/**`, `packages/metrics/**`,
 `scripts/mock-topology.ts` (loop 026 built R1/R2 against specific observations; this loop does not
 edit them), `SPEC.md`, `CLAUDE.md`, `deploy/**`, and `manifest.test.ts` (it mocks nothing).
 
@@ -151,8 +152,10 @@ edit them), `SPEC.md`, `CLAUDE.md`, `deploy/**`, and `manifest.test.ts` (it mock
 | A11 | lint budget unchanged | — (the gate) |
 
 **A1b is the one that matters most** and is the only criterion about the consolidation rather
-than the checker. It shells out to `bun test <file>` for each of the five vscode test files and
-asserts each exits 0. If `resetVscodeStub()` is incomplete, the single-file runs are where it
+than the checker. It shells out to `bun test <file>` for each of the **six** vscode test files —
+`commands`, `extension`, `statusbar`, `tooltip`, `manifest`, `telemetry-gate` — and asserts each
+exits 0. It enumerates the directory rather than a hard-coded list, so a seventh file is covered
+the day it appears; the count is asserted so an empty glob cannot pass vacuously. If `resetVscodeStub()` is incomplete, the single-file runs are where it
 shows — and a suite-wide run can hide it, which is the whole history of this package.
 
 ## Verification
@@ -160,7 +163,7 @@ shows — and a suite-wide run can hide it, which is the whole history of this p
 ```
 bun test scripts/vscode-stub-cover.test.ts
 bun test packages/vscode/src/            # together
-for f in commands extension statusbar tooltip manifest; do bun test packages/vscode/src/$f.test.ts; done
+for f in commands extension statusbar tooltip manifest telemetry-gate; do bun test packages/vscode/src/$f.test.ts; done
 bun run verify
 ```
 
