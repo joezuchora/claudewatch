@@ -18,6 +18,7 @@ import { spawnSync } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
+import { realpathSync } from 'fs';
 
 const REPO = resolve(import.meta.dir, '..');
 const LIB = join(REPO, 'deploy', 'lib', 'env-file.sh');
@@ -43,6 +44,8 @@ interface RunOpts {
   bareShell?: boolean;
   /** Extra shell sourced before the snippet — used to shadow a command with a failing stub. */
   preamble?: string;
+  /** Interpose wrappers that record the argv of every external command the secret path runs. */
+  recordArgv?: boolean;
 }
 
 interface RunResult {
@@ -51,6 +54,8 @@ interface RunResult {
   stderr: string;
   /** `<mode> <path>` pairs seen by the stub `chmod`, in call order. Empty unless `observe`. */
   observed: string[];
+  /** Full argv of each wrapped external command. Empty unless `recordArgv`. */
+  argv: string[];
 }
 
 /**
@@ -77,6 +82,20 @@ function run(sb: string, snippet: string, opts: RunOpts = {}): RunResult {
     );
   }
 
+  const argvFile = join(sb, 'argv.log');
+  if (opts.recordArgv) {
+    mkdirSync(bin, { recursive: true });
+    // Every external command the secret-handling path can reach. A token that ever became a
+    // process argument would show up here as an execve argv.
+    for (const cmd of ['head', 'base64', 'tr', 'mktemp', 'mv', 'cat', 'env', 'printf', 'stat']) {
+      writeFileSync(
+        join(bin, cmd),
+        ['#!/bin/bash', `printf '%s\\n' "$*" >> "$ARGV_LOG"`, `exec /usr/bin/${cmd} "$@"`, ''].join('\n'),
+        { mode: 0o755 },
+      );
+    }
+  }
+
   const script = [
     `umask ${opts.umask ?? '022'}`,
     opts.bareShell ? '' : 'set -euo pipefail',
@@ -90,8 +109,9 @@ function run(sb: string, snippet: string, opts: RunOpts = {}): RunResult {
     [
       '-i',
       `HOME=${join(sb, 'unused-home')}`,
-      `PATH=${opts.observe ? `${bin}:` : ''}/usr/bin:/bin`,
+      `PATH=${opts.observe || opts.recordArgv ? `${bin}:` : ''}/usr/bin:/bin`,
       `OBSERVED=${observedFile}`,
+      `ARGV_LOG=${argvFile}`,
       'bash',
       ...(opts.xtrace ? ['-x'] : []),
       '-c',
@@ -107,11 +127,16 @@ function run(sb: string, snippet: string, opts: RunOpts = {}): RunResult {
     observed: existsSync(observedFile)
       ? readFileSync(observedFile, 'utf-8').split('\n').filter((l) => l.length > 0)
       : [],
+    argv: existsSync(argvFile)
+      ? readFileSync(argvFile, 'utf-8').split('\n').filter((l) => l.length > 0)
+      : [],
   };
 }
 
 function sandbox(): { sb: string; envFile: string; configDir: string; parent: string } {
-  const sb = mkdtempSync(join(tmpdir(), 'cw-envfile-'));
+  // realpath, because the library now refuses a config directory that resolves elsewhere and
+  // some platforms hand out a $TMPDIR that is itself a symlink.
+  const sb = realpathSync(mkdtempSync(join(tmpdir(), 'cw-envfile-')));
   const parent = join(sb, '.config');
   const configDir = join(parent, 'claudewatch');
   return { sb, envFile: join(configDir, 'metrics.env'), configDir, parent };
@@ -219,7 +244,7 @@ describe('the atomic write', () => {
     expect(readdirSync(configDir).toSorted()).toEqual(['metrics.env']);
   });
 
-  test('a write that fails after the temp path is chosen leaves no destination file', () => {
+  test('a temp file that cannot be opened leaves no destination file', () => {
     const { sb, envFile, configDir } = sandbox();
     mkdirSync(configDir, { recursive: true });
     // The stubbed `mktemp` names a path inside a directory that does not exist, so the redirect
@@ -237,6 +262,19 @@ describe('the atomic write', () => {
     const r = run(sb, call(envFile, '1'), { umask: '022', preamble: `PATH=${JSON.stringify(bin)}:$PATH` });
     expect(r.status).not.toBe(0);
     expect(existsSync(envFile)).toBe(false);
+  });
+
+  test('a failing rename leaves no temp file holding the token', () => {
+    // All three `rm -f "$tmp"` cleanups were untested: deleting each individually left the
+    // suite green, and the mv- and chmod-failure temps hold the COMPLETE token. Not an
+    // exposure — 0600 inside a 0700 directory — but the design comment claims nothing is left
+    // lying around, and only the happy path checked that.
+    const { sb, envFile, configDir } = sandbox();
+    const r = run(sb, call(envFile, '1'), { umask: '022', preamble: 'mv() { return 1; }' });
+
+    expect(r.status).not.toBe(0);
+    expect(existsSync(envFile)).toBe(false);
+    expect(readdirSync(configDir)).toEqual([]);
   });
 
   test('the file contents are exactly what the service parses', () => {
@@ -285,14 +323,32 @@ describe('the token', () => {
 
     const token = /^CLAUDEWATCH_METRICS_TOKEN=(.+)$/m.exec(readFileSync(envFile, 'utf-8'))?.[1] ?? '';
     expect(token.length).toBeGreaterThanOrEqual(32);
-    // xtrace prints the argv of every command it runs, so this covers the "never a process
-    // argument" half of the claim as well as the "never in debug output" half.
     expect(r.stderr).not.toContain(token);
     // `toContain('+')` used to stand here and was satisfied by the harness's own pre-call
     // trace lines, so it would have held against a library that switched xtrace off and never
     // switched it back. The marker runs AFTER the call: seeing it traced is what proves the
     // setting was restored rather than merely disabled.
     expect(r.stderr).toContain('cw-xtrace-restored-marker');
+  });
+
+  test('the token never becomes a process argument', () => {
+    // This used to be claimed by a comment on the `bash -x` test, on the reasoning that xtrace
+    // prints the argv of every command. It cannot: the library disables xtrace for exactly the
+    // secret-handling section, so argv is precisely what that trace cannot show. The Stage 5
+    // security pass proved the gap by routing the content through `/usr/bin/env printf` — a
+    // real execve argv — and the whole suite stayed green.
+    //
+    // The code is safe today only because `printf` and `[` are bash builtins. Nothing held it
+    // there, so this records the argv of every external command the secret path can reach.
+    const { sb, envFile } = sandbox();
+    const r = run(sb, call(envFile, '1'), { umask: '022', recordArgv: true });
+    expect(r.status).toBe(0);
+
+    const token = /^CLAUDEWATCH_METRICS_TOKEN=(.+)$/m.exec(readFileSync(envFile, 'utf-8'))?.[1] ?? '';
+    expect(token.length).toBeGreaterThanOrEqual(32);
+    // The recorder really recorded — otherwise the assertion below proves nothing.
+    expect(r.argv.length).toBeGreaterThan(0);
+    expect(r.argv.filter((line) => line.includes(token))).toEqual([]);
   });
 
   test('loopback writes neither host nor token', () => {
@@ -325,7 +381,13 @@ describe('the token', () => {
     const { sb, envFile } = sandbox();
     const bin = join(sb, 'stub');
     mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, 'tr'), '#!/bin/bash\necho short\n', { mode: 0o755 });
+    // `cat > /dev/null` first: a stub that never reads stdin leaves `base64` writing into a
+    // closed pipe, and under `pipefail` that SIGPIPE fails the pipeline — so the call errors
+    // with "could not generate a token" instead of the length message this test asserts.
+    // Measured at 1 failure in 400 without the drain, 0 in 400 with it. It flaked on its
+    // second run here; at that rate it would have reddened CI eventually and looked like an
+    // infrastructure problem.
+    writeFileSync(join(bin, 'tr'), '#!/bin/bash\ncat > /dev/null\necho short\n', { mode: 0o755 });
     const r = run(sb, call(envFile, '1'), { umask: '022', preamble: `PATH=${JSON.stringify(bin)}:$PATH` });
 
     expect(r.status).not.toBe(0);
@@ -362,6 +424,12 @@ describe('an existing file', () => {
     expect(r.stdout).toContain('(was 644)');
     // Repairing the mode must not rewrite the file or rotate the token.
     expect(readFileSync(envFile, 'utf-8')).toBe('CLAUDEWATCH_METRICS_TOKEN=preexisting-token-value-kept-intact\n');
+    // ...nor PRINT it. SPEC.md §12's Deployment secrets clause, added by this very loop, says
+    // the repair branch "never reads, rotates, or prints the token". Only the first two halves
+    // were armed: the Stage 5 security pass made `_cw_repair_mode` cat the file into its own
+    // success message and the whole suite stayed green.
+    expect(r.stdout).not.toContain('preexisting-token-value-kept-intact');
+    expect(r.stderr).not.toContain('preexisting-token-value-kept-intact');
   });
 
   test('an existing 0600 file is left alone, contents intact', () => {
@@ -371,11 +439,14 @@ describe('an existing file', () => {
     chmodSync(envFile, 0o600);
 
     const r = run(sb, call(envFile, '1'), { umask: '022' });
+    // (the sentinel below never appears in the file; it guards against a future edit that
+    // starts echoing contents on the untouched branch too)
     expect(r.status).toBe(0);
     expect(mode(envFile)).toBe('600');
     expect(r.stdout).toContain('kept existing');
     expect(r.stdout).not.toContain('tightened');
     expect(readFileSync(envFile, 'utf-8')).toBe('ORIGINAL=1\n');
+    expect(`${r.stdout}${r.stderr}`).not.toContain('SECRET-SENTINEL');
   });
 
   test('an existing 0400 file is not loosened under a message claiming otherwise', () => {
@@ -389,6 +460,20 @@ describe('an existing file', () => {
     // An owner-only file is already at least as strict as this script would make it. Changing
     // 0400 to 0600 and printing "tightened" would describe a loosening as its opposite.
     expect(mode(envFile)).toBe('400');
+    expect(r.stdout).not.toContain('tightened');
+  });
+  test('a mode-000 file is not loosened either', () => {
+    // The `printf '%03d'` padding is what puts a bare `0` from `stat` into the `*00` case.
+    // Deleting the padding left every test green while a 0000 file was loosened to 0600 under
+    // a message reading "tightened" — the same inversion the 0400 test exists to prevent.
+    const { sb, envFile, configDir } = sandbox();
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(envFile, 'ORIGINAL=1\n');
+    chmodSync(envFile, 0o000);
+
+    const r = run(sb, call(envFile, '1'), { umask: '022' });
+    expect(r.status).toBe(0);
+    expect(mode(envFile)).toBe('000');
     expect(r.stdout).not.toContain('tightened');
   });
 });
@@ -445,6 +530,22 @@ describe('paths a secret must not be written to', () => {
     // `dirname "metrics.env"` is `.`, so an unguarded `chmod 700 "$dir"` would land here and
     // report success.
     expect(mode(cwdGuard)).toBe('755');
+  });
+
+  test('a symlinked config directory is refused and the token is not written into it', () => {
+    // Worse than a symlinked file: mkdir, chmod, mktemp and mv all follow a symlinked
+    // DIRECTORY, so the token is not merely mis-moded, it lands somewhere else — a dotfiles
+    // repo, a Syncthing share. Raised by the Stage 5 security pass, which measured it.
+    const { sb, envFile, parent } = sandbox();
+    const elsewhere = join(sb, 'elsewhere');
+    mkdirSync(join(elsewhere, 'claudewatch'), { recursive: true });
+    mkdirSync(parent, { recursive: true });
+    symlinkSync(join(elsewhere, 'claudewatch'), join(parent, 'claudewatch'));
+
+    const r = run(sb, call(envFile, '1'), { umask: '022' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('resolves to');
+    expect(readdirSync(join(elsewhere, 'claudewatch'))).toEqual([]);
   });
 
   test('a missing path argument fails and creates nothing', () => {

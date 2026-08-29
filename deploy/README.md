@@ -68,6 +68,12 @@ what `sdlc/038` closed. Its directory is `0700`. Re-running the installer over a
 that grants group or other access tightens it and says so; it never reads or rotates the
 token already in it.
 
+Worth being plain about what that does *not* buy you: `--lan` binds the service on `0.0.0.0`
+over plain `http://`, so the token this hardens **at rest** still crosses your network in
+cleartext on every request. That is fine on a trusted home LAN and is not fine anywhere else.
+If the network is not yours, put the service behind a TLS-terminating reverse proxy rather than
+relying on the token alone.
+
 ## Running Claude Code itself on the NUC
 
 Claude Code on the web runs in Anthropic's cloud and **cannot target your NUC** — there is no

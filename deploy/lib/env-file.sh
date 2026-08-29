@@ -14,6 +14,13 @@
 # depend on theirs. And the wrapper below calls the implementation as the left operand of `||`
 # to capture its status, which — measured — disables `set -e` for the whole call, so an
 # unchecked failure inside would not abort anything at all.
+#
+# One honest exception, since the sentence above would otherwise overclaim: the token
+# generator is a PIPELINE, and detecting a failure in its middle (`base64` dying, say) needs
+# the caller's `pipefail`. Without it the pipeline reports the exit status of the final `head`
+# and the failure is not seen as a generator failure. The call still fails safely, but via the
+# 32-character length check below rather than the generator's own branch — which makes that
+# length check load-bearing beyond what its own comment claims.
 
 _cw_say() { printf '  %s\n' "$*"; }
 _cw_err() { printf 'env-file: %s\n' "$*" >&2; }
@@ -87,6 +94,24 @@ _cw_write_env_file_impl() {
   #
   # The leaf is therefore 0755 for an instant before it is 0700. That window exposes nothing:
   # it closes before the env file exists, and the env file is 0600 from its own first instant.
+  # The `[ -L ]` above guards the FILE. It says nothing about the directory holding it, and a
+  # symlinked directory is worse than a symlinked file: `mkdir -p`, `chmod 700`, `mktemp` and
+  # `mv` all follow it, so the token does not merely get the wrong mode — it gets written
+  # somewhere else entirely. The realistic trigger is not an attacker but an ordinary setup:
+  # ~/.config symlinked into a dotfiles repo, a Syncthing share, a Dropbox root. That puts a
+  # live bearer token under version control or into a sync tree. (Raised by the Stage 5
+  # security pass, which measured it; the first draft of review.md had recorded only the mode.)
+  #
+  # `cd && pwd -P` resolves every component, so this also refuses an unnormalised path
+  # containing `..`. That is a deliberate second effect: this is not a place to be relaxed
+  # about which directory is meant. Creating the directory through the link first is harmless;
+  # what must not happen through it is the write, and that is still ahead of us.
+  local resolved
+  resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || { _cw_err "could not resolve $dir"; return 1; }
+  if [ "$resolved" != "$dir" ]; then
+    _cw_err "$dir resolves to $resolved; refusing to write a secret through a symlinked directory. Point XDG_CONFIG_HOME at a real path."
+    return 3
+  fi
   chmod 700 "$dir" || { _cw_err "could not restrict $dir"; return 1; }
 
   if [ -f "$env_file" ]; then
@@ -111,6 +136,10 @@ _cw_write_env_file_impl() {
     }
     # The service refuses a non-loopback bind under 32 characters. Catching a short token here
     # turns an undiagnosable "the service will not start" into a message at install time.
+    #
+    # It is also the backstop for a mid-pipeline failure when the caller has not set
+    # `pipefail`: a truncated or empty token lands here rather than being written out. See the
+    # header. Do not delete it on the grounds that the generator "cannot fail".
     if [ "${#token}" -lt 32 ]; then
       _cw_err "generated token is shorter than the 32 characters the service requires"
       return 1
