@@ -1,6 +1,6 @@
 {
   "uncheckable": 13,
-  "unresolvedTokens": 25,
+  "unresolvedSymbols": 13,
   "findings": [
     {
       "loop": "030-cache-read-validation",

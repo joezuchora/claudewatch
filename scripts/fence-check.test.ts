@@ -2,13 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildIndex,
   checkLoop,
+  classifyToken,
   compareToBaseline,
   extractFence,
   gitFiles,
+  indexScripts,
   NO_STAT,
   headingTokens,
   parseBaseline,
   scrubControls,
+  type ScriptIndex,
   type SymbolIndex,
 } from './fence-check.js';
 
@@ -34,7 +37,8 @@ const CORPUS = [
 
 const SOURCES: Record<string, string> = {
   'packages/core/src/snapshot.ts': 'export function extractLastError() {}',
-  'packages/core/src/telemetry.ts': 'export function renderEvent() {}\nexport const MAX_LINE_BYTES = 4096;',
+  'packages/core/src/telemetry.ts':
+    'export function renderEvent() {}\nexport const MAX_LINE_BYTES = 4096;\nexport interface MetricEvent {}',
   'packages/core/src/format.ts': 'export function formatTooltip() {}',
   'packages/vscode/src/statusbar-bridge.ts': 'export const renderEvent = coreRenderEvent;',
   'packages/core/src/typefixtures/leaky.expect-error.ts': 'export const leaky = 1;',
@@ -48,7 +52,21 @@ const read = ((f: string): string => SOURCES[f] ?? '') as unknown as typeof impo
 // protects the live run from symlinks and huge files must be bypassed here.
 const INDEX: SymbolIndex = buildIndex(CORPUS, read, NO_STAT);
 
-const run = (spec: string, plan: string) => checkLoop('fixture', spec, plan, INDEX, CORPUS);
+/**
+ * Deliberately includes one script whose target is NOT in `CORPUS` (`scripts/ghost.ts`). A7's second
+ * half asserts it does not resolve, which is what stops `indexScripts` inventing paths.
+ */
+const MANIFEST = JSON.stringify({
+  scripts: {
+    verify: 'bun run scripts/verify.ts',
+    lint: 'oxlint',
+    ghost: 'bun run scripts/ghost.ts',
+    'verify:plain': 'bun run scripts/junit.ts --plain',
+  },
+});
+const SCRIPTS: ScriptIndex = indexScripts(MANIFEST, CORPUS);
+
+const run = (spec: string, plan: string) => checkLoop('fixture', spec, plan, INDEX, CORPUS, SCRIPTS);
 
 describe('extractFence', () => {
   test('a plan with no marker is UNCHECKABLE, not passing', () => {
@@ -159,10 +177,187 @@ describe('checkLoop — symbol resolution', () => {
     expect(res?.unresolved).toEqual(['leaky']);
   });
 
+  /**
+   * SPLIT in sdlc/035, and the reason matters more than the change.
+   *
+   * This test used to assert `unresolved === ['MetricEvent.payload']`, and adding Rule 4 does NOT
+   * make it fail on its own: the fixture `telemetry.ts` declared `renderEvent` and `MAX_LINE_BYTES`
+   * and no `MetricEvent`, so the prefix lookup found nothing and the token still fell through. It
+   * would have stayed green while its name stopped being true — worse than failing. The fixture now
+   * declares `MetricEvent` so Rule 4's test below can fire, and a token no rule can reach is
+   * asserted separately here.
+   */
   test('an unresolvable token is recorded, not silently dropped', () => {
-    const res = run('### B1 — `MetricEvent.payload` must not widen\n', '**Not touched:** `packages/core/src/telemetry.ts`\n\n');
+    const res = run('### B1 — `noSuchSymbol` must not widen\n', '**Not touched:** `packages/core/src/telemetry.ts`\n\n');
     expect(res?.findings).toEqual([]);
-    expect(res?.unresolved).toEqual(['MetricEvent.payload']);
+    expect(res?.unresolved).toEqual(['noSuchSymbol']);
+    expect(res?.notASymbol).toEqual([]);
+  });
+});
+
+/**
+ * A7 — Rule 3. A root manifest script name resolves to the file it runs.
+ *
+ * Not a heuristic: `"verify": "bun run scripts/verify.ts"` is a declared mapping from a name to a
+ * file, hand-written in a committed file exactly as `export function verify` would be. Before this,
+ * loops 033 and 034 both left `verify` unresolved, and loop 034 therefore moved the baselined count
+ * by 1 for a reason carrying no information — the defect that motivated sdlc/035.
+ */
+describe('checkLoop — script-name resolution', () => {
+  test('a script name resolves to the file it runs', () => {
+    const res = run('### B1 — `verify` gains a step\n', '**Not touched:** `scripts/verify.ts`\n\n');
+    expect(res?.findings).toEqual([
+      { loop: 'fixture', specToken: 'verify', file: 'scripts/verify.ts', fenceEntry: 'scripts/verify.ts' },
+    ]);
+    expect(res?.unresolved).toEqual([]);
+  });
+
+  test('a script whose target is not tracked does not resolve — the map never invents a path', () => {
+    expect(indexScripts(MANIFEST, CORPUS).has('ghost')).toBe(false);
+    const res = run('### B1 — `ghost` gains a step\n', '**Not touched:** `scripts/junit.ts`\n\n');
+    expect(res?.findings).toEqual([]);
+    expect(res?.unresolved).toEqual(['ghost']);
+  });
+
+  test('a script naming no file at all contributes nothing', () => {
+    expect(indexScripts(MANIFEST, CORPUS).has('lint')).toBe(false);
+  });
+
+  test('the RAW token is tried before bareSymbol, or a colon-bearing script name is lost', () => {
+    // `bareSymbol('verify:plain')` is `verify`, which would resolve to the WRONG file.
+    expect(indexScripts(MANIFEST, CORPUS).get('verify:plain')).toBe('scripts/junit.ts');
+    const res = run('### B1 — `verify:plain` changes\n', '**Not touched:** `scripts/junit.ts`\n\n');
+    expect(res?.findings.map((f) => f.file)).toEqual(['scripts/junit.ts']);
+  });
+
+  test('a malformed manifest yields an empty map rather than throwing', () => {
+    expect(indexScripts('{not json', CORPUS).size).toBe(0);
+    expect(indexScripts('null', CORPUS).size).toBe(0);
+    expect(indexScripts('{}', CORPUS).size).toBe(0);
+  });
+
+  test('the symbol index wins over the script map', () => {
+    const manifest = JSON.stringify({ scripts: { extractLastError: 'bun run scripts/junit.ts' } });
+    const res = checkLoop(
+      'fixture',
+      '### B1 — `extractLastError` moves\n',
+      '**Not touched:** `packages/core/src/snapshot.ts`, `scripts/junit.ts`\n\n',
+      INDEX,
+      CORPUS,
+      indexScripts(manifest, CORPUS),
+    );
+    expect(res?.findings.map((f) => f.file)).toEqual(['packages/core/src/snapshot.ts']);
+  });
+});
+
+/**
+ * A8 — Rule 4. A dotted token resolves by its prefix, against the index that already exists.
+ *
+ * No member indexing: `MetricEvent` is an ordinary top-level export. sdlc/035 measured the
+ * alternative — indexing type members — at four new findings across two loops, all four false
+ * positives, because a bare field name in a heading names the field's behaviour rather than the file
+ * that declares it. A dot is the author saying which declaration they mean.
+ */
+describe('checkLoop — dotted-prefix resolution', () => {
+  test('Owner.member resolves to the file where Owner is declared', () => {
+    const res = run('### B1 — `MetricEvent.payload` must not widen\n', '**Not touched:** `packages/core/src/telemetry.ts`\n\n');
+    expect(res?.findings).toEqual([
+      {
+        loop: 'fixture',
+        specToken: 'MetricEvent.payload',
+        file: 'packages/core/src/telemetry.ts',
+        fenceEntry: 'packages/core/src/telemetry.ts',
+      },
+    ]);
+  });
+
+  test('an unknown prefix stays unresolved rather than guessing', () => {
+    const res = run('### B1 — `enterprise.utilizationPct` is validated\n', '**Not touched:** `packages/core/src/format.ts`\n\n');
+    expect(res?.findings).toEqual([]);
+    expect(res?.notASymbol).toEqual(['enterprise.utilizationPct']);
+  });
+
+  test('a signature-stripped dotted token is reached, and still fails on its prefix', () => {
+    const res = run('### B1 — `response.json()` is guarded\n', '**Not touched:** `packages/core/src/format.ts`\n\n');
+    expect(res?.findings).toEqual([]);
+    expect(res?.notASymbol).toEqual(['response.json()']);
+  });
+
+  test('a token with a dot but not an identifier chain never reaches the prefix rule', () => {
+    const res = run('### B1 — `SPEC.md §12` is amended\n', '**Not touched:** `packages/core/src/format.ts`\n\n');
+    expect(res?.findings).toEqual([]);
+    expect(res?.notASymbol).toEqual(['SPEC.md §12']);
+  });
+});
+
+/**
+ * A2 — the classifier. One named test per shape rule, plus the narrowing that separates a module
+ * constant from an environment variable. Not one loop over a table: sdlc/032 shipped four silent
+ * bugs behind a single guard, and per-rule coverage is the standing correction.
+ */
+describe('classifyToken', () => {
+  test('a flag is not a symbol', () => {
+    expect(classifyToken('--json')).toBe('not-a-symbol');
+    expect(classifyToken('--debug')).toBe('not-a-symbol');
+  });
+
+  test('an underscored ALLCAPS name is an environment variable, not a symbol', () => {
+    expect(classifyToken('XDG_CACHE_HOME')).toBe('not-a-symbol');
+  });
+
+  test('an ALLCAPS name with NO underscore is left unresolved', () => {
+    // `MARKERS`, `HEADING`, `TOKEN` and `EXPORTED` are module-private constants in fence-check.ts
+    // itself. Calling them "not a symbol" is the silent false negative sdlc/035 exists to remove.
+    expect(classifyToken('MARKERS')).toBe('unresolved');
+    expect(classifyToken('HEADING')).toBe('unresolved');
+    // Still missed, and recorded rather than fixed: no shape rule separates this from TMPDIR.
+    expect(classifyToken('PATH_RE')).toBe('not-a-symbol');
+  });
+
+  test('an ECMAScript reserved word is not a symbol', () => {
+    expect(classifyToken('try')).toBe('not-a-symbol');
+    expect(classifyToken('class')).toBe('not-a-symbol');
+  });
+
+  test('a TypeScript type keyword is not a symbol — and `any` is not a reserved word', () => {
+    expect(classifyToken('any')).toBe('not-a-symbol');
+    expect(classifyToken('unknown')).toBe('not-a-symbol');
+  });
+
+  test('a non-identifier is not a symbol', () => {
+    expect(classifyToken('⊙ error')).toBe('not-a-symbol');
+    expect(classifyToken('SPEC.md §12')).toBe('not-a-symbol');
+  });
+
+  test('a plain identifier is unresolved — the class that stays baselined', () => {
+    expect(classifyToken('freshness')).toBe('unresolved');
+    expect(classifyToken('vscode')).toBe('unresolved');
+    expect(classifyToken('doRefresh')).toBe('unresolved');
+  });
+
+  test('the rules are applied to bareSymbol, so a signature does not flip the class', () => {
+    expect(classifyToken('XDG_CACHE_HOME: string')).toBe('not-a-symbol');
+    expect(classifyToken('freshness: number')).toBe('unresolved');
+    expect(classifyToken('doRefresh(): Promise<void>')).toBe('unresolved');
+  });
+});
+
+/**
+ * A5 and A6 — the intent's headline requirement, and the precondition without which it is vacuous.
+ */
+describe('the split does what the intent asked for', () => {
+  const FENCE = '**Not touched:** `packages/core/src/format.ts`\n\n';
+
+  test('a loop naming only flags and env vars does not move the baselined count', () => {
+    const res = run('### B1 — `--debug` reports `XDG_CACHE_HOME`\n', FENCE);
+    expect(res?.unresolved).toEqual([]);
+    expect(res?.notASymbol).toEqual(['--debug', 'XDG_CACHE_HOME']);
+  });
+
+  test('a loop naming an identifier the index does not know DOES move it', () => {
+    const res = run('### B1 — `refreshInFlight` is cleared\n', FENCE);
+    expect(res?.unresolved).toEqual(['refreshInFlight']);
+    expect(res?.notASymbol).toEqual([]);
   });
 });
 
@@ -185,6 +380,7 @@ describe('checkLoop — portability', () => {
       '**Explicitly not touched:** `snapshot.ts`\n\n',
       buildIndex(winCorpus, winRead, NO_STAT),
       winCorpus,
+      SCRIPTS,
     );
     expect(res?.findings).toEqual([
       { loop: 'fixture', specToken: 'extractLastError', file: 'packages/core/src/snapshot.ts', fenceEntry: 'snapshot.ts' },
@@ -199,6 +395,7 @@ describe('checkLoop — portability', () => {
       '**Explicitly not touched:** `snapshot.ts`\n\n',
       buildIndex([], read, NO_STAT),
       winCorpus,
+      SCRIPTS,
     );
     expect(res?.findings.map((f) => f.file)).toEqual(['packages/core/src/snapshot.ts']);
   });
@@ -211,7 +408,7 @@ describe('compareToBaseline — the four ways this gate fails', () => {
     file: 'packages/core/src/snapshot.ts',
     fenceEntry: 'snapshot.ts',
   };
-  const BASE = { uncheckable: 13, unresolvedTokens: 22, findings: [{ ...FINDING, note: 'known' }] };
+  const BASE = { uncheckable: 13, unresolvedSymbols: 22, findings: [{ ...FINDING, note: 'known' }] };
   const MATCH = { findings: [FINDING], uncheckable: 13, unresolved: 22 };
 
   test('a matching run reports nothing', () => {
@@ -242,8 +439,12 @@ describe('compareToBaseline — the four ways this gate fails', () => {
   });
 
   test('the unresolved-token count moves in either direction, so the silence cannot grow quietly', () => {
-    expect(compareToBaseline({ ...MATCH, unresolved: 23 }, BASE)[0]).toContain('unresolved heading tokens is 23');
-    expect(compareToBaseline({ ...MATCH, unresolved: 21 }, BASE)[0]).toContain('unresolved heading tokens is 21');
+    expect(compareToBaseline({ ...MATCH, unresolved: 23 }, BASE)[0]).toContain(
+      'unresolved symbol-shaped heading tokens is 23',
+    );
+    expect(compareToBaseline({ ...MATCH, unresolved: 21 }, BASE)[0]).toContain(
+      'unresolved symbol-shaped heading tokens is 21',
+    );
   });
 });
 
@@ -290,7 +491,7 @@ describe('scrubControls', () => {
     const base = parseBaseline(
       JSON.stringify({
         uncheckable: 0,
-        unresolvedTokens: 0,
+        unresolvedSymbols: 0,
         findings: [{ loop: 'l', specToken: 't', file: 'f', fenceEntry: `${esc}[31mx${esc}[0m`, note: 'n' }],
       }),
     );
@@ -305,8 +506,19 @@ describe('scrubControls', () => {
 describe('parseBaseline', () => {
   test('a malformed baseline fails loudly rather than being healed', () => {
     expect(() => parseBaseline('[]')).toThrow(/malformed/);
-    expect(() => parseBaseline('{"uncheckable":1,"unresolvedTokens":2,"findings":[{}]}')).toThrow(/malformed/);
+    expect(() => parseBaseline('{"uncheckable":1,"unresolvedSymbols":2,"findings":[{}]}')).toThrow(/malformed/);
     expect(() => parseBaseline('null')).toThrow(/not an object/);
+  });
+
+  /**
+   * The rename is enforced, not merely intended. sdlc/035 redefined what the number counts (symbols
+   * only, not flags and env vars too), and a baseline still carrying the old key would otherwise
+   * read `undefined` for the new one \u2014 which `Number.isInteger` rejects, but only because it is
+   * checked. Asserting it here is what makes the rename a migration rather than a hope.
+   */
+  test('a baseline still carrying the pre-035 key is rejected, not read as zero', () => {
+    const old = '{"uncheckable":13,"unresolvedTokens":25,"findings":[]}';
+    expect(() => parseBaseline(old)).toThrow(/malformed/);
   });
 });
 
@@ -316,21 +528,25 @@ describe('the live tree', () => {
     const index = buildIndex(corpus);
     const baseline = parseBaseline(await Bun.file('sdlc/fence-baseline.json').text());
 
+    const { readdirSync, existsSync, readFileSync } = await import('fs');
+    const scripts = indexScripts(readFileSync('package.json', 'utf8'), corpus);
+
     const findings = [];
     let uncheckable = 0;
-    let unresolved = 0;
-    const { readdirSync, existsSync, readFileSync } = await import('fs');
+    const unresolved: string[] = [];
+    const notASymbol: string[] = [];
     for (const loop of readdirSync('sdlc').filter((d) => /^\d{3}-/.test(d)).toSorted()) {
       const spec = `sdlc/${loop}/spec.md`;
       const plan = `sdlc/${loop}/plan.md`;
       if (!existsSync(spec) || !existsSync(plan)) continue;
-      const res = checkLoop(loop, readFileSync(spec, 'utf8'), readFileSync(plan, 'utf8'), index, corpus);
+      const res = checkLoop(loop, readFileSync(spec, 'utf8'), readFileSync(plan, 'utf8'), index, corpus, scripts);
       if (res === null) {
         uncheckable += 1;
         continue;
       }
       findings.push(...res.findings);
-      unresolved += res.unresolved.length;
+      unresolved.push(...res.unresolved.map((t) => `${loop}: ${t}`));
+      notASymbol.push(...res.notASymbol.map((t) => `${loop}: ${t}`));
     }
 
     expect(findings).toHaveLength(1);
@@ -338,6 +554,74 @@ describe('the live tree', () => {
     expect(findings[0]?.specToken).toBe('extractLastError');
     expect(findings[0]?.file).toBe('packages/core/src/snapshot.ts');
     expect(uncheckable).toBe(baseline.uncheckable);
-    expect(unresolved).toBe(baseline.unresolvedTokens);
+    expect(unresolved).toHaveLength(baseline.unresolvedSymbols);
+
+    /**
+     * A3, as an INVARIANT rather than two constants.
+     *
+     * sdlc/033, sdlc/034 and sdlc/035's own first draft each hardcoded a token count and each got
+     * it wrong, because a loop's artifacts join the corpus the moment its `plan.md` lands. The
+     * Disjointness is the structural half; it is NOT sufficient on its own. The plan predicted that
+     * this test would catch mutation 6 (deleting the dotted-prefix fallback) and that prediction is
+     * wrong: `MetricEvent.payload` would simply fall into `notASymbol`, which is disjoint and
+     * self-consistent. What catches it is the next test, which names the tokens the two new rules
+     * are supposed to resolve. Recorded here rather than corrected silently.
+     */
+    const both = unresolved.filter((t) => notASymbol.includes(t));
+    expect(both).toEqual([]);
+    expect(new Set([...unresolved, ...notASymbol]).size).toBe(unresolved.length + notASymbol.length);
+    for (const t of unresolved) expect(classifyToken(t.slice(t.indexOf(': ') + 2))).toBe('unresolved');
+    for (const t of notASymbol) expect(classifyToken(t.slice(t.indexOf(': ') + 2))).toBe('not-a-symbol');
+  });
+
+  /**
+   * The three tokens sdlc/035's two new rules resolve, asserted by NAME against the live tree.
+   *
+   * This is the assertion that fails when either fallback is deleted, and it is specific on purpose:
+   * a count-based assertion cannot distinguish "the rule stopped working" from "a loop's artifacts
+   * changed", and every count in this area has been got wrong at least once.
+   */
+  test('the two resolution rules still resolve the three tokens they were added for', async () => {
+    const corpus = await gitFiles();
+    const index = buildIndex(corpus);
+    const { readdirSync, existsSync, readFileSync } = await import('fs');
+    const scripts = indexScripts(readFileSync('package.json', 'utf8'), corpus);
+
+    const seen: string[] = [];
+    for (const loop of readdirSync('sdlc').filter((d) => /^\d{3}-/.test(d)).toSorted()) {
+      const spec = `sdlc/${loop}/spec.md`;
+      const plan = `sdlc/${loop}/plan.md`;
+      if (!existsSync(spec) || !existsSync(plan)) continue;
+      const res = checkLoop(loop, readFileSync(spec, 'utf8'), readFileSync(plan, 'utf8'), index, corpus, scripts);
+      if (res === null) continue;
+      seen.push(...res.unresolved.map((t) => `${loop}: ${t}`), ...res.notASymbol.map((t) => `${loop}: ${t}`));
+    }
+
+    // Rule 3 \u2014 without it, loop 034 moves the baselined count by 1 for no informative reason,
+    // which is the defect that motivated this whole loop.
+    expect(seen).not.toContain('033-harness-gates: verify');
+    expect(seen).not.toContain('034-xdg-cache-home: verify');
+    // Rule 4 \u2014 loop 020's fence protects this token as the telemetry security boundary.
+    expect(seen).not.toContain('032-snapshot-validation: MetricEvent.payload');
+    // Positive precondition: these ARE tokens this corpus produces, so the assertions above are not
+    // green merely because nothing was scanned.
+    expect(seen).toContain('034-xdg-cache-home: XDG_CACHE_HOME');
+    expect(seen).toContain('027-extension-tests: vscode');
+  });
+
+  /**
+   * A9. Read with RAW `JSON.parse`, not `parseBaseline`.
+   *
+   * `parseBaseline`'s return type structurally cannot contain either key, so asserting their absence
+   * through it would be vacuous \u2014 exactly the defect sdlc/035's Stage 2 review found in the spec's
+   * first draft, and the same shape as sdlc/033's vacuous portability test.
+   */
+  test('the committed baseline records neither notASymbol nor the pre-035 key', async () => {
+    const raw: unknown = JSON.parse(await Bun.file('sdlc/fence-baseline.json').text());
+    expect(typeof raw).toBe('object');
+    const keys = Object.keys(raw as Record<string, unknown>);
+    expect(keys).toContain('unresolvedSymbols');
+    expect(keys).not.toContain('notASymbol');
+    expect(keys).not.toContain('unresolvedTokens');
   });
 });

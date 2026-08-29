@@ -25,6 +25,12 @@ export interface Finding {
 
 export type SymbolIndex = ReadonlyMap<string, readonly string[]>;
 
+/** Root `package.json` script name -> the tracked file that script runs. See `indexScripts`. */
+export type ScriptIndex = ReadonlyMap<string, string>;
+
+/** Which of the two populations an unresolved heading token belongs to. See `classifyToken`. */
+export type TokenClass = 'unresolved' | 'not-a-symbol';
+
 /**
  * Three phrasings across loops 020-022, settling on the first from 024 on. `Not touched` is a
  * prefix of `Not touched, deliberately`, so two entries cover all three.
@@ -41,7 +47,15 @@ const PARENTHETICAL = /\([^()]*\)/g;
 const SENTENCE_END = /\.(\s|$)/;
 /** Line-bounded: a fence token cannot span a newline. */
 const TOKEN = /`([^`\n]+)`/g;
-/** Only requirement headings. Body prose yields 89 findings across 9 loops; headings yield 1. */
+/**
+ * Headings only. Body prose yields 89 findings across 9 loops; headings yield 1.
+ *
+ * NOT "requirement headings" — this matches every `##` through `####`, measurement and prose
+ * headings included, and the distinction is load-bearing: loop 032's `primaryUtilizationPct` false
+ * positive comes from a heading that *measures* rendering behaviour, not one that requires a change
+ * to the file where the field is declared. Narrowing to requirement headings would need a heading
+ * convention no committed loop follows, so the docstring is honest instead. See sdlc/035's m-2.
+ */
 const HEADING = /^#{2,4}\s/;
 const PATH_RE = /^(?:[\w./@-]+\/)?[\w.@-]+\.(?:ts|md|json|ya?ml|sh|ps1|js)$/;
 const EXPORTED =
@@ -164,12 +178,154 @@ export function buildIndex(corpus: readonly string[], read = readFileSync, stat 
  * `MAX_LINE_BYTES` whose plan fences `scripts/` — as loops 029-032 all do — would resolve to
  * `telemetry.ts` and miss. That is exactly the class of loop this gate exists for.
  */
-function resolveSymbol(token: string, index: SymbolIndex): readonly string[] {
-  const all = index.get(token) ?? index.get(bareSymbol(token)) ?? [];
+function prefer(all: readonly string[]): readonly string[] {
   if (all.length <= 1) return all;
   const core = all.filter((f) => f.startsWith('packages/core/src/'));
   if (core.length === 0) return all;
   return [...core, ...all.filter((f) => f.startsWith('scripts/'))];
+}
+
+/**
+ * A clean dotted chain, anchored on both ends and identifier-segmented.
+ *
+ * `SPEC.md §12` (space) and `⊙ error` never reach it. `response.json()` reaches it only after
+ * `bareSymbol` strips the signature, and then fails to resolve because `response` is not an export
+ * — which is the correct outcome, not a near miss.
+ */
+const DOTTED = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/;
+
+/**
+ * The exported index first; then two fallbacks, in this order, neither of which can change a
+ * finding that already exists.
+ *
+ * **Rule 3 — script names.** `verify` in loops 033 and 034 means the gate command, and
+ * `"verify": "bun run scripts/verify.ts"` is a *declared* mapping from that name to a file, written
+ * by hand in a committed manifest exactly as `export function verify` would be. Before this, both
+ * loops left the token unresolved; loop 034 therefore moved the baselined count by 1 for a reason
+ * carrying no information, which is the defect sdlc/035 exists to fix. The RAW token is tried
+ * before `bareSymbol`, the opposite of the symbol lookup above, because `bareSymbol` truncates at
+ * `:` and would destroy `verify:plain` and `metrics:ship`.
+ *
+ * **Rule 4 — dotted prefixes.** `MetricEvent.payload` is the token loop 020's fence protects as
+ * the product-telemetry security boundary, and it was invisible here: a spec asking to widen the
+ * payload while a plan fenced `telemetry.ts` produced silence. Its OWNER is an ordinary top-level
+ * export, so resolving `Owner.member` to wherever `Owner` is declared needs no member index at all.
+ *
+ * Both are fallbacks, deliberately. sdlc/035 measured the alternative — indexing type members — at
+ * four new findings across two loops, ALL FOUR false positives, because a bare field name in a
+ * heading names the field's behaviour, not the file that declares it. These two rules resolve three
+ * tokens across every committed loop and produce zero findings.
+ */
+function resolveSymbol(token: string, index: SymbolIndex, scripts: ScriptIndex): readonly string[] {
+  const direct = index.get(token) ?? index.get(bareSymbol(token)) ?? [];
+  if (direct.length > 0) return prefer(direct);
+
+  const bare = bareSymbol(token);
+  const script = scripts.get(token) ?? scripts.get(bare);
+  if (script !== undefined) return [script];
+
+  if (DOTTED.test(bare)) {
+    const owner = index.get(bare.slice(0, bare.indexOf('.')));
+    if (owner !== undefined) return prefer(owner);
+  }
+  return [];
+}
+
+/** First path-shaped argument in a script command. `bun run scripts/verify.ts` -> `scripts/verify.ts`. */
+const SCRIPT_TARGET = /([\w./@-]+\.(?:ts|sh|ps1|js))\b/;
+
+/**
+ * Root `package.json` script names, mapped to the file each one runs.
+ *
+ * Only entries whose target is actually TRACKED survive, so a script naming a file that is not in
+ * the corpus resolves to nothing rather than inventing a path. `"lint": "oxlint"` and
+ * `"build": "bun run --filter …"` name no file and contribute nothing.
+ *
+ * A missing or malformed manifest yields an EMPTY MAP rather than throwing. The consequence is that
+ * two tokens stop resolving and the unresolved count rises, which FAILS the gate — the safe
+ * direction. A gate that dies on a missing optional input is worse than one that resolves less.
+ */
+export function indexScripts(packageJsonText: string, corpus: readonly string[]): ScriptIndex {
+  const out = new Map<string, string>();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(packageJsonText);
+  } catch {
+    return out;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return out;
+  const { scripts } = parsed as Record<string, unknown>;
+  if (typeof scripts !== 'object' || scripts === null) return out;
+  const tracked = new Set(corpus.map(toPosix));
+  for (const [name, command] of Object.entries(scripts as Record<string, unknown>)) {
+    if (typeof command !== 'string') continue;
+    const m = SCRIPT_TARGET.exec(command);
+    if (m === null) continue;
+    const target = toPosix(m[1]!);
+    if (tracked.has(target)) out.set(name, target);
+  }
+  return out;
+}
+
+/**
+ * ECMAScript's reserved words. Kept SEPARATE from the type keywords below, rather than merged into
+ * one constant, because the claim being made is that the two come from different languages and a
+ * merged set makes that unauditable. sdlc/035's spec called this "TypeScript's reserved set" and
+ * `any` is not in it — `any` is a contextual type keyword and is a legal identifier.
+ */
+const RESERVED: ReadonlySet<string> = new Set([
+  'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete',
+  'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if',
+  'implements', 'import', 'in', 'instanceof', 'interface', 'let', 'new', 'null', 'package',
+  'private', 'protected', 'public', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true',
+  'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
+]);
+
+/** TypeScript's built-in type keywords. Legal identifiers in ECMAScript; never declarations here. */
+const TYPE_KEYWORDS: ReadonlySet<string> = new Set([
+  'any', 'bigint', 'boolean', 'never', 'number', 'object', 'string', 'symbol', 'undefined',
+  'unknown',
+]);
+
+/**
+ * The underscore is REQUIRED, and that is a deliberate narrowing.
+ *
+ * `^[A-Z][A-Z0-9_]*$` — the obvious form — swallows module-private ALLCAPS constants, and four of
+ * them live in this very file: `MARKERS`, `HEADING`, `TOKEN`, `EXPORTED`. A heading naming one would
+ * be classified "not a symbol" when it is precisely a symbol the index cannot see, which is the
+ * silent false negative sdlc/035 exists to remove. The cost is a permanent `+1` for any future
+ * heading naming `HOME` or `PATH`; that is the safe direction, because it is visible.
+ *
+ * Still missed: `PATH_RE` has an underscore and is still called an environment variable. No shape
+ * rule separates it from `TMPDIR`. Recorded, not fixed.
+ */
+const ENV_VAR = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+/**
+ * Which population an unresolved token belongs to, decided by SHAPE and never by a list of specific
+ * tokens — a list would need editing every loop, which is the maintenance reflex being removed.
+ *
+ * Applied to `bareSymbol(token)` throughout: the same string resolution failed on. Otherwise a
+ * heading written `XDG_CACHE_HOME: string` would classify differently from one written
+ * `XDG_CACHE_HOME`, a distinction its author never meant to draw.
+ *
+ * Runs only AFTER resolution fails, which is what makes the env-var rule safe at all: an exported
+ * `MAX_LINE_BYTES` resolves and never reaches this function.
+ */
+export function classifyToken(token: string): TokenClass {
+  const bare = bareSymbol(token);
+  if (ENV_VAR.test(bare)) return 'not-a-symbol';
+  if (RESERVED.has(bare) || TYPE_KEYWORDS.has(bare)) return 'not-a-symbol';
+  // No separate flag branch. sdlc/035's spec listed one, the plan predicted three test failures for
+  // deleting it, and the A10 mutation returned ZERO: a token starting with `-` already fails
+  // IDENTIFIER, so `--json` and `--debug` were classified by this line all along. A branch no test
+  // can distinguish from its absence is the shape sdlc/032 and sdlc/033 both ruled against, so it is
+  // deleted rather than kept as documentation. `classifyToken > a flag is not a symbol` still holds
+  // and now exercises this rule, which is what makes it a test instead of a restatement.
+  if (!IDENTIFIER.test(bare)) return 'not-a-symbol';
+  return 'unresolved';
 }
 
 /** Equal to, a basename tail (`snapshot.ts`), or a directory prefix (`packages/metrics`). */
@@ -180,6 +336,11 @@ function inFence(file: string, entry: string): boolean {
 }
 
 /**
+ * `scripts` is a REQUIRED parameter, not an optional one with an empty default. There are four call
+ * sites in the whole repository, so the churn is trivial, and a required parameter turns "`main`
+ * forgot to wire the script map" into a typecheck failure rather than a silently smaller count —
+ * the exact failure class sdlc/035 exists to remove.
+ *
  * `unresolved` is returned, not swallowed. Zero false positives across twelve loops is easy to
  * achieve by understanding almost nothing, so the check publishes what it could not read: only 28
  * of 50 heading tokens resolve (measured at sdlc/033 Stage 5; the 26-of-47 in that loop's spec.md
@@ -193,19 +354,21 @@ export function checkLoop(
   planMd: string,
   index: SymbolIndex,
   rawCorpus: readonly string[],
-): { findings: Finding[]; unresolved: string[] } | null {
+  scripts: ScriptIndex,
+): { findings: Finding[]; unresolved: string[]; notASymbol: string[] } | null {
   const fence = extractFence(planMd);
   if (fence === null) return null;
   const corpus = rawCorpus.map(toPosix);
 
   const findings: Finding[] = [];
   const unresolved: string[] = [];
+  const notASymbol: string[] = [];
   for (const token of new Set(headingTokens(specMd))) {
     const targets = PATH_RE.test(token)
       ? corpus.filter((f) => f === token || f.endsWith(`/${token}`))
-      : resolveSymbol(token, index);
+      : resolveSymbol(token, index, scripts);
     if (targets.length === 0) {
-      unresolved.push(token);
+      (classifyToken(token) === 'unresolved' ? unresolved : notASymbol).push(token);
       continue;
     }
     for (const file of targets) {
@@ -213,12 +376,23 @@ export function checkLoop(
       if (entry !== undefined) findings.push({ loop, specToken: token, file, fenceEntry: entry });
     }
   }
-  return { findings, unresolved };
+  return { findings, unresolved, notASymbol };
 }
 
 export interface Baseline {
   uncheckable: number;
-  unresolvedTokens: number;
+  /**
+   * Identifier-shaped heading tokens the index does not know — the `unresolved` class only.
+   *
+   * RENAMED from `unresolvedTokens` in sdlc/035, and the rename is not cosmetic. The definition
+   * changed underneath it: the old number counted flags, environment variables, keywords and
+   * expressions alongside real symbols, so it could never go down and had to go up every loop.
+   * Keeping the name across that redefinition would make `git log -p` on this file unreadable — a
+   * reader would see 25 -> 13 under an unchanged key and be unable to tell whether the check
+   * improved or the definition moved. `parseBaseline` rejects a baseline still carrying the old
+   * key, so no half-migrated record can pass.
+   */
+  unresolvedSymbols: number;
   findings: Array<Finding & { note: string }>;
 }
 
@@ -228,13 +402,13 @@ export const BASELINE_PATH = 'sdlc/fence-baseline.json';
 export function parseBaseline(text: string): Baseline {
   const parsed: unknown = JSON.parse(text);
   if (typeof parsed !== 'object' || parsed === null) throw new Error('fence-check: baseline is not an object');
-  const { uncheckable, unresolvedTokens, findings } = parsed as Record<string, unknown>;
-  if (!Number.isInteger(uncheckable) || !Number.isInteger(unresolvedTokens) || !Array.isArray(findings)) {
+  const { uncheckable, unresolvedSymbols, findings } = parsed as Record<string, unknown>;
+  if (!Number.isInteger(uncheckable) || !Number.isInteger(unresolvedSymbols) || !Array.isArray(findings)) {
     throw new Error('fence-check: baseline is malformed');
   }
   return {
     uncheckable: uncheckable as number,
-    unresolvedTokens: unresolvedTokens as number,
+    unresolvedSymbols: unresolvedSymbols as number,
     findings: findings.map((f, i) => {
       if (typeof f !== 'object' || f === null) throw new Error(`fence-check: baseline finding ${i} is not an object`);
       const { loop, specToken, file, fenceEntry, note } = f as Record<string, unknown>;
@@ -313,9 +487,10 @@ export function compareToBaseline(
   if (actual.uncheckable !== baseline.uncheckable) {
     problems.push(`fence-check: uncheckable is ${actual.uncheckable}, baseline says ${baseline.uncheckable}`);
   }
-  if (actual.unresolved !== baseline.unresolvedTokens) {
+  if (actual.unresolved !== baseline.unresolvedSymbols) {
     problems.push(
-      `fence-check: unresolved heading tokens is ${actual.unresolved}, baseline says ${baseline.unresolvedTokens}`,
+      `fence-check: unresolved symbol-shaped heading tokens is ${actual.unresolved}, ` +
+        `baseline says ${baseline.unresolvedSymbols}`,
     );
   }
   return problems;
@@ -331,9 +506,13 @@ export async function gitFiles(): Promise<string[]> {
 async function main(): Promise<number> {
   const corpus = await gitFiles();
   const index = buildIndex(corpus);
+  // Read, not required: a repository without a manifest resolves fewer tokens, which raises the
+  // count and fails the gate. See `indexScripts`.
+  const scripts = indexScripts(existsSync('package.json') ? readFileSync('package.json', 'utf8') : '', corpus);
 
   const findings: Finding[] = [];
   const unresolved: string[] = [];
+  const notASymbol: string[] = [];
   let uncheckable = 0;
   let checkable = 0;
   let skipped = 0;
@@ -350,7 +529,7 @@ async function main(): Promise<number> {
       skipped += 1;
       continue;
     }
-    const res = checkLoop(loop, readFileSync(spec, 'utf8'), readFileSync(plan, 'utf8'), index, corpus);
+    const res = checkLoop(loop, readFileSync(spec, 'utf8'), readFileSync(plan, 'utf8'), index, corpus, scripts);
     if (res === null) {
       uncheckable += 1;
       continue;
@@ -358,13 +537,20 @@ async function main(): Promise<number> {
     checkable += 1;
     findings.push(...res.findings);
     unresolved.push(...res.unresolved.map((t) => `${loop}: ${t}`));
+    notASymbol.push(...res.notASymbol.map((t) => `${loop}: ${t}`));
   }
 
   // Printed whether or not the run fails: the next loop that writes a heading this check cannot
   // read should show up as a delta, not as silence.
   console.log(`fence-check: ${checkable} checkable, ${uncheckable} uncheckable, ${skipped} skipped`);
-  console.log(`fence-check: ${unresolved.length} unresolved heading tokens`);
-  for (const u of unresolved) console.log(`  unresolved  ${u}`);
+  console.log(
+    `fence-check: ${unresolved.length} unresolved symbol-shaped heading tokens, ` +
+      `${notASymbol.length} not symbols at all`,
+  );
+  for (const u of unresolved) console.log(`  unresolved   ${u}`);
+  // Printed, never asserted. This number is EXPECTED to rise with every loop that writes a heading
+  // naming a flag or an environment variable, which is precisely why it must not be a gate.
+  for (const n of notASymbol) console.log(`  not-a-symbol ${n}`);
   for (const f of findings) console.log(`  FINDING  ${f.loop}: ${f.specToken} -> ${f.file} (fence: ${f.fenceEntry})`);
 
   if (!existsSync(BASELINE_PATH)) {
