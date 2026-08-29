@@ -40,7 +40,15 @@ function seed(count: number, ageHours: number): void {
 
 async function run(): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(['bun', 'run', CLI], {
-    env: { PATH: process.env.PATH ?? '', HOME: dir, XDG_CACHE_HOME: join(dir, '.cache'), CLAUDEWATCH_METRICS_DB: dbPath },
+    // CLAUDEWATCH_REPO is the one that gates WRITES. cli-detect.ts:16 resolves
+    // `process.env.CLAUDEWATCH_REPO ?? process.cwd()` and `draft()` writes incident.md + intent.md
+    // under it, so without this the subprocess inherits the real working tree. Today's fixtures only
+    // reach the insufficient-data and healthy exits so nothing is written — but the sandbox was
+    // incomplete in exactly the dimension where the CLI writes files. sdlc/037's Stage 5 audit.
+    env: {
+      PATH: process.env.PATH ?? '', HOME: dir, XDG_CACHE_HOME: join(dir, '.cache'),
+      CLAUDEWATCH_METRICS_DB: dbPath, CLAUDEWATCH_REPO: dir,
+    },
     stdout: 'pipe', stderr: 'pipe',
   });
   const timer = setTimeout(() => proc.kill(), SPAWN_TIMEOUT_MS);

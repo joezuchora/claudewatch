@@ -705,13 +705,27 @@ describe('freshness edge cases (sdlc/037 A4, A5, A9)', () => {
     });
   });
 
-  test('an unparseable timestamp is excluded from the max rather than poisoning it', () => {
+  test('an unparseable timestamp FIRST does not poison the max', () => {
+    // ORDER IS THE TEST. The first version listed the good event first and passed with the
+    // `Number.isFinite` guard deleted — it was named for the guard and did not exercise it, the
+    // same shape as the M9 defect one file over. `newest === null ||` short-circuits, so only a
+    // bad event in FIRST position can set `newest = NaN`.
+    const f = measureFreshness([
+      ev({ kind: 'verify_run', receivedAt: 'not a date', ts: 'not a date' }),
+      ev({ kind: 'verify_run', receivedAt: hoursAgo(3), ts: hoursAgo(3) }),
+    ], T0);
+    expect(f.newestRunArrivalAgeMs).toBe(3 * 3_600_000);
+    expect(Number.isFinite(f.newestRunArrivalAgeMs!)).toBe(true);
+  });
+
+  test('and neither does one in a later position', () => {
+    // The case the first version tested. Kept, because it is the half that holds WITHOUT the guard
+    // and a reader should be able to see both halves stated.
     const f = measureFreshness([
       ev({ kind: 'verify_run', receivedAt: hoursAgo(3), ts: hoursAgo(3) }),
       ev({ kind: 'verify_run', receivedAt: 'not a date', ts: 'not a date' }),
     ], T0);
     expect(f.newestRunArrivalAgeMs).toBe(3 * 3_600_000);
-    expect(Number.isFinite(f.newestRunArrivalAgeMs!)).toBe(true);
   });
 
   test('every member unparseable is null, not NaN', () => {
@@ -746,6 +760,16 @@ describe('formatAgeMs renders every ladder boundary (sdlc/037 A5)', () => {
     expect(formatAgeMs(23 * 3_600_000)).toBe('23h 0m');
     expect(formatAgeMs(24 * 3_600_000)).toBe('1d 0h');
     expect(formatAgeMs(365 * 24 * 3_600_000)).toBe('365d 0h');
+  });
+
+  test('the band EDGES stay inside their band — rounding carried out of it', () => {
+    // Every one of these rendered a unit the spec's ladder does not contain, before the floor fix:
+    // 60s, 60m, 23h 60m, 364d 24h. The interior-point assertions above could not see it, and
+    // `23h 60m` is reachable for roughly 1.7% of ages against a moving clock.
+    expect(formatAgeMs(59_999)).toBe('59s');
+    expect(formatAgeMs(3_599_999)).toBe('59m');
+    expect(formatAgeMs(86_399_999)).toBe('23h 59m');
+    expect(formatAgeMs(365 * 24 * 3_600_000 - 1)).toBe('364d 23h');
   });
 
   test('NaN renders unknown, not NaNh NaNm', () => {

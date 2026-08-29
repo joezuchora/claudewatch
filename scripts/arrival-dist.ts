@@ -19,6 +19,18 @@
  * Prints numbers and kind names only — no paths, per SPEC.md §12.
  */
 import { Database } from 'bun:sqlite';
+/**
+ * The percentile rule is IMPORTED, not re-derived.
+ *
+ * `anomaly.ts`'s own docstring says it is "exported so `scripts/perf.ts` shares this exact
+ * definition rather than writing a third copy — linear interpolation would differ by one order
+ * statistic". The first version of this file wrote a fourth copy two hundred lines from that
+ * sentence. sdlc/037's Stage 5 audit caught it, and noted the irony precisely: this loop draws the
+ * reuse-versus-formatting-preference distinction correctly for `formatAgeMs` (which is NOT shared
+ * with `agent.ts`'s `formatAge`, because a unit ladder is a preference) and then got it backwards
+ * one file over, for a rule.
+ */
+import { percentile } from '../packages/metrics/src/anomaly.js';
 
 export interface Distribution {
   n: number;
@@ -41,7 +53,7 @@ export function gapDistribution(timestamps: readonly string[]): Distribution | n
   const gaps: number[] = [];
   for (let i = 1; i < t.length; i++) gaps.push(t[i]! - t[i - 1]!);
   const s = gaps.toSorted((a, b) => a - b);
-  const q = (p: number): number => s[Math.min(s.length - 1, Math.floor(p * s.length))]!;
+  const q = (p: number): number => percentile(s, p)!;
   return {
     n: s.length,
     p50: q(0.5), p75: q(0.75), p90: q(0.9), p95: q(0.95), p99: q(0.99), max: s[s.length - 1]!,

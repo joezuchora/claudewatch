@@ -164,12 +164,18 @@ function newestAge(events: readonly StoredEvent[], pick: (e: StoredEvent) => str
     const t = Date.parse(pick(e));
     // `Number.isFinite`, not a try/catch: `Date.parse` returns NaN rather than throwing.
     //
-    // Its real job is narrower than it looks, and the M3 mutation showed which: a NaN can never win
-    // the `t > newest` comparison, because every comparison with NaN is false. So a MIXED population
-    // is safe without this line. What it catches is the ALL-unparseable case — without it, the first
-    // event sets `newest = NaN` through the `newest === null` branch and the function returns NaN
-    // instead of `null`. The first version of this comment said "one NaN poisons the whole result",
-    // which is a claim made by reading.
+    // Without this line an unparseable timestamp poisons the result IFF it is the first event
+    // iterated, because `newest === null ||` short-circuits and admits NaN unconditionally. After
+    // that a NaN can never win `t > newest` — every comparison with NaN is false — so a later bad
+    // event is harmless. Measured: bad-first yields NaN, good-first yields the correct age.
+    //
+    // This comment has been wrong twice, in opposite directions, and the second was worse. The first
+    // said "one NaN poisons the whole result", which over-claims — this is not `Math.max` and the
+    // damage is order-dependent. I then "corrected" it to "a MIXED population is safe", which
+    // under-claims and would have licensed deleting the guard: `store.query` does not order by
+    // parseability, so bad-first is reachable the moment one malformed `ts` lands ahead of a good
+    // one. Found by sdlc/037's Stage 5 audit, which also found that the test named for this guard
+    // listed the good event first and therefore did not exercise it.
     if (!Number.isFinite(t)) continue;
     if (newest === null || t > newest) newest = t;
   }
@@ -207,10 +213,16 @@ export function formatAgeMs(ms: number | null): string {
   if (ms === null) return 'never';
   if (!Number.isFinite(ms)) return 'unknown';
   if (ms < 0) return '0s';
-  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-  if (ms < HOUR_MS) return `${Math.round(ms / 60_000)}m`;
-  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h ${Math.round((ms % HOUR_MS) / 60_000)}m`;
-  return `${Math.floor(ms / DAY_MS)}d ${Math.round((ms % DAY_MS) / HOUR_MS)}h`;
+  // FLOOR throughout, never round. Rounding carries out of the band and emits renderings the
+  // spec's ladder does not contain: sdlc/037's Stage 5 audit measured `59999 -> 60s`,
+  // `3599999 -> 60m`, `86399999 -> 23h 60m` and `31535999999 -> 364d 24h`. The third is reachable
+  // for any age within thirty seconds of an hour boundary — about 1.7% of all ages against a
+  // moving clock — and the test asserting "the ladder is exactly what the spec pinned" asserted
+  // only interior points, so it never saw an edge.
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < HOUR_MS) return `${Math.floor(ms / 60_000)}m`;
+  if (ms < DAY_MS) return `${Math.floor(ms / HOUR_MS)}h ${Math.floor((ms % HOUR_MS) / 60_000)}m`;
+  return `${Math.floor(ms / DAY_MS)}d ${Math.floor((ms % DAY_MS) / HOUR_MS)}h`;
 }
 
 /**
