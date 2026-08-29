@@ -130,14 +130,20 @@ _cw_write_env_file_impl() {
   local tmp
   tmp="$(mktemp "$dir/.metrics.env.XXXXXX")" || { _cw_err "could not create a temp file in $dir"; return 1; }
 
-  if ! {
-    echo "# ClaudeWatch metrics configuration. This file holds a secret — keep it 0600."
-    echo "CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787"
-    if [ "$lan" = "1" ]; then
-      echo "CLAUDEWATCH_METRICS_HOST=0.0.0.0"
-      echo "CLAUDEWATCH_METRICS_TOKEN=$token"
-    fi
-  } > "$tmp"; then
+  # Composed first, written once. The obvious `{ echo; echo; if ...; fi; } > "$tmp"` takes its
+  # status from the LAST command in the group — which, on the loopback path, is an `if` whose
+  # condition was false and whose status is therefore 0. A failing `echo` above it would be
+  # masked and the function would report success over a truncated file. Found reading the diff
+  # in the Stage 5 bugs pass, not by a test; see review.md for why it has none.
+  local content
+  content="# ClaudeWatch metrics configuration. This file holds a secret — keep it 0600.
+CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787"
+  if [ "$lan" = "1" ]; then
+    content="$content
+CLAUDEWATCH_METRICS_HOST=0.0.0.0
+CLAUDEWATCH_METRICS_TOKEN=$token"
+  fi
+  if ! printf '%s\n' "$content" > "$tmp"; then
     rm -f "$tmp"
     _cw_err "could not write $tmp"
     return 1
