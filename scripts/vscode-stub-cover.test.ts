@@ -9,11 +9,13 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { readdirSync, readFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import {
   compare,
-  inlineFactories,
+  readSources,
+  vscodeInstallers,
   memberKey,
   providedMembers,
   requiredMembers,
@@ -51,11 +53,15 @@ describe('the consolidation', () => {
     }
   }, 120_000);
 
-  test('exactly one file supplies a vscode factory body', () => {
-    const tests = readdirSync(VSCODE_SRC)
-      .filter((f) => f.endsWith('.test.ts'))
-      .map((f) => src(readFileSync(join(VSCODE_SRC, f), 'utf-8'), f));
-    expect(inlineFactories(tests)).toEqual([]);
+  test('every installer uses the shared stub, and at least one does', () => {
+    // readSources walks recursively, as the CLI does; a flat readdirSync here could not see a
+    // subdirectory the gate would. (Stage 5 audit)
+    const { tests } = readSources(VSCODE_SRC);
+    const { shared, inline } = vscodeInstallers(tests);
+    expect(inline).toEqual([]);
+    // The half the first version was missing: it enforced "zero inline" while claiming "exactly
+    // one". The Stage 5 audit stripped the factory from every file and the CLI still exited 0.
+    expect(shared.length).toBeGreaterThan(0);
   });
 });
 
@@ -123,6 +129,21 @@ describe('provided members', () => {
   });
 });
 
+/** A fixture package the CLI can be pointed at, so its EXIT STATUS is testable. */
+const fixtureTree = (stubBody: string, sourceBody: string, testBody: string): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'cw-stubcover-'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'vscode-stub.ts'), `export const vscodeStub = {\n${stubBody}\n};\n`);
+  writeFileSync(join(dir, 'thing.ts'), sourceBody);
+  writeFileSync(join(dir, 'thing.test.ts'), testBody);
+  return dir;
+};
+const runCli = (dir: string): { status: number; stderr: string } => {
+  const p = spawnSync('bun', ['run', SCRIPT, dir], { cwd: REPO, encoding: 'utf-8' });
+  return { status: p.status ?? -1, stderr: p.stderr ?? '' };
+};
+
+
 const req = (...ks: string[]): Map<string, Set<string>> =>
   new Map(ks.map((k) => [k, new Set(['src.ts'])]));
 
@@ -155,20 +176,74 @@ describe('compare', () => {
   });
 });
 
-describe('inline factories', () => {
-  test('a shared-stub factory is not counted', () => {
-    expect(inlineFactories([src(factorySrc('vscodeStub'), 'a.test.ts')])).toEqual([]);
+describe('installers', () => {
+  test('a shared-stub factory is shared, not inline', () => {
+    expect(vscodeInstallers([src(factorySrc('vscodeStub'), 'a.test.ts')]))
+      .toEqual({ shared: ['a.test.ts'], inline: [] });
   });
 
-  test('a file building its own factory is named', () => {
-    expect(inlineFactories([
-      src(factorySrc('vscodeStub'), 'a.test.ts'),
+  test('two files building their own factories are BOTH named', () => {
+    // The criterion says "naming both files". The first version paired one shared with one inline
+    // and asserted a single name, so the plural it promised went unasserted.
+    expect(vscodeInstallers([
       src(factorySrc('({ window: {} })'), 'b.test.ts'),
-    ])).toEqual(['b.test.ts']);
+      src(factorySrc('({ env: {} })'), 'c.test.ts'),
+    ])).toEqual({ shared: [], inline: ['b.test.ts', 'c.test.ts'] });
+  });
+
+  test('a tree where nothing installs the stub has no shared installer', () => {
+    expect(vscodeInstallers([src('import { vscodeStub } from "./vscode-stub.js";', 'a.test.ts')]).shared)
+      .toEqual([]);
   });
 });
 
 describe('the gate', () => {
+  test('a missing member makes the CLI exit non-zero', () => {
+    // A13. It had no test at all until the Stage 5 audit ran the mutation that proves it: making
+    // the CLI unconditionally `process.exit(0)` left all 22 tests green. That mutation was in the
+    // plan as M7 and is the one I did not run. Without this, A1 and A11 are both satisfied by a
+    // script that never fails — which is the exact wording of A13's own rationale.
+    const dir = fixtureTree(
+      '  window: { createStatusBarItem: () => ({}) },',
+      'vscode.Uri.parse("x");',
+      factorySrc('vscodeStub'),
+    );
+    const r = runCli(dir);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('Uri.parse');
+    expect(r.stderr).toContain('thing.ts');
+  }, 60_000);
+
+  test('a covered fixture tree exits 0', () => {
+    // The positive precondition: without it the test above passes for any reason the CLI fails,
+    // including a fixture the CLI cannot read at all.
+    const dir = fixtureTree(
+      '  Uri: { parse: (s: string) => s },',
+      'vscode.Uri.parse("x");',
+      factorySrc('vscodeStub'),
+    );
+    expect(runCli(dir).status).toBe(0);
+  }, 60_000);
+
+  test('a tree whose tests install nothing fails', () => {
+    const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', '// no factory');
+    const r = runCli(dir);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('no test file installs the shared stub');
+  }, 60_000);
+
+  test('the real stub, with Uri removed in memory, no longer covers commands.ts', () => {
+    // A2's stated method: read the CHECKED-IN stub rather than a synthetic fixture. Nothing
+    // exercised `providedMembers` against the real file except transitively.
+    const stubText = readFileSync(join(VSCODE_SRC, 'vscode-stub.ts'), 'utf-8');
+    const withUri = providedMembers(src(stubText, 'vscode-stub.ts'));
+    expect(withUri.has('Uri.parse')).toBe(true);
+    const without = providedMembers(src(stubText.replace('  Uri: { parse: (s: string) => s },', ''), 'vscode-stub.ts'));
+    expect(without.has('Uri.parse')).toBe(false);
+    const required = requiredMembers([src(readFileSync(join(VSCODE_SRC, 'commands.ts'), 'utf-8'), 'commands.ts')]);
+    expect(compare(required, without).missing.map(memberKey)).toContain('Uri.parse');
+  });
+
   test('the CLI exits 0 on the real tree', () => {
     const proc = spawnSync('bun', ['run', SCRIPT], { cwd: REPO, encoding: 'utf-8' });
     expect(`${proc.status}: ${proc.stderr}`).toBe('0: ');

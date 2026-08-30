@@ -55,7 +55,6 @@ let opened: unknown[] = [];
 interface VscodeSinks {
   window: { showInformationMessage: (m: string, o?: unknown) => void };
   env: { openExternal: (u: unknown) => void };
-  Uri: { parse: (s: string) => string };
 }
 
 beforeEach(async () => {

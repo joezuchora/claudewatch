@@ -102,8 +102,11 @@ let clearedHandles: unknown[] = [];
 // so a command registered by one test cannot be invoked by the next. (sdlc/039)
 mock.module('vscode', () => vscodeStub);
 
-/** The stub's live command registry. Re-pointed at a fresh Map by the reset in `beforeEach`. */
-let registered = resetVscodeStub().registered;
+/** The stub's live command registry. Assigned by the reset in `beforeEach`, never at load: a
+ *  side-effecting reset of a process-wide singleton at IMPORT time is the one thing in this diff
+ *  that could perturb another file's state if load and run ever interleave — which is the hazard
+ *  class this loop exists to close. (Stage 5 audit) */
+let registered: Map<string, (...a: unknown[]) => unknown>;
 
 // --- the bridge mock ---
 

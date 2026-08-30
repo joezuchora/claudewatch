@@ -189,7 +189,7 @@ self-contradictory, so both get tests.
 - [ ] **A1 — the check passes on the tree as this loop leaves it.** Verified by `bun run verify`.
       The first draft wrote "or the tree is fixed", which made it unfalsifiable in both branches.
 - [ ] **A1b — every vscode test file passes run alone.** `bun test packages/vscode/src/<f>.test.ts`
-      exits 0 for each of the five, checked by a script rather than by my remembering. This is the
+      exits 0 for each of the six, checked by a script rather than by my remembering. This is the
       `sdlc/025` guard and it is the one criterion here that is about the consolidation's real
       risk rather than about the checker.
 - [ ] **A2 — it fails when a needed key is absent.** Removing `Uri` from the shared stub makes

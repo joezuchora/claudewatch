@@ -128,9 +128,28 @@ export function providedMembers(stub: SourceFile): Set<string> {
   return out;
 }
 
-/** Test files that supply a `mock.module('vscode', …)` factory with a body of their own. */
-export function inlineFactories(files: readonly SourceFile[]): string[] {
-  const out: string[] = [];
+export interface Installers {
+  /** Files installing the shared stub: `mock.module('vscode', () => vscodeStub)`. */
+  shared: string[];
+  /** Files building a factory of their own — the arrangement this loop removed. */
+  inline: string[];
+}
+
+/**
+ * Who installs `vscode`, and how.
+ *
+ * The first version of this returned only the inline list, so the gate enforced "zero inline"
+ * while its docstring claimed "exactly one". The Stage 5 audit demonstrated the gap: strip the
+ * factory from every test file and the CLI still exited 0 while the package would be entirely
+ * red. Reporting both lists is what lets the CLI check the half it was missing.
+ *
+ * What this canNOT check is that each file which NEEDS `vscode` installs it — that depends on
+ * bun's load order, which is the thing this loop removed reliance on. `every vscode test file
+ * passes run alone` is what covers it, and no static scan substitutes for it.
+ */
+export function vscodeInstallers(files: readonly SourceFile[]): Installers {
+  const shared: string[] = [];
+  const inline: string[] = [];
   for (const file of files) {
     const walk = (node: ts.Node): void => {
       if (
@@ -143,14 +162,15 @@ export function inlineFactories(files: readonly SourceFile[]): string[] {
       ) {
         const factory = node.arguments[1]!;
         // `() => vscodeStub` names the shared module; anything else builds its own.
-        const shared = ts.isArrowFunction(factory) && ts.isIdentifier(factory.body) && factory.body.text === 'vscodeStub';
-        if (!shared) out.push(basename(file.path));
+        const isShared =
+          ts.isArrowFunction(factory) && ts.isIdentifier(factory.body) && factory.body.text === 'vscodeStub';
+        (isShared ? shared : inline).push(basename(file.path));
       }
       ts.forEachChild(node, walk);
     };
     walk(parse(file.path, file.text));
   }
-  return out;
+  return { shared, inline };
 }
 
 function toMember(key: string): Member {
@@ -203,7 +223,11 @@ export function readSources(dir: string): { sources: SourceFile[]; tests: Source
 
 if (import.meta.main) {
   const root = resolve(import.meta.dir, '..');
-  const dir = join(root, 'packages', 'vscode', 'src');
+  // A directory argument makes the CLI's own exit status testable against a fixture tree without
+  // mutating the checked-in one. The Stage 5 audit found the criterion for that exit status had no
+  // test at all, and that the mutation predicted to catch it was never run.
+  const argDir = process.argv.slice(2).find((a) => !a.startsWith('--'));
+  const dir = argDir === undefined ? join(root, 'packages', 'vscode', 'src') : resolve(argDir);
   const { sources, tests } = readSources(dir);
   const stubPath = join(dir, 'vscode-stub.ts');
   const stub = sources.find((s) => s.path === stubPath);
@@ -215,11 +239,18 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  const extra = inlineFactories(tests);
-  if (extra.length > 0) {
+  const installers = vscodeInstallers(tests);
+  if (installers.inline.length > 0) {
     console.error(
-      `vscode-stub-cover: ${extra.length} file(s) build their own vscode factory instead of using the shared stub: ${extra.join(', ')}.\n` +
+      `vscode-stub-cover: ${installers.inline.length} file(s) build their own vscode factory instead of using the shared stub: ${installers.inline.join(', ')}.\n` +
         '  Per-file factories do not compose — see vscode-stub.ts.',
+    );
+    failed = true;
+  }
+  if (installers.shared.length === 0) {
+    console.error(
+      'vscode-stub-cover: no test file installs the shared stub with ' +
+        "mock.module('vscode', () => vscodeStub). Nothing would resolve `vscode` at test time.",
     );
     failed = true;
   }
