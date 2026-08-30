@@ -1378,3 +1378,62 @@ it, written atomically and renamed into place, refused on a symlinked path or a 
 directory, kept out of `bash -x` output and out of any `argv`, and repaired rather than blessed
 when found too permissive. `SPEC.md` §12 gained the clause that was missing — the reason a future
 installer edit could have violated nothing.
+
+---
+
+## Loop 039 — settle the vscode mock model, then restructure on evidence
+
+Four `mock.module('vscode', …)` factories became one shared stub, plus a `verify` step that keeps
+it one. The change is small. What the loop is actually a record of is something else.
+
+**Four of this loop's findings are corrections to claims the loop itself made.** Not to old code —
+to sentences written earlier in the same sequence of commits:
+
+1. The intent led with "a mechanism the obvious experiment contradicts". It did not. I had run a
+   *different* experiment and treated the difference as a contradiction. Taking the docstring's own
+   falsifiable claim and running it — delete `env` from one stub, run the package — produced 21
+   failures in two other files. The docstring was right.
+2. Correcting that, I "corrected" its failure count from 16 to 21 and explained the gap as drift.
+   Both halves false: `showDiagnostics` and `openDashboard` are in `commands.test.ts`, which I
+   attributed to `extension.test.ts` by reading `describe` names. The 16 was exactly right for the
+   file it named.
+3. The spec's central model — provided = the union of the four factories — was **false**, and the
+   Stage 2 reviewer rejected the spec on it. Removing `Uri` from three stubs while one still
+   defined it fails 5 tests, so the union check would have exited 0 on a red package. I had cited
+   `sdlc/028`'s own probe as evidence *for* the union; that probe records `PROBE has Uri: false`,
+   which refutes one.
+4. Two commits before the end I wrote that the checker "settles a disagreement in the reviewer's
+   favour" about `env.isTelemetryEnabled` not being required. It is required. My walker could not
+   see through `(vscode.env as {…}).isTelemetryEnabled`, so the gate was reporting the member that
+   gates telemetry as **surplus** — dead weight, it said, in the stub.
+
+> **A tool you wrote is not an oracle about the thing it measures.** The fourth is the sharpest:
+> I did the right thing — stopped arguing from reading and built something that measures — and
+> then treated its output as settling a question it was structurally unable to see. "The compiler
+> says so" was true of my traversal, not of the language.
+
+**The mutation I skipped is the one the plan wrote down.** `A13` exists so that "the gate is
+green" cannot be satisfied by a script that never fails. It shipped with no test at all, and
+making the CLI unconditionally `exit(0)` left all 22 green. The plan listed exactly that as **M7**
+and predicted it would catch this. I ran six mutations and M7 was not among them.
+
+> **The value of writing predictions down is spent at the moment you run them.** Loops 033-038
+> built a discipline whose whole content is "run the check that would embarrass you". This loop
+> wrote that check into its own plan and then did not run it.
+
+**I pushed a red gate.** `verify` printed `exit=1` directly above the commit I made; I had chained
+the commit after a `;` rather than gating on the status. Every commit afterwards gated on the exit
+code and refused while red — catching two further failures before they were pushed. The mechanism
+cost one line and was available the entire time.
+
+**What went right, and is worth keeping.** Recording the baseline before touching anything is what
+caught that this package has **six** test files, not the five that the intent, spec and plan all
+said — and the load order I had quoted from the reviewer *named* the file I had not counted. The
+consolidation preserved behaviour exactly, verified against that baseline. And `M8` — empty
+`resetVscodeStub()` — fails **only** `every vscode test file passes run alone`, which is the
+criterion I had argued was the one that mattered. It was.
+
+**One criterion is recorded as structurally satisfied rather than verified.** `A5b`'s mutation
+returned zero because, under a compiler-API design, type and value uses are different node kinds:
+there is no per-member alternative to mutate into. The defect class cannot exist here. That is a
+better outcome than a kill, and it is not a kill.
