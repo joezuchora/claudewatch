@@ -7,9 +7,9 @@
  * and an incomplete `resetVscodeStub()` shows up when a file runs by itself, not in a suite where
  * some other file happened to leave the right state behind.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import {
@@ -36,7 +36,11 @@ const SCRIPT = join(REPO, 'scripts', 'vscode-stub-cover.ts');
  */
 const factorySrc = (body: string): string => `mock.${'module'}('vscode', () => ${body});`;
 
-const src = (text: string, path = 'a.ts'): SourceFile => ({ path, text });
+/** The walker only looks at files that import vscode, so fixtures must say so. */
+const IMPORT = "import * as vscode from 'vscode';\n";
+const src = (text: string, path = 'a.ts'): SourceFile => ({ path, text: text.startsWith('import') ? text : IMPORT + text });
+/** Verbatim, for the cases that are ABOUT the import line. */
+const rawSrc = (text: string, path = 'a.ts'): SourceFile => ({ path, text });
 const keys = (m: Map<string, Set<string>>): string[] => [...m.keys()].toSorted();
 
 describe('the consolidation', () => {
@@ -81,6 +85,23 @@ describe('required members', () => {
     // than per OCCURRENCE would drop it, and the two tests above would both still pass.
     const r = requiredMembers([src('function f(): vscode.MarkdownString { return new vscode.MarkdownString(); }')]);
     expect(keys(r)).toEqual(['MarkdownString']);
+  });
+
+  test('a cast between the two accesses does not lose the sub-key', () => {
+    // extension.ts:45. The gate reported `env.isTelemetryEnabled` as SURPLUS until this was fixed
+    // — telling a maintainer the member gating telemetry was dead weight. (Stage 5 security pass)
+    const r = requiredMembers([src(IMPORT + '(vscode.env as { x?: unknown }).isTelemetryEnabled;')]);
+    expect(keys(r)).toEqual(['env.isTelemetryEnabled']);
+  });
+
+  test('a namespace import under another name is still found', () => {
+    const r = requiredMembers([src("import * as vs from 'vscode';\nvs.Uri.parse(x);")]);
+    expect(keys(r)).toEqual(['Uri.parse']);
+  });
+
+  test('a file that does not import vscode contributes nothing', () => {
+    // Also stops a local variable happening to be called `vscode` from being counted.
+    expect(keys(requiredMembers([rawSrc('const vscode = {}; vscode.window.createStatusBarItem();')]))).toEqual([]);
   });
 
   test('a cast target is a type, not a value', () => {
@@ -130,11 +151,20 @@ describe('provided members', () => {
 });
 
 /** A fixture package the CLI can be pointed at, so its EXIT STATUS is testable. */
+const fixtureDirs: string[] = [];
+afterEach(() => {
+  // Each call leaked a temp directory until the Stage 5 security pass counted 18 of them on this
+  // machine. Hygiene rather than exposure — mkdtemp is 0700 and the contents are synthetic — but
+  // a test suite that grows the filesystem every run is a test suite nobody will run twice.
+  for (const d of fixtureDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
 const fixtureTree = (stubBody: string, sourceBody: string, testBody: string): string => {
   const dir = mkdtempSync(join(tmpdir(), 'cw-stubcover-'));
+  fixtureDirs.push(dir);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'vscode-stub.ts'), `export const vscodeStub = {\n${stubBody}\n};\n`);
-  writeFileSync(join(dir, 'thing.ts'), sourceBody);
+  writeFileSync(join(dir, 'thing.ts'), IMPORT + sourceBody);
   writeFileSync(join(dir, 'thing.test.ts'), testBody);
   return dir;
 };
@@ -143,6 +173,9 @@ const runCli = (dir: string): { status: number; stderr: string } => {
   return { status: p.status ?? -1, stderr: p.stderr ?? '' };
 };
 
+
+/** The shape of the claim the two files used to make, as it was actually written. */
+const STALE_CLAIM = /showErrorMessage[\s\S]{0,80}reached from/;
 
 const req = (...ks: string[]): Map<string, Set<string>> =>
   new Map(ks.map((k) => [k, new Set(['src.ts'])]));
@@ -282,10 +315,13 @@ describe('the docstrings this loop corrected', () => {
     //
     // The positive precondition matters here: without it this passes for any file that never made
     // the claim, including an empty one.
+    // A negative regex assertion with no positive control is green forever after a typo in the
+    // pattern. This one is checked against the text the claim actually had. (Stage 5 security pass)
+    expect(STALE_CLAIM.test('`window.showErrorMessage`, both\n  // reached from commands.ts')).toBe(true);
     for (const f of ['statusbar.test.ts', 'tooltip.test.ts']) {
       const text = readFileSync(join(VSCODE_SRC, f), 'utf-8');
       expect(`${f}: reads the shared stub`).toBe(`${f}: ${text.includes(factorySrc('vscodeStub').slice(0, -1)) ? 'reads the shared stub' : 'does not'}`);
-      expect(`${f}: ${/showErrorMessage[\s\S]{0,80}reached from/.test(text)}`).toBe(`${f}: false`);
+      expect(`${f}: ${STALE_CLAIM.test(text)}`).toBe(`${f}: false`);
     }
   });
 });

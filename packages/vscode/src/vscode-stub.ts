@@ -85,7 +85,16 @@ export const vscodeStub = {
   ThemeColor: MockThemeColor,
   MarkdownString: MockMarkdownString,
   Uri: { parse: (s: string) => s },
-  env: { isTelemetryEnabled: false as unknown, openExternal: noop as (u?: unknown) => void },
+  env: {
+    isTelemetryEnabled: false as unknown,
+    openExternal: noop as (u?: unknown) => void,
+    // extension.ts subscribes to this behind a `typeof … === 'function'` guard, so its absence
+    // fails closed and the subscription is simply skipped. It was absent until the Stage 5
+    // security pass fixed the coverage walker's blind spot for cast-wrapped reads, at which point
+    // the gate reported it missing. Present now so the branch is reachable — though no test yet
+    // drives it, which is recorded in review.md rather than fixed here.
+    onDidChangeTelemetryEnabled: ((_cb: () => void) => disposable()) as (cb: () => void) => { dispose(): void },
+  },
   window: {
     // Returns the CURRENT item, so `resetVscodeStub()` swaps the item rather than the function —
     // which is what lets `statusbar.test.ts` hold a reference and assert on it.
@@ -127,7 +136,16 @@ export function resetVscodeStub(): StubState {
   vscodeStub.env.openExternal = noop;
   vscodeStub.window.showInformationMessage = noop;
   vscodeStub.window.showErrorMessage = noop;
-  vscodeStub.window.createStatusBarItem.mockClear();
-  vscodeStub.workspace.getConfiguration.mockClear();
+  // mockReset, not mockClear: measured on bun 1.3.11, `mockClear()` PRESERVES an overridden
+  // implementation while `mockReset()` drops it. Nothing overrides these today, so this was
+  // latent — but a `getConfiguration.mockImplementation(...)` in one file would have survived
+  // into every later one, feeding extension.ts's config read. (Stage 5 security pass)
+  vscodeStub.window.createStatusBarItem.mockReset();
+  vscodeStub.window.createStatusBarItem.mockImplementation(() => state.item);
+  vscodeStub.workspace.getConfiguration.mockReset();
+  vscodeStub.workspace.getConfiguration.mockImplementation(() => ({
+    get: <T>(key: string, defaultValue: T): T =>
+      key in state.configValues ? (state.configValues[key] as T) : defaultValue,
+  }));
   return state;
 }

@@ -57,6 +57,46 @@ function parse(path: string, text: string): ts.SourceFile {
  * one line and constructs it on the next; a per-member classifier that took the first occurrence
  * would drop it entirely.
  */
+/** The local name `import * as X from 'vscode'` bound, or undefined if the file does not import it. */
+function vscodeBinding(sf: ts.SourceFile): string | undefined {
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt)) continue;
+    if (!ts.isStringLiteral(stmt.moduleSpecifier) || stmt.moduleSpecifier.text !== 'vscode') continue;
+    const clause = stmt.importClause?.namedBindings;
+    if (clause !== undefined && ts.isNamespaceImport(clause)) return clause.name.text;
+  }
+  return undefined;
+}
+
+/**
+ * The enclosing expression, seeing through wrappers that do not change what is being accessed.
+ *
+ * `(vscode.env as T).isTelemetryEnabled` — `extension.ts:45` — has an `AsExpression` between the
+ * two accesses, so a naive `node.parent` check records bare `env` and the sub-key is lost. The
+ * gate then reported `env.isTelemetryEnabled` as SURPLUS: it was telling a maintainer that the
+ * member gating telemetry is dead weight in the stub. Found by the Stage 5 security pass.
+ */
+function accessParent(node: ts.Node): ts.Node | undefined {
+  let current = node.parent;
+  while (
+    current !== undefined &&
+    (ts.isAsExpression(current) || ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current))
+  ) {
+    current = current.parent;
+  }
+  return current;
+}
+
+/** `vscode.env` or `vscode['env']` — the property name, or undefined if this is not one. */
+function accessedName(node: ts.Node, binding: string): string | undefined {
+  const isBase = (e: ts.Expression): boolean => ts.isIdentifier(e) && e.text === binding;
+  if (ts.isPropertyAccessExpression(node) && isBase(node.expression)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && isBase(node.expression) && ts.isStringLiteral(node.argumentExpression)) {
+    return node.argumentExpression.text;
+  }
+  return undefined;
+}
+
 export function requiredMembers(files: readonly SourceFile[]): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   for (const file of files) {
@@ -65,20 +105,32 @@ export function requiredMembers(files: readonly SourceFile[]): Map<string, Set<s
       users.add(basename(file.path));
       out.set(key, users);
     };
+    const sf = parse(file.path, file.text);
+    // The binding a namespace import gave it, not the literal `vscode`: `import * as vs` is legal
+    // and every file in this package could use it tomorrow. Files that do not import it at all
+    // contribute nothing, which also stops a local variable called `vscode` being mistaken for it.
+    const binding = vscodeBinding(sf);
+    if (binding === undefined) continue;
+
     const walk = (node: ts.Node): void => {
-      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'vscode') {
-        const parent = node.parent;
+      const object = accessedName(node, binding);
+      if (object !== undefined) {
         // `vscode.a.b` parses as PropertyAccess(PropertyAccess(vscode, a), b) — record the pair,
         // not just `a`, or `workspace` alone would satisfy a need for `workspace.getConfiguration`.
-        if (parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.expression === node) {
-          seen(memberKey({ object: node.name.text, property: parent.name.text }));
-        } else {
-          seen(memberKey({ object: node.name.text }));
-        }
+        const parent = accessParent(node);
+        const property =
+          parent === undefined
+            ? undefined
+            : ts.isPropertyAccessExpression(parent) && accessParent(parent.expression) === parent.expression
+              ? parent.name.text
+              : ts.isPropertyAccessExpression(parent)
+                ? parent.name.text
+                : undefined;
+        seen(property === undefined ? memberKey({ object }) : memberKey({ object, property }));
       }
       ts.forEachChild(node, walk);
     };
-    walk(parse(file.path, file.text));
+    walk(sf);
   }
   return out;
 }
@@ -209,7 +261,10 @@ export function readSources(dir: string): { sources: SourceFile[]; tests: Source
       const path = join(d, entry.name);
       if (entry.isDirectory()) {
         walk(path);
-      } else if (entry.name.endsWith('.ts')) {
+      } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+        // isFile(), not "not a directory": a FIFO named `x.ts` makes readFileSync block forever,
+        // which hangs this step until verify's 300s timeout and hangs it indefinitely when run on
+        // its own. Measured in a sandbox. (Stage 5 security pass)
         const file = { path, text: readFileSync(path, 'utf-8') };
         (entry.name.endsWith('.test.ts') ? tests : sources).push(file);
       }
