@@ -55,6 +55,37 @@ Nested properties of a mocked module are writable — `sdlc/028` measured that, 
 > "7 of 13" was a count of a list, not a measurement of a hazard, and the two are not the same
 > thing. Counting is not measuring.
 
+> **SECOND correction, from the Stage 2 review, which rejected the spec on it: the block above is
+> wrong and the original "7 of 13" was right.**
+>
+> Every one of those three routes was measured **within a single test file**. There is a fourth,
+> and it is the one this package actually executes: each test file calls
+> `mock.module('vscode', () => vscodeStub)` at module scope, and a *later* such call re-runs the
+> factory and re-syncs the resolved namespace's top-level exports — for consumers that resolved
+> long before. Reproduced, with the mutation in the file bun loads first:
+>
+> ```
+> [first]  its OWN consumer sees   top: PRISTINE-TOP  | nested: CORRUPT
+> [second] on entry                top: CORRUPT       | nested: CORRUPT
+> [second] after a plain reset     top: CORRUPT       | nested: PRISTINE-NESTED
+> [second] after re-registration   top: PRISTINE-TOP  | nested: PRISTINE-NESTED
+> ```
+>
+> Two things follow, and the second is new. **Top-level leaves are live hazards** — all 13 are at
+> risk, `ThemeColor` and `MarkdownString` included. And **restoring a top-level leaf by assignment
+> is inert**: the reset must re-register the factory, or it fixes the object while every consumer
+> goes on reading the corrupted namespace.
+>
+> Note the shape of the failure the first block would have shipped: the mutating file sees nothing
+> wrong, and the corruption surfaces in the next file. That is verbatim the thing this intent says
+> the loop exists to remove.
+>
+> **This is a correction to a correction, and the middle one was the wrong direction.** I measured
+> one file and generalised to a package. Then I wrote "measured unreachable" into a spec's
+> rejected-alternatives list, where it would have been the sentence a future author read instead of
+> measuring — the failure this loop is chartered to fix, reproduced inside the artifact that fixes
+> it. "Counting is not measuring" was the right lesson drawn from the wrong measurement.
+
 **And one of the four importing files never calls it.** Measured across the package:
 
 | File | imports `vscodeStub` | calls `resetVscodeStub()` |
