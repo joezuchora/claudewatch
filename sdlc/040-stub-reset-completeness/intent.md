@@ -31,9 +31,29 @@ what showed it.
 | `workspace.getConfiguration` | `commands.registerCommand` |
 | | `workspace.onDidChangeConfiguration` |
 
-A test that overwrites any of the seven on the right leaves it overwritten for every file that
-loads after it. Nested properties of a mocked module are writable — `sdlc/028` measured that, and
+A test that overwrites one of those leaves it overwritten for every file that loads after it.
+Nested properties of a mocked module are writable — `sdlc/028` measured that, and
 `commands.test.ts` relies on it to install recording sinks.
+
+> **Corrected in Stage 2, before speccing: it is five, not seven.** The table above counts the
+> stub's leaves. It does not ask which of them a consumer can actually be made to see, and that is
+> the question that decides the exposure. Measured, three routes:
+>
+> | Route | Result |
+> |---|---|
+> | `resolved.Top = x` — top-level, through the resolved module | **throws** `TypeError: Attempted to assign to readonly property` |
+> | `resolved.nested.leaf = x` | succeeds, and the shared object sees it |
+> | `vscodeStub.Top = x` — top-level, through the direct import | succeeds **on the object**, and the consumer still reads the ORIGINAL |
+>
+> The last is the one I would not have guessed. A resolved module namespace snapshots its
+> top-level keys; only nested objects are shared by reference. So `ThemeColor` and `MarkdownString`
+> are structurally unreachable by either route, and the at-risk set is the **nested** leaves alone:
+> `StatusBarAlignment.Right`, `Uri.parse`, `env.onDidChangeTelemetryEnabled`,
+> `commands.registerCommand`, `workspace.onDidChangeConfiguration`.
+>
+> The finding survives — five reachable leaves are unrestored, and one importer never resets — but
+> "7 of 13" was a count of a list, not a measurement of a hazard, and the two are not the same
+> thing. Counting is not measuring.
 
 **And one of the four importing files never calls it.** Measured across the package:
 
@@ -102,11 +122,12 @@ future author will read instead of checking.
 
 ## Open questions
 
-1. **Can the reset be made complete *structurally* rather than by enumeration?** Rebuilding the
-   whole `vscodeStub` object on each reset would be complete by construction — but the object
-   identity is what `mock.module` returned, and replacing it may not propagate to modules that
-   already resolved it. That is measurable, and Stage 2 must measure it rather than assume either
-   way. If it does propagate, the fix is much smaller than a leaf-by-leaf restore.
+1. ~~**Can the reset be made complete *structurally* by rebuilding the object?**~~ **Answered: no.**
+   Measured — a consumer that has resolved the module keeps the original reference, so replacing
+   the object leaves it reading the old one (`after REBUILD, consumer sees: MUTATED`). The reset
+   must restore leaves **in place**. That does not force a hand-maintained list: a snapshot taken
+   once at module load, walked and reapplied, is complete by construction and covers a leaf added
+   tomorrow.
 2. **Should `tooltip.test.ts` reset, or stop importing?** It needs `MarkdownString` from the stub.
    If the reset is cheap and complete, calling it is the consistent answer; if question 1 lands
    badly, "imports but does not reset" may be a legitimate documented category rather than a gap.
