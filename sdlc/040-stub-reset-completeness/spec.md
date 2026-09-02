@@ -2,8 +2,9 @@
 
 - **ID:** 040-stub-reset-completeness
 - **Stage:** 2 — Design
-- **Status:** revision 2 — draft REJECTED on scoping, revision 1 REJECTED on two claims it made
-  about its own design
+- **Status:** ACCEPTED at Stage 2 (revision 2). The draft was rejected on its scoping; revision 1 was
+  rejected on two claims it made about its own design. Eight wording items from the accepting review
+  are folded in here.
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
@@ -65,6 +66,9 @@ nothing wrong.** Its own consumer still reads pristine top-level values. The nex
    exclusionary and the excluded set is not empty (measured: `false` for a class instance, a `Map`
    and an array), so the exclusion is a refusal rather than a silence. If a future stub needs one of
    those shapes, extending the capture is that change's work, and the throw is what will tell it so.
+   `null` and `undefined` are captured **by value** — `typeof null === 'object'`, so a naive
+   implementation reaches for `.constructor` and raises a TypeError instead of the named throw, and
+   `scripts/vscode-stub-cover.ts`'s `isAbsent` shows this repo already contemplates absent stub values.
 2. **On each call**, walk `PRISTINE` and assign every captured value back onto the live object at the
    same path. Assignment, not replacement, at every level — replacing a nested object breaks the
    reference sharing consumers depend on. Assignment also re-adds a leaf a test *deleted*, which the
@@ -89,13 +93,16 @@ nothing wrong.** Its own consumer still reads pristine top-level values. The nex
    close over the module-level `state` variable and read it when called, so a rebuilt `state` is
    picked up with no re-registration.
 
-   **Keyed by identity, not by a path string, and that is the whole point.** Revision 1 had
-   `stubMock(path, impl)`, and the review found the hole: a *bijective permutation* of two path
-   strings — the copy-paste where the second string is edited to another real path rather than left
-   duplicated — leaves every path registered exactly once, so a missing-registration check never
-   fires, and the two implementations silently swap at the first reset. Correct before the first
-   `beforeEach` and wrong after it, which is the worst debugging shape there is. With the mock itself
-   as the key there is no name to permute; the arrangement is not expressible.
+   **The key is the object, not a path string, and it must stay that way.** With a string key, a
+   *bijective permutation* of two paths leaves every path registered exactly once — so a
+   missing-registration check never fires and the two implementations silently swap at the first
+   reset, correct before the first `beforeEach` and wrong after it. Measured. With the mock itself as
+   the key that arrangement is not expressible.
+
+   The registry records the **construction-time** implementation, which settles two edge routes: a
+   `mockImplementation` applied at construction diverges from it and reverts at the first reset (which
+   is the right reading of "pristine"), and a mock hidden behind a plain-function wrapper is not a
+   mock leaf, so it is captured by reference and its history is never cleared.
 
    **A mock leaf with no registration makes the reset throw, naming the path the walk found it at.**
    The path in that message is derived from the walk rather than from a hand-written string, so it
@@ -184,7 +191,7 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
 | A **two-deep** leaf is added (`workspace.fs.readFile`) | covered; the capture recurses |
 | A **`mock()` leaf** is added through `stubMock` | covered; history cleared, implementation reinstalled |
 | A `mock()` leaf is added **without** `stubMock` | the reset **throws** on the first `beforeEach`, naming the path the walk found it at |
-| A `mock()` leaf is registered under the **wrong name** | not expressible — the registry is keyed by the mock's identity. Revision 1 keyed it by a path string and this row claimed a throw that measurement showed does not happen |
+| A `mock()` leaf is registered under the **wrong name** | not expressible — the registry is keyed by the mock's identity, so there is no name |
 | A leaf is added under an **array, `Map` or class instance** | `captureLeaves` **throws**, naming the path. Not covered, and not silently so — capturing it by reference would make the snapshot the live value |
 | A leaf is **removed** from `vscodeStub` | `PRISTINE` no longer captures it; nothing to restore; no error |
 | A test **deletes** a leaf | re-added by the walk. Free, and now claimed |
@@ -222,15 +229,15 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
   adds a ninth pair and turns `bun test` — and therefore A10 — red. **Resolution: assemble it**, as
   `scripts/vscode-stub-cover.test.ts:37`'s `factorySrc` already does (`mock.${'module'}(…)`) and for
   the same recorded reason. The pinned list is not edited; the guard is not weakened.
-- **Cost of re-registering, measured rather than deferred.** 70 `mock.module` calls: **10.9 ms and
-  22.7 ms** on two independent runs. The two disagree by 2x and neither reproduces the other, so no
-  winner is picked — both are ≈0.1% of the 20s test step, and the conclusion does not depend on which
-  is right.
+- **Cost of re-registering, measured rather than deferred.** 70 `mock.module` calls: **9.5–28.2 ms
+  across ten runs** on this machine. The spread is run-to-run variance, not a disagreement between
+  observers: two single-shot samples 2x apart looked like a conflict until each was repeated, and
+  invoking this repo's no-winner rule on an unrepeated measurement is the anti-pattern the rule
+  exists to prevent. ≈0.1% of the 20s test step at either end.
 - **The axis that could have broken the three existing resetters, and did not.** Re-registration does
   **not** re-evaluate dependent modules: a consumer's module body printed once across three
-  `beforeEach` re-registrations while its module-level counter kept incrementing (1, 2, 3). Revision 1
-  asserted "the three files that already reset keep working with no edit" without identifying the axis
-  on which that could have been false.
+  `beforeEach` re-registrations while its module-level counter kept incrementing (1, 2, 3). This is the
+  axis on which "the three files that already reset keep working with no edit" could have been false.
 
 ## Acceptance criteria
 
@@ -245,9 +252,8 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
       suite. Copy `vscode-stub.ts` and `vscode-stub.test.ts` to a temp dir and revert **only the body
       of `resetVscodeStub()`** to its six-leaf form — `git show 3b523ac:packages/vscode/src/vscode-stub.ts`
       names the base explicitly, and the new exports (`captureLeaves`, `restoreLeaves`,
-      `pristineLeafPaths`, `stubMock`) must be kept or the test file does not import. Revision 1 said
-      "revert the stub" and pinned `HEAD`, which produces a module error rather than a leaf report and
-      compares the file with itself once committed. Run `bun test ./vscode-stub.test.ts` there; the
+      `pristineLeafPaths`, `stubMock`) must be kept, or the test file does not import and the run
+      produces a module error rather than a leaf report. Run `bun test ./vscode-stub.test.ts` there; the
       failure output must name all **seven** unrestored leaves — `StatusBarAlignment.Right`,
       `ThemeColor`, `MarkdownString`, `Uri.parse`, `env.onDidChangeTelemetryEnabled`,
       `commands.registerCommand`, `workspace.onDidChangeConfiguration` — and no others. Command and
@@ -287,7 +293,8 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
       map is itself a hand-maintained list with a silent default, which is the defect class this whole
       loop exists to delete, reintroduced in the criterion that detects it;
       **(b)** bun prints no `skip` line at all when nothing is skipped (measured on all six current
-      files), so an absent line means zero and a parser requiring all three fails on every file today;
+      files), so an absent line means zero and a parser requiring all three fails on every file today
+      — and the counts go to **stderr**, not stdout;
       **(c)** the file-count assertion at `scripts/vscode-stub-cover.test.ts:52` becomes **`>= 7`**.
       **What it buys and what it does not:** a floor catches deletion and skipping. It does **not**
       catch a test that still runs with its assertions gutted — `pass` is unchanged. Bun also prints
@@ -302,7 +309,9 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
       `A === A` and holds for any broken walker — but against `providedMembers()` from
       `scripts/vscode-stub-cover.ts`, which derives the stub's members by an AST parse, already exists,
       and is already tested. The two are related by a stated rule: **a leaf path is a member of
-      `providedMembers()` that is not a prefix of any other member**, which drops the six container
+      `providedMembers()` that is no other member's prefix **on a dotted-path boundary** — `o.startsWith(m + '.')`,
+      not a bare `startsWith`, or a future `env.open` beside `env.openExternal` is mistaken for a
+      container — which drops the six container
       names and leaves 13. Assert set equality under that derivation, and assert the set is non-empty.
       *Known limit:* `providedMembers()` descends one level, so if a two-deep leaf is ever added the
       two sets disagree and A9 goes red until the oracle is extended. That is loop 039's gate
@@ -327,24 +336,31 @@ shape is unchanged — only how its two `mock()` leaves are constructed. No prod
       pristine values for one top-level and one nested leaf and then mutates both through the direct
       import. Symmetric, so the criterion does not depend on bun's file order — which is stable but is
       **not argument order** (measured across five runs).
-      **Exit status alone is not the check, and this is the finding that rejected revision 1.** A bare
+      **Exit status alone is not the check.** A bare
       argument to `bun test` is a *filter*, not a path: `bun test <a> <nonexistent>` exits **0** and
       reports `Ran 1 test across 1 file`, and the `./`-prefixed form the CLI's own hint recommends does
       the same. A typo'd fixture name would leave only the file that asserts pristine before anything
       has mutated, and A11 — the one criterion the whole rejection was about — would report green with
       zero cross-file coverage. So assert **`2 pass`, `0 fail`, `0 skip`, and `Ran 2 tests across 2
-      files`**, not the status.
+      files`**, not the status. **Parse stderr** — bun writes the summary and the `Ran …` line there,
+      not to stdout (measured: zero matches on stdout), and `runCli` in
+      `scripts/vscode-stub-cover.test.ts:171` already returns `{ status, stderr }`. As in A8(b), bun
+      prints no `skip` line when nothing is skipped, so a literal three-line parser fails on a green
+      run.
       **And a recorded negative, not an asserted one.** The same fixture pair against a stub copy with
       step 3's re-registration deleted must exit non-zero on the top-level leaf; command and output in
-      `review.md`, the way A2 and A7 already require. Revision 1 asserted this discrimination in prose
-      in a loop whose thesis is that a claim in an artifact is not a measurement.
+      `review.md`, the way A2 and A7 already require. A discrimination asserted in prose is a claim,
+      not a measurement, and this is the criterion that can least afford the difference.
 - [ ] **A12 — a commented-out call does not satisfy the gate.** A fixture whose only occurrence of
       `resetVscodeStub()` is inside a comment, and a second whose only occurrence is inside a string
       literal, both fail. Verified by `bun test`.
 - [ ] **A13 — an unregistered mock leaf, and an uncoverable container, both fail loudly.** Two
-      fixtures: a raw `mock()` in a stub literal, and a leaf under an array or class instance. Each
-      must throw on the **first reset**, naming the path the walk found it at — not on the first test
-      that happens to depend on it. This is the criterion that keeps step 5's registry from becoming
+      fixtures: a raw `mock()` in a stub literal, and a leaf under an array or class instance. They
+      throw at **different moments, and the difference is deliberate**: the unregistered mock on the
+      first reset, naming the path the walk found it at; the uncoverable container **at capture time,
+      i.e. module load** — earlier and louder, and the reason the capture is not lazy. A capture
+      deferred to the first reset would bake anything mutated between import and the first
+      `beforeEach` into `PRISTINE`. This is the criterion that keeps step 5's registry from becoming
       the list this loop exists to delete, and step 1's exclusion from becoming a silence.
 
 **Which of these discriminate.** A2, A5, A7, A12 fail against the tree as it stands. A1, A3, A4, A11,
