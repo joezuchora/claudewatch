@@ -37,6 +37,8 @@ beforeEach(() => {
 
 type Rec = Record<string, unknown>;
 
+const isMockLike = (v: unknown): boolean => typeof v === 'function' && 'mockReset' in v;
+
 /** An independent walker: the tests must not share the implementation's idea of what a leaf is. */
 function walkLeaves(obj: Rec, prefix = ''): { path: string; value: unknown }[] {
   return Object.entries(obj).flatMap(([k, v]) => {
@@ -66,20 +68,33 @@ describe('A1 — every leaf is restored, enumerated rather than listed', () => {
     // that silently found nothing from passing, which is the only way this test can lie.
     expect(leaves.length).toBeGreaterThanOrEqual(13);
 
-    for (const { path } of leaves) {
+    // COLLECTED, not asserted in the loop. A per-leaf `expect` aborts at the first failure and
+    // names one leaf; the point of this test is to report the whole unrestored SET at once, which
+    // is what makes A2's "names all seven and no others" a check rather than a hope.
+    const neverChanged: string[] = [];
+    const notRestored: string[] = [];
+
+    for (const { path, value } of leaves) {
       const original = getAtPath(stub, path);
-      const sentinel = `SENTINEL-${path}`;
-      setAtPath(stub, path, sentinel);
+      // The sentinel matches the leaf's KIND. A mock leaf gets a DIFFERENT mock rather than a
+      // string: identity still changes, so the round-trip is just as strict, but a reset that
+      // calls `.mockReset()` on whatever sits at that path fails by not restoring rather than by
+      // throwing. Measured — a string sentinel makes the pre-change reset crash on the first mock
+      // leaf, so it reports one TypeError instead of the set of leaves it failed to restore.
+      setAtPath(stub, path, isMockLike(value) ? mock(() => `SENTINEL-${path}`) : `SENTINEL-${path}`);
       // The overwrite must actually change the value, or the round-trip proves nothing:
       // `env.isTelemetryEnabled` is `false`, and a walker writing `false` would pass vacuously.
-      expect(`${path}: ${String(getAtPath(stub, path) === original)}`).toBe(`${path}: false`);
+      if (getAtPath(stub, path) === original) neverChanged.push(path);
 
       resetVscodeStub();
 
       // Identity against the recorded original, not inequality against the sentinel: the latter
       // passes for any value that merely differs from the sentinel.
-      expect(`${path}: ${String(getAtPath(stub, path) === original)}`).toBe(`${path}: true`);
+      if (getAtPath(stub, path) !== original) notRestored.push(path);
     }
+
+    expect(neverChanged).toEqual([]);
+    expect(notRestored).toEqual([]);
   });
 });
 
