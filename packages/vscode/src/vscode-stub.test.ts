@@ -155,6 +155,8 @@ describe('A3 — the snapshot covers what it claims, and refuses what it cannot'
     }
     expect(() => captureLeaves({ a: { b: new Thing() } })).toThrow(/a\.b/);
     expect(() => captureLeaves({ a: { b: new Map() } })).toThrow(/a\.b/);
+    // The error message has a dedicated 'null-prototype object' branch that nothing reached.
+    expect(() => captureLeaves({ a: { b: Object.create(null) as object } })).toThrow(/null-prototype/);
     // Positive control: MockThemeColor is a constructor and must survive by reference, or
     // `instanceof` assertions in statusbar.test.ts break.
     const snap = captureLeaves({ ThemeColor: Thing });
@@ -167,6 +169,18 @@ describe('A3 — the snapshot covers what it claims, and refuses what it cannot'
     (o.env as Rec).a = 'CORRUPT';
     restoreLeaves(o, snap, noRegistry);
     expect((o.env as Rec).a).toBe(null);
+  });
+});
+
+describe('the restore re-adds a leaf a test DELETED', () => {
+  test('a deleted nested leaf comes back', () => {
+    // Claimed in Behavior step 2 as free, and shipped unchecked until the Stage 5 audit: A1 walks
+    // Object.entries, so it only ever exercises overwrite.
+    const parse = vscodeStub.Uri.parse;
+    delete (vscodeStub.Uri as Partial<typeof vscodeStub.Uri>).parse;
+    expect(vscodeStub.Uri.parse).toBeUndefined();
+    resetVscodeStub();
+    expect(vscodeStub.Uri.parse).toBe(parse);
   });
 });
 
@@ -282,8 +296,9 @@ const runPair = (dir: string): { status: number; out: string } => {
     cwd: dir,
     encoding: 'utf-8',
   });
-  // bun writes the summary and the `Ran …` line to STDERR, not stdout.
-  return { status: p.status ?? -1, out: `${p.stderr ?? ''}${p.stdout ?? ''}` };
+  // bun writes the summary and the `Ran …` line to STDERR, not stdout — measured, so this reads
+  // stderr alone rather than a concatenation that would hide the fact.
+  return { status: p.status ?? -1, out: p.stderr ?? '' };
 };
 
 describe('A11 — corruption does not cross a file boundary', () => {
@@ -297,6 +312,8 @@ describe('A11 — corruption does not cross a file boundary', () => {
       expect(out).toContain('2 pass');
       expect(out).toContain('0 fail');
       expect(out).toContain('Ran 2 tests across 2 files');
+      // No `skip` line is printed when nothing is skipped, so absence is the assertion.
+      expect(out).not.toContain(' skip');
       expect(status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });

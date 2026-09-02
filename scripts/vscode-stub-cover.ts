@@ -274,11 +274,21 @@ export function resetUsers(files: readonly SourceFile[]): { importers: string[];
 
     let stubImported = false;
     const resetNames = new Set<string>();
+    // `import * as stub from './vscode-stub.js'` — the namespace binding, whose members are read as
+    // `stub.vscodeStub` / `stub.resetVscodeStub()`. Without this the gate exempted such a file
+    // entirely, which is a bypass rather than a limitation. (Stage 5 audit)
+    const namespaces = new Set<string>();
     for (const stmt of sf.statements) {
       if (!ts.isImportDeclaration(stmt)) continue;
       if (!ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.moduleSpecifier.text.endsWith('vscode-stub.js')) continue;
       const bindings = stmt.importClause?.namedBindings;
-      if (bindings === undefined || !ts.isNamedImports(bindings)) continue;
+      if (bindings === undefined) continue;
+      if (ts.isNamespaceImport(bindings)) {
+        stubImported = true;
+        namespaces.add(bindings.name.text);
+        continue;
+      }
+      if (!ts.isNamedImports(bindings)) continue;
       for (const el of bindings.elements) {
         const imported = el.propertyName?.text ?? el.name.text;
         if (imported === 'vscodeStub') stubImported = true;
@@ -291,8 +301,8 @@ export function resetUsers(files: readonly SourceFile[]): { importers: string[];
 
     let resets = false;
     const walk = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resetNames.has(node.expression.text)) {
-        if (inBeforeEach(node)) resets = true;
+      if (ts.isCallExpression(node) && isResetCall(node.expression, resetNames, namespaces) && inBeforeEach(node)) {
+        resets = true;
       }
       ts.forEachChild(node, walk);
     };
@@ -302,12 +312,31 @@ export function resetUsers(files: readonly SourceFile[]): { importers: string[];
   return { importers, resetters };
 }
 
-/** Climb to an enclosing function that is an argument to a call named `beforeEach`. */
+/** `resetVscodeStub()` under a named import, or `stub.resetVscodeStub()` under a namespace one. */
+function isResetCall(callee: ts.Expression, named: ReadonlySet<string>, namespaces: ReadonlySet<string>): boolean {
+  if (ts.isIdentifier(callee)) return named.has(callee.text);
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    namespaces.has(callee.expression.text) &&
+    callee.name.text === 'resetVscodeStub'
+  );
+}
+
+/**
+ * Climb to an enclosing function that is an argument to a call named `beforeEach`.
+ *
+ * The climb from the function to its call goes through `accessParent`, which unwraps
+ * `as`/parenthesis/non-null. Without it, `beforeEach((() => { … }) as () => void)` and
+ * `beforeEach((() => { … }))` are FALSE NEGATIVES — a file that does reset fails the gate. Fails
+ * safe rather than open either way, but a gate that rejects correct code gets edited away.
+ * (Stage 5 audit; the plan asked for this reuse and the first implementation ignored it.)
+ */
 function inBeforeEach(node: ts.Node): boolean {
   let current: ts.Node | undefined = node;
   while (current !== undefined) {
     if (ts.isFunctionLike(current)) {
-      const parent = current.parent;
+      const parent = accessParent(current);
       if (
         parent !== undefined &&
         ts.isCallExpression(parent) &&

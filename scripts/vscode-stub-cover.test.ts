@@ -15,6 +15,7 @@ import { join, resolve } from 'path';
 import {
   compare,
   readSources,
+  resetUsers,
   vscodeInstallers,
   memberKey,
   providedMembers,
@@ -58,6 +59,9 @@ const counts = (text: string): { pass: number; fail: number; skip: number; expec
   };
 };
 
+/** A synthetic test file for the `resetUsers` unit tests. */
+const tf = (text: string): SourceFile => ({ path: 'x.test.ts', text });
+
 describe('the consolidation', () => {
   /**
    * Recorded FLOORS, not equalities. (sdlc/040)
@@ -77,10 +81,18 @@ describe('the consolidation', () => {
     'statusbar.test.ts': { pass: 29, expects: 57 },
     'telemetry-gate.test.ts': { pass: 7, expects: 22 },
     'tooltip.test.ts': { pass: 10, expects: 18 },
-    'vscode-stub.test.ts': { pass: 18, expects: 37 },
+    'vscode-stub.test.ts': { pass: 19, expects: 41 },
   };
 
-  test('every vscode test file passes run alone, and still runs what it used to', () => {
+  test('every vscode test file has a recorded floor, and no floor is stale', () => {
+    // The check that guards the guard. Without it, deleting the `has a recorded floor` assertion
+    // below goes unnoticed by every test — which the Stage 5 audit found. Equality in BOTH
+    // directions: a new file with no floor fails, and a floor left behind by a deleted file fails.
+    const files = readdirSync(VSCODE_SRC).filter((f) => f.endsWith('.test.ts')).toSorted();
+    expect(Object.keys(FLOORS).toSorted()).toEqual(files);
+  });
+
+  test('every vscode test file passes run alone', () => {
     // Enumerated, not hard-coded: an eighth file is covered the day it appears. The count is
     // asserted so an empty glob cannot make this pass vacuously — which it would have, and the
     // earlier drafts of this loop said "five files" when there are six.
@@ -104,7 +116,7 @@ describe('the consolidation', () => {
         `${file}: expects=${Math.max(c.expects, floor!.expects)} >= ${floor!.expects}`,
       );
     }
-  }, 180_000);
+  }, 120_000);
 
   test('every installer uses the shared stub, and at least one does', () => {
     // readSources walks recursively, as the CLI does; a flat readdirSync here could not see a
@@ -375,6 +387,72 @@ describe('the gate', () => {
     const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', body);
     expect(runCli(dir).status).toBe(0);
   }, 60_000);
+
+  test('a cast or parenthesised beforeEach callback still counts', () => {
+    // The plan asked for `accessParent` and the first implementation climbed raw `.parent`, making
+    // these FALSE NEGATIVES: a file that does reset would have failed the gate. (Stage 5 audit)
+    const body = [
+      "import { beforeEach } from 'bun:test';",
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';",
+      factorySrc('vscodeStub'),
+      'beforeEach((() => { resetVscodeStub(); }) as () => void);',
+    ].join('\n');
+    const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', body);
+    expect(runCli(dir).status).toBe(0);
+  }, 60_000);
+
+  /**
+   * These exercise `resetUsers` DIRECTLY rather than through the CLI. A namespace import cannot
+   * reach the reset check through the CLI at all: `vscodeInstallers` only recognises a factory
+   * whose body is the bare identifier `vscodeStub`, so `() => stub.vscodeStub` fails the
+   * inline-factory check first and the fixture would pass or fail for an unrelated reason. That
+   * installer limitation is loop 039's and is recorded in review.md, not widened here.
+   */
+  test('resetUsers: a namespace import is an importer, and its reset counts', () => {
+    const r = resetUsers([
+      tf("import * as stub from './vscode-stub.js';\nbeforeEach(() => { stub.resetVscodeStub(); });"),
+    ]);
+    expect(r.importers).toEqual(['x.test.ts']);
+    expect(r.resetters).toEqual(['x.test.ts']);
+  });
+
+  test('resetUsers: a namespace importer that does not reset is reported', () => {
+    const r = resetUsers([tf("import * as stub from './vscode-stub.js';\nstub.vscodeStub;")]);
+    expect(r.importers).toEqual(['x.test.ts']);
+    expect(r.resetters).toEqual([]);
+  });
+
+  test('resetUsers: a cast or parenthesised beforeEach callback still counts', () => {
+    const cast = tf(
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';\n" +
+        'beforeEach((() => { resetVscodeStub(); }) as () => void);',
+    );
+    const paren = tf(
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';\n" +
+        'beforeEach((() => { resetVscodeStub(); }));',
+    );
+    // The plan asked for `accessParent` here and the first implementation climbed raw `.parent`,
+    // making both of these false negatives — a file that DOES reset failing the gate.
+    expect(resetUsers([cast]).resetters).toEqual(['x.test.ts']);
+    expect(resetUsers([paren]).resetters).toEqual(['x.test.ts']);
+  });
+
+  test('resetUsers: a call outside beforeEach, or in a comment, does not count', () => {
+    const moduleScope = tf(
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';\nresetVscodeStub();",
+    );
+    const comment = tf(
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';\n// resetVscodeStub();",
+    );
+    const afterEachOnly = tf(
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';\n" +
+        'afterEach(() => { resetVscodeStub(); });',
+    );
+    for (const f of [moduleScope, comment, afterEachOnly]) {
+      expect(resetUsers([f]).importers).toEqual(['x.test.ts']);
+      expect(resetUsers([f]).resetters).toEqual([]);
+    }
+  });
 
   test('a file that resets but does not import vscodeStub is not checked', () => {
     const body = [
