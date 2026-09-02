@@ -184,6 +184,15 @@ describe('the restore re-adds a leaf a test DELETED', () => {
   });
 });
 
+describe('a deleted or replaced CONTAINER fails by name, and still re-syncs', () => {
+  test('the throw names the container path', () => {
+    const o: Rec = { env: { leaf: 1 } };
+    const snap = captureLeaves(o);
+    delete o.env;
+    expect(() => restoreLeaves(o, snap, new Map())).toThrow(/container at "env"/);
+  });
+});
+
 describe('A4 — both mock leaves are reset AND reimplemented against the new state', () => {
   test('createStatusBarItem has no recorded calls and returns the CURRENT item', () => {
     vscodeStub.window.createStatusBarItem();
@@ -295,6 +304,13 @@ const runPair = (dir: string): { status: number; out: string } => {
   const p = spawnSync('bun', ['test', join(dir, 'a.test.ts'), join(dir, 'b.test.ts')], {
     cwd: dir,
     encoding: 'utf-8',
+    // HOME points into the temp tree so a fixture can never reach the developer's ~/.claude. It
+    // does not today — measured, the child opens nothing outside its own directory — but that is a
+    // property of what these fixtures import, not of the arrangement. `timeout` because bun's
+    // per-test timeout cannot interrupt a synchronous spawn: a wedged child would hang the suite
+    // rather than fail it. (Stage 5 security pass)
+    env: { ...process.env, HOME: dir },
+    timeout: 30_000,
   });
   // bun writes the summary and the `Ran …` line to STDERR, not stdout — measured, so this reads
   // stderr alone rather than a concatenation that would hide the fact.

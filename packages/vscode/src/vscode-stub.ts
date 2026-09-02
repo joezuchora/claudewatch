@@ -225,6 +225,15 @@ export function restoreLeaves(
   for (const [key, captured] of Object.entries(pristine)) {
     const path = prefix === '' ? key : `${prefix}.${key}`;
     if (isPlainObject(captured)) {
+      // The LIVE side may no longer be a container: a test can delete or replace a whole nested
+      // object. Without this guard the recursion raises a bare `undefined is not an object`
+      // instead of the named error this module promises. (Stage 5 security pass)
+      if (!isPlainObject(obj[key])) {
+        throw new Error(
+          `restoreLeaves: container at "${path}" is no longer an object (found ${String(obj[key])}). ` +
+            'A test replaced or deleted it; the reset restores leaves, not container shapes.',
+        );
+      }
       restoreLeaves(obj[key] as Record<string, unknown>, captured, registry, path);
       continue;
     }
@@ -275,7 +284,14 @@ export function pristineLeafPaths(): string[] {
  */
 export function resetVscodeStub(): StubState {
   state = freshState();
-  restoreLeaves(vscodeStub as unknown as Record<string, unknown>, PRISTINE, impls);
-  mock.module('vscode', () => vscodeStub);
+  try {
+    restoreLeaves(vscodeStub as unknown as Record<string, unknown>, PRISTINE, impls);
+  } finally {
+    // In a `finally` because the walk is non-atomic: a leaf it cannot restore throws partway, and
+    // without this the module namespace would ALSO be left un-re-synced, making the documented
+    // limit ("later keys are not restored") quietly broader than stated. The keys that WERE
+    // restored still reach consumers. (Stage 5 security pass)
+    mock.module('vscode', () => vscodeStub);
+  }
   return state;
 }

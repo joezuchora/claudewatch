@@ -81,7 +81,7 @@ describe('the consolidation', () => {
     'statusbar.test.ts': { pass: 29, expects: 57 },
     'telemetry-gate.test.ts': { pass: 7, expects: 22 },
     'tooltip.test.ts': { pass: 10, expects: 18 },
-    'vscode-stub.test.ts': { pass: 19, expects: 41 },
+    'vscode-stub.test.ts': { pass: 20, expects: 42 },
   };
 
   test('every vscode test file has a recorded floor, and no floor is stale', () => {
