@@ -253,6 +253,75 @@ export function compare(required: Map<string, Set<string>>, provided: Set<string
   };
 }
 
+/**
+ * Which test files IMPORT `vscodeStub`, and which of those call `resetVscodeStub()` inside a
+ * `beforeEach`. (sdlc/040)
+ *
+ * AST, not text, for the same reason the coverage walker is: a `resetVscodeStub()` inside a
+ * comment or a string literal is not a `CallExpression`, so it contributes nothing. That also
+ * keeps this file's own fixtures — which reference `vscodeStub` in fixture STRINGS without
+ * importing it — correctly outside the check.
+ *
+ * INSIDE A `beforeEach`, not merely present. A module-scope call satisfies "the file resets" and
+ * provides no per-test isolation, which is exactly the arrangement sdlc/039's audit had to delete
+ * by hand. A gate satisfiable by that certifies the defect it was built to find.
+ */
+export function resetUsers(files: readonly SourceFile[]): { importers: string[]; resetters: string[] } {
+  const importers: string[] = [];
+  const resetters: string[] = [];
+  for (const file of files) {
+    const sf = parse(file.path, file.text);
+
+    let stubImported = false;
+    const resetNames = new Set<string>();
+    for (const stmt of sf.statements) {
+      if (!ts.isImportDeclaration(stmt)) continue;
+      if (!ts.isStringLiteral(stmt.moduleSpecifier) || !stmt.moduleSpecifier.text.endsWith('vscode-stub.js')) continue;
+      const bindings = stmt.importClause?.namedBindings;
+      if (bindings === undefined || !ts.isNamedImports(bindings)) continue;
+      for (const el of bindings.elements) {
+        const imported = el.propertyName?.text ?? el.name.text;
+        if (imported === 'vscodeStub') stubImported = true;
+        // `import { resetVscodeStub as r }` binds the local name, which is what the call uses.
+        if (imported === 'resetVscodeStub') resetNames.add(el.name.text);
+      }
+    }
+    if (!stubImported) continue;
+    importers.push(basename(file.path));
+
+    let resets = false;
+    const walk = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && resetNames.has(node.expression.text)) {
+        if (inBeforeEach(node)) resets = true;
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(sf);
+    if (resets) resetters.push(basename(file.path));
+  }
+  return { importers, resetters };
+}
+
+/** Climb to an enclosing function that is an argument to a call named `beforeEach`. */
+function inBeforeEach(node: ts.Node): boolean {
+  let current: ts.Node | undefined = node;
+  while (current !== undefined) {
+    if (ts.isFunctionLike(current)) {
+      const parent = current.parent;
+      if (
+        parent !== undefined &&
+        ts.isCallExpression(parent) &&
+        ts.isIdentifier(parent.expression) &&
+        parent.expression.text === 'beforeEach'
+      ) {
+        return true;
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 export function readSources(dir: string): { sources: SourceFile[]; tests: SourceFile[] } {
   const sources: SourceFile[] = [];
   const tests: SourceFile[] = [];
@@ -306,6 +375,17 @@ if (import.meta.main) {
     console.error(
       'vscode-stub-cover: no test file installs the shared stub with ' +
         "mock.module('vscode', () => vscodeStub). Nothing would resolve `vscode` at test time.",
+    );
+    failed = true;
+  }
+
+  const { importers, resetters } = resetUsers(tests);
+  const notResetting = importers.filter((f) => !resetters.includes(f));
+  if (notResetting.length > 0) {
+    console.error(
+      `vscode-stub-cover: ${notResetting.length} file(s) import vscodeStub without calling resetVscodeStub() in a beforeEach: ${notResetting.join(', ')}.\n` +
+        '  One shared stub is one shared MUTABLE object. A file that does not reset inherits whatever\n' +
+        '  the previously loaded file left behind, and a module-scope call is not per-test isolation.',
     );
     failed = true;
   }

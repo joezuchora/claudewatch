@@ -1,13 +1,20 @@
-import { describe, expect, test, mock } from 'bun:test';
+import { beforeEach, describe, expect, test, mock } from 'bun:test';
 import { makeTestSnapshot } from '@claudewatch/core/test-helpers';
 import type { RuntimeState, UsageSnapshot } from '@claudewatch/core';
-import { vscodeStub } from './vscode-stub.js';
+import { vscodeStub, resetVscodeStub } from './vscode-stub.js';
 
 // The `vscode` stub lives in one place now — see vscode-stub.ts for why per-file factories do
-// not compose. This file depends on nothing mutable in it, so it needs no reset. (sdlc/039)
+// not compose. This file resets like every other importer, and the gate requires it: "depends on
+// nothing mutable" was a property of what this file asserted on one day, restated as if it were a
+// rule about the arrangement. It also uses `MarkdownString`, a TOP-LEVEL leaf, which a reset
+// without re-registration would not have repaired for `tooltip.ts` anyway. (sdlc/040)
 mock.module('vscode', () => vscodeStub);
 
 const { buildTooltip } = await import('./tooltip.js');
+
+beforeEach(() => {
+  resetVscodeStub();
+});
 
 /** Tooltip tests use a fixed timestamp for deterministic output */
 function makeSnapshot(overrides?: Partial<UsageSnapshot>): UsageSnapshot {

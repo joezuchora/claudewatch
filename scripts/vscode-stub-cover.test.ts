@@ -43,19 +43,68 @@ const src = (text: string, path = 'a.ts'): SourceFile => ({ path, text: text.sta
 const rawSrc = (text: string, path = 'a.ts'): SourceFile => ({ path, text });
 const keys = (m: Map<string, Set<string>>): string[] => [...m.keys()].toSorted();
 
+/**
+ * bun writes the summary to STDERR, and prints a `skip` line ONLY when something is skipped — both
+ * measured. A parser reading stdout finds nothing; one requiring all three lines fails on every
+ * healthy file. (sdlc/040)
+ */
+const counts = (text: string): { pass: number; fail: number; skip: number; expects: number } => {
+  const n = (re: RegExp): number => Number(re.exec(text)?.[1] ?? '0');
+  return {
+    pass: n(/^\s*(\d+) pass$/m),
+    fail: n(/^\s*(\d+) fail$/m),
+    skip: n(/^\s*(\d+) skip$/m),
+    expects: n(/^\s*(\d+) expect\(\) calls$/m),
+  };
+};
+
 describe('the consolidation', () => {
-  test('every vscode test file passes run alone', () => {
-    // Enumerated, not hard-coded: a seventh file is covered the day it appears. The count is
+  /**
+   * Recorded FLOORS, not equalities. (sdlc/040)
+   *
+   * An equality reddens on every added test and would be edited away within two loops; a floor
+   * reddens only on the defect — a deleted `describe`, or assertions removed from a test that
+   * still runs. `expects` is the stronger of the two: a gutted test body keeps its `pass` count.
+   *
+   * A file with NO entry here is a FAILURE, not a default of zero. A silent default would make
+   * this map exactly the hand-maintained list with a quiet fallback that sdlc/040 exists to
+   * delete, reintroduced in the check that detects it.
+   */
+  const FLOORS: Record<string, { pass: number; expects: number }> = {
+    'commands.test.ts': { pass: 5, expects: 12 },
+    'extension.test.ts': { pass: 20, expects: 41 },
+    'manifest.test.ts': { pass: 6, expects: 18 },
+    'statusbar.test.ts': { pass: 29, expects: 57 },
+    'telemetry-gate.test.ts': { pass: 7, expects: 22 },
+    'tooltip.test.ts': { pass: 10, expects: 18 },
+    'vscode-stub.test.ts': { pass: 18, expects: 61 },
+  };
+
+  test('every vscode test file passes run alone, and still runs what it used to', () => {
+    // Enumerated, not hard-coded: an eighth file is covered the day it appears. The count is
     // asserted so an empty glob cannot make this pass vacuously — which it would have, and the
     // earlier drafts of this loop said "five files" when there are six.
     const files = readdirSync(VSCODE_SRC).filter((f) => f.endsWith('.test.ts')).toSorted();
-    expect(files.length).toBeGreaterThanOrEqual(6);
+    expect(files.length).toBeGreaterThanOrEqual(7);
 
     for (const file of files) {
       const proc = spawnSync('bun', ['test', join(VSCODE_SRC, file)], { cwd: REPO, encoding: 'utf-8' });
       expect(`${file}: ${proc.status}`).toBe(`${file}: 0`);
+
+      // Exit status alone is not enough: a `.test.ts` containing NO tests exits 0 (measured), so a
+      // dropped describe block or a `test.skip` slipped in to make a leaf restore pass is
+      // invisible to the status.
+      const floor = FLOORS[file];
+      expect(`${file} has a recorded floor: ${floor !== undefined}`).toBe(`${file} has a recorded floor: true`);
+
+      const c = counts(`${proc.stderr ?? ''}${proc.stdout ?? ''}`);
+      expect(`${file}: fail=${c.fail} skip=${c.skip}`).toBe(`${file}: fail=0 skip=0`);
+      expect(`${file}: pass=${c.pass} >= ${floor!.pass}`).toBe(`${file}: pass=${Math.max(c.pass, floor!.pass)} >= ${floor!.pass}`);
+      expect(`${file}: expects=${c.expects} >= ${floor!.expects}`).toBe(
+        `${file}: expects=${Math.max(c.expects, floor!.expects)} >= ${floor!.expects}`,
+      );
     }
-  }, 120_000);
+  }, 180_000);
 
   test('every installer uses the shared stub, and at least one does', () => {
     // readSources walks recursively, as the CLI does; a flat readdirSync here could not see a
@@ -256,6 +305,89 @@ describe('the gate', () => {
       factorySrc('vscodeStub'),
     );
     expect(runCli(dir).status).toBe(0);
+  }, 60_000);
+
+  /**
+   * A5/A6/A12 share ONE builder and differ in exactly one line — the reset call. The CLI has five
+   * independent failure paths, so a negative fixture built separately from its positive control
+   * can fail for a reason unrelated to the check under test. (sdlc/040)
+   */
+  const resetFixtureTest = (resetBody: string): string =>
+    [
+      "import { beforeEach } from 'bun:test';",
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';",
+      factorySrc('vscodeStub'),
+      'beforeEach(() => {',
+      resetBody,
+      '});',
+    ].join('\n');
+
+  const resetTree = (resetBody: string): string =>
+    fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', resetFixtureTest(resetBody));
+
+  test('A6: an importer that resets inside beforeEach passes', () => {
+    // The positive control, stated first: without it A5 passes for any reason the CLI exits
+    // non-zero, and this fixture differs from A5's by one line.
+    expect(runCli(resetTree('  resetVscodeStub();')).status).toBe(0);
+  }, 60_000);
+
+  test('A5: an importer that does NOT reset fails, naming the file and saying why', () => {
+    const r = runCli(resetTree('  // deliberately does not reset'));
+    expect(r.status).not.toBe(0);
+    // The message text, not merely the status: five other failure paths could produce non-zero.
+    expect(r.stderr).toContain('import vscodeStub without calling resetVscodeStub()');
+    expect(r.stderr).toContain('thing.test.ts');
+  }, 60_000);
+
+  test('A12: a call that appears only in a comment does not satisfy the gate', () => {
+    const r = runCli(resetTree('  // remember to call resetVscodeStub() here'));
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('import vscodeStub without calling resetVscodeStub()');
+  }, 60_000);
+
+  test('A12: a call that appears only in a string literal does not satisfy the gate', () => {
+    const r = runCli(resetTree('  const hint = "call resetVscodeStub() in beforeEach"; void hint;'));
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('import vscodeStub without calling resetVscodeStub()');
+  }, 60_000);
+
+  test('a reset at MODULE SCOPE does not satisfy the gate', () => {
+    // The arrangement sdlc/039's audit deleted by hand. A gate that accepts it certifies the
+    // defect it exists to find, which is why the predicate requires an enclosing beforeEach.
+    const body = [
+      "import { vscodeStub, resetVscodeStub } from './vscode-stub.js';",
+      factorySrc('vscodeStub'),
+      'resetVscodeStub();',
+    ].join('\n');
+    const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', body);
+    const r = runCli(dir);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('import vscodeStub without calling resetVscodeStub()');
+  }, 60_000);
+
+  test('an aliased import still counts as a reset', () => {
+    const body = [
+      "import { beforeEach } from 'bun:test';",
+      "import { vscodeStub, resetVscodeStub as r } from './vscode-stub.js';",
+      factorySrc('vscodeStub'),
+      'beforeEach(() => { r(); });',
+    ].join('\n');
+    const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', body);
+    expect(runCli(dir).status).toBe(0);
+  }, 60_000);
+
+  test('a file that resets but does not import vscodeStub is not checked', () => {
+    const body = [
+      "import { beforeEach } from 'bun:test';",
+      "import { resetVscodeStub } from './vscode-stub.js';",
+      factorySrc('{ Uri: { parse: (s: string) => s } }'),
+      'beforeEach(() => { resetVscodeStub(); });',
+    ].join('\n');
+    const dir = fixtureTree('  Uri: { parse: (s: string) => s },', 'vscode.Uri.parse("x");', body);
+    const r = runCli(dir);
+    // Fails on the INLINE-FACTORY path, not the reset path: nothing to check when the file is
+    // not an importer.
+    expect(r.stderr).not.toContain('import vscodeStub without calling resetVscodeStub()');
   }, 60_000);
 
   test('a tree whose tests install nothing fails', () => {
