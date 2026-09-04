@@ -78,8 +78,9 @@ All four drive `activate(ctx)` directly (never `start()`, which clears `calls` a
 3. **A host without the key.** Two halves in one test, so the negative has a positive control and no
    magic number. First with the leaf present: drive `activate`, record `withKey =
    ctx.subscriptions.length`, assert `toContain(sentinel)`. Then dispose, `deactivate()`, reset,
-   `delete` the leaf, drive `activate` again, and assert activation resolved, `not.toContain(sentinel)`,
-   and `length === withKey - 1`. **Not `toBe(6)`** — a hard-coded count breaks the day anything else
+   `delete` the leaf, drive `activate` again, and assert `not.toContain(sentinel)` and
+   `length === withKey - 1`. That activation *resolves* is checked by the `await` — a rejection fails
+   the test — not by an assertion, which is why test 3 contributes three `expect()` calls, not four. **Not `toBe(6)`** — a hard-coded count breaks the day anything else
    in `activate` pushes a disposable, and the next person bumps it to 7 and silently empties the
    assertion. That is this repo's documented failure mode.
    The first draft called this path "already covered" and it is covered by nothing: the stub defines
@@ -118,13 +119,16 @@ file back. Revision 1 enumerated the change and omitted the import.
 
 - No product source change; no exported signature change.
 - The six other vscode test files are untouched: commands 5, manifest 6, statusbar 29, telemetry-gate 7, tooltip 10, vscode-stub 20.
-- `extension.test.ts` moves from `{ pass: 20, expects: 41 }` to `{ pass: 24, expects: 55 }`, and its
+- `extension.test.ts` moves from `{ pass: 20, expects: 41 }` to `{ pass: 24, expects: 56 }`, and its
   `test.todo` count from 3 to 2. **Both numbers are derived, not guessed.**
   `pass`: bun reports todos separately, so deleting a todo does not move `pass`; 20 + 4 tests = **24**.
   `expects`: test 1 contributes 2 (callback captured, `toContain(sentinel)`), test 2 contributes 6
   (three rows × two observables), test 3 contributes 3 (`toContain` with the key, `not.toContain`
-  without it, `length === withKey - 1`), test 4 contributes 3 (equality, `actual > 0`, positive
-  control). 41 + 14 = **55**.
+  without it, `length === withKey - 1`), test 4 contributes **4** (the equality plus
+  A4's three controls). 41 + 15 = **56**.
+  Revision 2 said 55 by counting test 4's controls as two — the derivation was written when A4 had
+  two and was not updated when the third was added. **Third wrong value for this number**, and the
+  first that the `>=` floor would never have surfaced.
   Revision 1 asserted `56` with no derivation and it **missed by two** — measured 54 against the
   weaker test 3, 55 against the stronger one. Worse, the floor is `>=`
   (`scripts/vscode-stub-cover.test.ts:114-117`), so an over-prediction reddens the gate and gets
@@ -139,12 +143,10 @@ file back. Revision 1 enumerated the change and omitted the import.
 - [ ] **A2 — firing re-runs the gate over both inputs, on both observables.** The three-row truth table above, each row asserting the last `setTelemetryConfig` argument **and** `telemetryOverride()`. Requires seeding `configValues['telemetry.enabled'] = true`.
 - [ ] **A3 — it discriminates.** **Seven** mutations of `extension.ts`, each predicted before running,
       each named with the criterion it must break, and **every test evidenced by at least one**:
-      (1) delete the `subscriptions.push` wrapper → **A1**;
-      (2) push a decoy disposable instead → **A1**;
+      (1) delete the `subscriptions.push` wrapper → **A1 and test 3's first half**;
+      (2) push a decoy disposable instead → **A1 and test 3's first half**;
       (3) replace the callback with `() => {}` → **A2**;
-      (4) force the `typeof` guard false → **A1 and A2**. *Not* test 3: measured, test 3 passes
-          **vacuously** under this mutant, because "nothing was registered" is what the mutant does
-          anyway. Revision 1 named test 3 here without running it — the same error as the draft's B2;
+      (4) force the `typeof` guard false → **A1, A2, and test 3's first half**;
       (5) drop `settingEnabled` from the AND → **A2 row 3**;
       (6) push a local value to core without updating `telemetryAllowed` → **A2's `telemetryOverride()`
           half**, which is the mutant `setTelemetryConfig` alone cannot see;
@@ -154,6 +156,14 @@ file back. Revision 1 enumerated the change and omitted the import.
           edit: someone tidying a cast-heavy `typeof` check on a key the stub always supplies, which
           is verbatim the scenario `intent.md` names as this loop's reason.
       Failing test named per mutation in `review.md`. **A1 and A2 without A3 are not evidence.**
+
+      **Why test 3 appears against three mutations, and why revision 2 said it appeared against
+      none.** Test 3 *was* vacuous under mutation 4 — in its single-half `toBe(6)` form, where
+      "nothing registered" is what the mutant does anyway. The two-half shape introduced for C7 adds
+      a positive control: the first half asserts `toContain(sentinel)` **with the key present**, and
+      that is exactly what mutations 1, 2 and 4 break. The vacuity finding was measured against the
+      design C7 replaced and then carried onto the design that fixes it. This is the strongest
+      argument *for* the two-half shape, and revision 2 recorded it as an argument against.
 - [ ] **A4 — the gap count is computed, not restated.** The docstring gains ` * GAPS: 2`, parsed by
       `/^ \* GAPS: (\d+)$/m`. The actual count is `/^test\.todo\(/gm` over
       `readFileSync(import.meta.path)`.
