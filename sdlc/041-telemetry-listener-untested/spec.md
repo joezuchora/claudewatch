@@ -2,8 +2,9 @@
 
 - **ID:** 041-telemetry-listener-untested
 - **Stage:** 2 — Design
-- **Status:** revision 2 — draft REJECTED on three blocking findings; revision 1 REJECTED on a
-  criterion that cannot pass, plus three numbers and mappings it stated without running
+- **Status:** revision 4 — three rounds of Stage 2 rejection, plus one self-inflicted round: revision
+  3 claimed a D1 fix that a failed edit never wrote to disk. Every claim here that was RUN has held;
+  every claim that was not run has been wrong.
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
@@ -48,7 +49,7 @@ this. A2 covers the **live re-evaluation** half of that clause for the global sw
 `onDidChangeConfiguration`'s half stays deferred, and this spec says so rather than implying full
 coverage.
 
-### `extension.test.ts` — four tests in one `describe('the telemetry listener')`
+### `extension.test.ts` — four tests in one new describe block
 
 All four drive `activate(ctx)` directly (never `start()`, which clears `calls` at line 210) and
 `await flush()` afterwards, because `activate` fires an un-awaited `doRefresh(false)`.
@@ -165,8 +166,26 @@ file back. Revision 1 enumerated the change and omitted the import.
       design C7 replaced and then carried onto the design that fixes it. This is the strongest
       argument *for* the two-half shape, and revision 2 recorded it as an argument against.
 - [ ] **A4 — the gap count is computed, not restated.** The docstring gains ` * GAPS: 2`, parsed by
-      `/^ \* GAPS: (\d+)$/m`. The actual count is `/^test\.todo\(/gm` over
+      `/^ \* GAPS: (\d+)$/m`. The actual count is **`/^\s*test\.todo\(/gm`** over
       `readFileSync(import.meta.path)`.
+
+      **`\s*` is load-bearing, and `\(` is the mechanism.** Measured against a fixture holding a
+      docstring prose mention, a top-level todo and an indented one:
+
+      | pattern | matches |
+      |---|---|
+      | `/^test\.todo\(/gm` | **1** — misses the indented todo, so A4 goes green while bun prints one more |
+      | `/^\s*test\.todo\(/gm` | **2** — correct |
+      | `/test\.todo\(/gm` — no anchor at all | **2** — the anchor was never the discriminator |
+
+      The third row settles it: what excludes the prose is the `\(`. The docstring writes
+      `` `test.todo` `` with no open paren, and this test's own regex literal writes `test\.todo\(`
+      with backslashes; neither matches with or without an anchor. **This line has had three wrong
+      explanations** — revision 1 said the assembly prevented the self-count (measured: un-assembling
+      changes nothing, and the concatenation adds two `eslint(no-useless-concat)` warnings that redden
+      `lintBudget`, making A4 and A5 unsatisfiable together); revision 2 said the `^` anchor did. The
+      `scripts/vscode-stub-cover.test.ts` analogy does not transfer: that dodge exists because
+      `mock-topology.ts` scans an *unanchored substring*.
       **The `^` anchor is what stops the test counting itself** — its own regex sits indented inside a
       `const` and never matches at column 0. Revision 1 said the mechanism was assembling the pattern
       as `'test' + '.todo('`, and that was wrong twice over: measured, un-assembling it changes
@@ -177,9 +196,11 @@ file back. Revision 1 enumerated the change and omitted the import.
       `mock-topology.ts` scans for an *unanchored substring*.
       Two controls: the claimed-count regex must extract `3` from a **synthetic** fixture string
       ` * GAPS: 3` (there is no historical `GAPS:` line — the old docstring said "THREE" in prose),
-      and the actual count is asserted `> 0` so an unmatched pattern cannot be green-forever. A third
-      pins the anchor itself: the pattern must **not** match the docstring's own prose mentions of
-      `test.todo`.
+      and the actual count is asserted `> 0` so an unmatched pattern cannot be green-forever. **The third
+      must be a fixture, not a phrase pin:** the pattern applied to a string containing a top-level
+      todo, an **indented** todo and a prose mention must yield **exactly 2**. A prose-non-match
+      assertion passes with *or* without the anchor and so controls nothing — a pin with no positive
+      control, inside the criterion added to prevent exactly that.
 - [ ] **A5 — nothing else moved.** All seven vscode test files pass run alone; the predicted floors above are met or the miss is investigated and recorded; `bun run verify` exits 0; `.oxlint-budget.json` unchanged.
 
 **Which of these discriminate.** A3 is the evidence base. A4 and test 3 fail against the tree as it
