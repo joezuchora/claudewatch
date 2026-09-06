@@ -533,18 +533,20 @@ describe('the telemetry listener', () => {
     expect(ctx.subscriptions).toContain(SENTINEL);
   });
 
-  test('firing it re-runs the gate over BOTH inputs, on BOTH observables', async () => {
-    const box = captureListener();
-    // Seed the setting. `extension.ts` reads it with `.get<boolean>('telemetry.enabled')` and NO
-    // default, so an unseeded stub returns `undefined` and the AND is a constant `false` — which is
-    // what the first draft of this spec measured and mistook for proof the observable worked.
+  // Named for the ONE event source it fires. "Both observables" means the two things asserted on —
+  // `setTelemetryConfig` and `telemetryOverride()` — not two event sources: `onDidChangeConfiguration`
+  // is NOT fired here and is still a `test.todo`. Gutting its telemetry branch (extension.ts:126)
+  // leaves all 428 tests green, so a user who turns the SETTING off mid-session keeps emitting until
+  // reload with nothing to notice. Recorded in sdlc/041's review.md; out of this loop's fence.
+  test('firing the telemetry-enabled event re-runs the gate over both ANDed inputs', async () => {
+    // Seed the setting BEFORE capturing: `resetVscodeStub()` restores the pristine leaf, so a
+    // capture installed before it would be undone. `extension.ts` reads the setting with
+    // `.get<boolean>('telemetry.enabled')` and NO default, so an unseeded stub returns `undefined`
+    // and the AND is a constant `false` — which the first draft of this spec mistook for proof the
+    // observable worked.
     const st = resetVscodeStub();
     st.configValues['telemetry.enabled'] = true;
-    box.cb = (): void => {};
-    vscodeStub.env.onDidChangeTelemetryEnabled = ((cb: () => void) => {
-      box.cb = cb;
-      return SENTINEL;
-    }) as typeof vscodeStub.env.onDidChangeTelemetryEnabled;
+    const box = captureListener();
     vscodeStub.env.isTelemetryEnabled = true;
     ctx = makeCtx();
     await activate(ctx as never);
