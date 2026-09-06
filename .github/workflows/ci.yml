@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,23 +19,11 @@ jobs:
 
       - run: bun install
 
-      - name: Type check
-        run: bun run tsc --noEmit
-
-      - name: Test core
-        run: bun test packages/core/
-
-      - name: Test statusline
-        run: bun test packages/statusline/
-
-      - name: Test vscode
-        run: bun test packages/vscode/
-
-      - name: Build core
-        run: bun run --filter @claudewatch/core build
-
-      - name: Build statusline
-        run: bun run --filter @claudewatch/statusline build
-
-      - name: Build VS Code extension
-        run: bun run --filter claudewatch-vscode build
+      # The same gate a contributor runs: typecheck, lint, test, build.
+      #
+      # Deliberately one step rather than six. The previous workflow ran each package's tests
+      # in a separate process, which hid cross-file test contamination that made a whole-suite
+      # `bun test` fail 128 of 341 tests. Running exactly what a contributor runs is what stops
+      # local and CI from drifting apart again. See sdlc/001-quality-gate/.
+      - name: Verify
+        run: bun run verify

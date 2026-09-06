@@ -8,10 +8,20 @@
  * - TLS not disabled
  */
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { readFileSync } from 'fs';
+import { existsSync } from 'fs';
+import { homedir } from 'os';
+import {
+  emit, getSpoolPath, fetchResultEvent, cacheEvent, renderEvent, schemaDriftEvent,
+  categorizeWarning, utilizationBucket,
+} from './telemetry.js';
+import { readFileSync, writeFileSync } from 'fs';
 import { normalize } from './normalize.js';
-import { makeCacheEnvelope, writeCache, getCachePath } from './cache.js';
-import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { fetchUsage, isSurfaceableMessage } from './client.js';
+import { extractLastError } from './snapshot.js';
+import { shouldCooldown, failurePolicy } from './cooldown.js';
+import { makeCacheEnvelope, writeCache, getCachePath, readCacheResult } from './cache.js';
+import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { UNKNOWN_FETCHED_AT } from './closed-sets.js';
 
 const TOKEN = 'sk-ant-oat01-FAKE-SECRET-TOKEN-1234567890';
 let cleanup: () => void;
@@ -79,7 +89,7 @@ describe('security: cache file integrity', () => {
   test('cache envelope version prevents format confusion', () => {
     const snapshot = makeTestSnapshot();
     const envelope = makeCacheEnvelope(snapshot);
-    expect(envelope.version).toBe(1);
+    expect(envelope.version).toBe(2);
   });
 
   test('cache write uses atomic rename pattern', () => {
@@ -133,5 +143,562 @@ describe('security: credential file is read-only', () => {
     expect(credSource).not.toContain('writeFileSync');
     expect(credSource).not.toContain('writeFile');
     expect(credSource).toContain('readFileSync');
+  });
+});
+
+// === Telemetry leak boundary (sdlc/003-metrics-telemetry) ===
+//
+// Revision 1 of the spec proposed an allowlist of field NAMES and a test asserting
+// keys(payload) subset of ALLOWLIST. That test passes by construction and detects nothing,
+// and a name allowlist does not stop the actual leak vector here, which is a field VALUE:
+// client.ts puts fetch error messages into failures, and in Bun those carry hostnames,
+// proxy URLs and /home/<username>/ paths.
+//
+// These tests are adversarial instead: poison every string that reaches the pipeline and
+// assert none of it survives into a spooled line.
+
+describe('security: telemetry never leaks secrets or environment', () => {
+  const POISON = {
+    token: 'sk-ant-oat01-FAKEFAKEFAKE',
+    path: '/home/testuser/.claude/.credentials.json',
+    host: 'internal-proxy.corp.example.com',
+    user: 'testuser',
+  };
+  const ALL_POISON = Object.values(POISON);
+
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  const spool = () => (existsSync(getSpoolPath()) ? readFileSync(getSpoolPath(), 'utf-8') : '');
+
+  test('a poisoned normalization warning cannot reach the spool as text', () => {
+    const poisoned = `five_hour.resets_at is not a valid ISO timestamp: ${POISON.token} at ${POISON.path} via ${POISON.host}`;
+    emit({ enabled: true }, schemaDriftEvent({ category: categorizeWarning(poisoned), count: 1 }));
+
+    const raw = spool();
+    expect(raw.length).toBeGreaterThan(0);
+    for (const p of ALL_POISON) expect(raw).not.toContain(p);
+    // Only the category survives.
+    expect(JSON.parse(raw.trim()).payload.category).toBe('timestamp');
+  });
+
+  test('every event kind serializes to enumerated leaves only', () => {
+    emit({ enabled: true }, fetchResultEvent({ ok: false, statusClass: 'network', attempts: 2, durationMs: 5000 }));
+    emit({ enabled: true }, cacheEvent({ outcome: 'corruptJson' }));
+    emit({ enabled: true }, renderEvent({
+      surface: 'statusline', runtimeState: 'Degraded', tier: 'enterprise',
+      utilizationBucket: utilizationBucket(93), durationMs: 11,
+    }));
+    emit({ enabled: true }, schemaDriftEvent({ category: 'enterprise', count: 3 }));
+
+    const lines = spool().trim().split('\n');
+    expect(lines).toHaveLength(4);
+
+    for (const line of lines) {
+      for (const p of ALL_POISON) expect(line).not.toContain(p);
+      const payload = JSON.parse(line).payload as Record<string, unknown>;
+      for (const [key, value] of Object.entries(payload)) {
+        const t = typeof value;
+        expect(['number', 'boolean', 'string', 'object']).toContain(t);
+        if (t === 'string') {
+          // Any string leaf must be short and free of separators that indicate a path,
+          // URL, or credential rather than an enum member.
+          const v = value as string;
+          expect(v.length).toBeLessThanOrEqual(32);
+          expect(v).not.toContain('/');
+          expect(v).not.toContain('\\');
+          expect(v).not.toContain('@');
+          expect(v).not.toContain(':');
+          expect(v).not.toContain('.');
+        }
+        expect(key.length).toBeLessThanOrEqual(32);
+      }
+    }
+  });
+
+  test('enterprise credit amounts are never emitted', () => {
+    // An account's billing position is not a health signal. Only tier and a decile bucket.
+    emit({ enabled: true }, renderEvent({
+      surface: 'vscode', runtimeState: 'Enterprise', tier: 'enterprise',
+      utilizationBucket: utilizationBucket(14.5), durationMs: 3,
+    }));
+
+    // NUMERIC needles are asserted against the PAYLOAD, not the whole line.
+    //
+    // The envelope legitimately contains digits — a random UUID eventId and an ISO
+    // timestamp whose seconds-and-milliseconds render as `SS.mmm`. So a whole-line
+    // assertion for "14.5" matches any instant at second 14 with milliseconds 5xx: 0.18%
+    // of the time, measured. That is invisible locally and fails in CI, which is exactly
+    // what happened. Distinctive string needles (tokens, paths, hostnames) are still
+    // asserted against the whole line below, where they are safe and where the real
+    // security guarantee lives.
+    const payload = JSON.stringify(JSON.parse(spool().trim()).payload);
+    expect(payload).not.toContain('290000');   // usedCredits in minor units
+    expect(payload).not.toContain('20000000'); // monthlyLimit in minor units
+    expect(payload).not.toContain('14.5');     // the raw utilization
+    expect(JSON.parse(spool().trim()).payload.utilizationBucket).toBe(1);
+  });
+
+  test('a spooled line never contains credential-shaped material', () => {
+    for (let i = 0; i < 10; i++) {
+      emit({ enabled: true }, renderEvent({
+        surface: 'statusline', runtimeState: 'Healthy', tier: 'standard',
+        utilizationBucket: i, durationMs: i,
+      }));
+    }
+    const raw = spool();
+    expect(raw).not.toContain('sk-ant');
+    expect(raw).not.toContain('Bearer');
+    expect(raw).not.toContain('accessToken');
+    expect(raw).not.toContain('refreshToken');
+    expect(raw).not.toContain(homedir());
+  });
+});
+
+// Hoisted to module scope, not nested in the describe: `unicorn(consistent-function-scoping)` fires
+// on a helper that captures nothing from its parent, and sdlc/029's A7 pins the warning count. The
+// first version of this block nested both and pushed the count 11 -> 13 — the exact trap loop 028's
+// own A6 named in writing ("a test written with a nested helper would trip this"), walked into one
+// loop later. Found by the sdlc/029 plan-to-diff audit.
+const mockSurfaceFetch = (impl: (...a: unknown[]) => Promise<Response>): void => {
+  globalThis.fetch = impl as unknown as typeof fetch;
+};
+const jsonResponse = (status: number): Response =>
+  new Response('{}', { status, headers: { 'Content-Type': 'application/json' } });
+
+// === SPEC.md §12: "It must redact sensitive values from all surfaced errors" ===
+
+describe('§12: every surfaceable error message is a literal this repo wrote', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = realFetch; });
+
+  const FAST = { retryDelayMs: 0, timeoutMs: 25 } as const;
+
+  /**
+   * All SEVEN failure paths `fetchUsage` can take, asserted individually.
+   *
+   * Seven, not six: sdlc/029's first draft counted six and missed the `response.json()` throw, which
+   * the spec review found. Before 029 that path produced a status-less `serviceUnavailable` carrying
+   * `err.message`, and a contract test asserted that as correct — the misclassification was
+   * enshrined, not undiscovered.
+   *
+   * Why this matters beyond tidiness: `client.ts:180` already called `err.message` "exactly the free
+   * text the telemetry allowlist exists to keep out", and four lines later assigned it to a value
+   * that is PERSISTED to the cache and RENDERED in the VS Code tooltip. The guard existed on the
+   * telemetry path and not on this one.
+   */
+  test('all eight fetch failure paths produce a surfaceable message', async () => {
+    const cases: Array<[string, () => void, string]> = [
+      ['401', () => mockSurfaceFetch(async () => jsonResponse(401)), 'Authentication failed (401)'],
+      ['429', () => mockSurfaceFetch(async () => jsonResponse(429)), 'Rate limited (429)'],
+      ['5xx', () => mockSurfaceFetch(async () => jsonResponse(503)), 'Server error (503)'],
+      ['unexpected', () => mockSurfaceFetch(async () => jsonResponse(418)), 'Unexpected status 418'],
+      ['network', () => mockSurfaceFetch(async () => { throw new TypeError('fetch failed: getaddrinfo ENOTFOUND some.host'); }), 'Network error'],
+      ['malformed', () => mockSurfaceFetch(async () => new Response('not json', { status: 200 })), 'Malformed response'],
+      // Eighth path, added by sdlc/029's security pass. Selected from err.CODE, never err.message —
+      // a code is a closed OpenSSL set, a message is free text. Without this a TLS interception
+      // attempt was indistinguishable from a dead link on every surface.
+      ['tls', () => mockSurfaceFetch(async () => {
+        const e = new Error('self signed certificate') as Error & { code: string };
+        e.code = 'DEPTH_ZERO_SELF_SIGNED_CERT';
+        throw e;
+      }), 'TLS verification failed'],
+    ];
+
+    // Collected and asserted as one array rather than per-case: bun's `expect` takes no label
+    // argument, and a whole-array toEqual names the failing case in its diff anyway.
+    const got: Array<[string, string, boolean]> = [];
+    for (const [name, arrange] of cases) {
+      arrange();
+      const result = await fetchUsage('sk-ant-oat01-FAKE', FAST);
+      expect(result.ok).toBe(false);
+      if (!result.ok) got.push([name, result.message, isSurfaceableMessage(result.message)]);
+    }
+    expect(got).toEqual(cases.map(([name, , expected]) => [name, expected, true]));
+
+    // Eighth: the REAL timeout. The mock honours the abort signal as real fetch does, so client's
+    // own timer fires and sets `timedOut`. A synthetic AbortError would leave that flag false and
+    // silently test the network branch instead — which is what the contract suite did for 29 loops.
+    mockSurfaceFetch((_u: unknown, init: unknown) => new Promise<Response>((_res, rej) => {
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+    }));
+    const timedOut = await fetchUsage('sk-ant-oat01-FAKE', FAST);
+    expect(timedOut.ok).toBe(false);
+    if (!timedOut.ok) {
+      expect(timedOut.failureClass).toBe('timeout');
+      expect(timedOut.message).toBe('Request timed out');
+      expect(isSurfaceableMessage(timedOut.message)).toBe(true);
+    }
+
+    // Positive precondition for the negatives above: the predicate really does reject things.
+    expect(isSurfaceableMessage('Unable to connect. Is the computer able to access the url?')).toBe(false);
+  });
+
+  test('a malformed body still cools down — B1b must not remove the §9.4 throttle', () => {
+    // sdlc/029's security pass: B1b moved the 200-with-non-JSON path off `serviceUnavailable`,
+    // and `malformedResponse` sat in the no-cooldown bucket because nothing had ever constructed
+    // it. Net effect measured before the fix: 2 authenticated requests per prompt render,
+    // unbounded, instead of 2 per 5 minutes. cache.ts:139 calls the cooldown the ONLY throttle on
+    // token-bearing requests.
+    expect(shouldCooldown('malformedResponse')).toBe(true);
+    expect(failurePolicy('malformedResponse').cooldown).toBe(true);
+    // Positive precondition: the bucket it must NOT be in still exists and still means what it says.
+    expect(shouldCooldown('unexpectedFailure')).toBe(false);
+  });
+
+  test('extractLastError drops a message no producer emits, in memory', () => {
+    // The type closes the set at the producer; it cannot reach a value read off DISK. A cache file
+    // written before sdlc/029 holds whatever `err.message` was on that machine.
+    const envelope = makeCacheEnvelope(
+      makeTestSnapshot(), null, 'serviceUnavailable', 503,
+      'ENOENT open /home/someone/.claude/.credentials.json' as never,
+    );
+    const extracted = extractLastError(envelope);
+    expect(extracted).not.toBeNull();
+    expect(extracted!.message).toBeNull();      // free text dropped
+    expect(extracted!.httpStatus).toBe(503);    // the number survives; it carries nothing free-form
+
+    // Positive precondition: a real member survives the same path.
+    const ok = extractLastError(makeCacheEnvelope(
+      makeTestSnapshot(), null, 'serviceUnavailable', 503, 'Server error (503)',
+    ));
+    expect(ok!.message).toBe('Server error (503)');
+  });
+
+  test('free text read off DISK is nulled at the parse boundary', () => {
+    // The case above constructs its envelope in memory, so it can only reach the ONE consumer
+    // that calls `extractLastError`. This one goes through the file, which is the only way a
+    // pre-sdlc/029 envelope actually arrives: back then the network path assigned `err.message`
+    // verbatim, so a cache written by that build holds whatever the OS said — an absolute path,
+    // a hostname, a username. `--debug` (main.ts:143) and the VS Code tooltip read the field
+    // straight off the envelope and never see `extractLastError` at all.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+      lastErrorClass: 'serviceUnavailable',
+      lastHttpStatus: 503,
+      lastErrorMessage: 'connect ECONNREFUSED /home/someone/.claude on someones-nuc.local' as never,
+    })), { mode: 0o600 });
+
+    const result = readCacheResult();
+    // Degraded, not rejected: discarding the envelope would cost a live token-bearing fetch.
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope!.lastErrorMessage).toBeNull();
+    // The fields beside it are untouched — the message is dropped, the envelope is not.
+    expect(result.envelope!.lastHttpStatus).toBe(503);
+    expect(result.envelope!.lastErrorClass).toBe('serviceUnavailable');
+
+    // Positive precondition. Without it every assertion above passes just as well if the branch
+    // nulls the field unconditionally, which is a different (and useless) guard.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+      lastErrorClass: 'serviceUnavailable',
+      lastHttpStatus: 503,
+      lastErrorMessage: 'Server error (503)',
+    })), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastErrorMessage).toBe('Server error (503)');
+  });
+});
+
+/**
+ * Each case asserts on the WHOLE serialised envelope, not on its field alone.
+ *
+ * `--json` (main.ts:241, :256 -> :371) stringifies the entire snapshot, so a per-field assertion
+ * proves less than it looks: it cannot see a poison that survives in a neighbouring key. The
+ * draft spec missed that surface entirely because it searched for readers of three field NAMES,
+ * and `--json` names no field.
+ */
+function seedAndRead(snapshotOverrides: Record<string, unknown>): {
+  serialised: string; envelope: NonNullable<ReturnType<typeof readCacheResult>['envelope']>;
+} {
+  writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({
+    snapshot: makeTestSnapshot(snapshotOverrides as never),
+  })), { mode: 0o600 });
+  const result = readCacheResult();
+  expect(result.reason).toBe('hit');   // precondition: degraded, not discarded
+  return { serialised: JSON.stringify(result.envelope), envelope: result.envelope! };
+}
+
+
+describe('§12: no value off a cache file reaches a surface unvalidated (sdlc/031)', () => {
+  const POISON = '/home/someone sk-ant-oat01-SECRET nuc.local';
+
+  test('a fetchedAt carrying free text is canonicalised', () => {
+    // Parseable: Date.parse's legacy path ignores parenthesised trailing text, so this is finite
+    // and was returned whole. Asserted as a SHAPE, not an instant — the legacy parser reads a
+    // bare date as LOCAL time, so the exact value is timezone-dependent and the property is not.
+    const { serialised, envelope } = seedAndRead({ fetchedAt: `2026-01-01 (${POISON})` });
+    expect(envelope.snapshot.fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a fetchedAt that will not parse becomes the sentinel', () => {
+    const { serialised, envelope } = seedAndRead({ fetchedAt: `not-a-date ${POISON}` });
+    expect(envelope.snapshot.fetchedAt).toBe(UNKNOWN_FETCHED_AT);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a poisoned staleReason falls back to a member', () => {
+    const { serialised, envelope } = seedAndRead({
+      freshness: { isStale: true, staleReason: `leaked ${POISON}` },
+    });
+    expect(envelope.snapshot.freshness.staleReason).toBe('none');
+    expect(envelope.snapshot.freshness.isStale).toBe(true);   // the fact survives; only the reason goes
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a non-boolean isStale becomes false', () => {
+    const { serialised, envelope } = seedAndRead({
+      freshness: { isStale: `yes ${POISON}`, staleReason: 'fetchFailed' },
+    });
+    expect(envelope.snapshot.freshness.isStale).toBe(false);
+    expect(envelope.snapshot.freshness.staleReason).toBe('fetchFailed');  // a real member survives
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('warnings are FILTERED, not emptied — a real one beside a poisoned one survives', () => {
+    const { serialised, envelope } = seedAndRead({
+      rawMetadata: { normalizationWarnings: ['Response is not an object', `evil ${POISON}`] },
+    });
+    // Filtering rather than emptying is the whole value of the field on the path where it appears.
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual(['Response is not an object']);
+    expect(serialised).not.toContain(POISON);
+  });
+
+  test('a non-array normalizationWarnings becomes an empty array', () => {
+    const { envelope } = seedAndRead({ rawMetadata: { normalizationWarnings: `not an array ${POISON}` } });
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual([]);
+  });
+
+  test('unknown SIBLING keys on freshness and rawMetadata are stripped', () => {
+    // Found by sdlc/031's Stage 5 audit, and it is this loop's own rule one level up: the first
+    // version rebuilt these objects only when a field was bad, so an envelope whose known fields
+    // were all VALID passed them through by reference and any extra key rode along to `--debug`
+    // (which emits `freshness` whole) and `--json` (which emits everything).
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({}),
+      snapshot: {
+        ...makeTestSnapshot(),
+        freshness: { isStale: false, staleReason: 'none', evil: `f ${POISON}` },
+        rawMetadata: { normalizationWarnings: [], evil: `r ${POISON}` },
+      },
+    }), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    // Both known fields are VALID here on purpose — that is the case the first version missed.
+    expect(result.envelope!.snapshot.freshness).toEqual({ isStale: false, staleReason: 'none' });
+    expect(result.envelope!.snapshot.rawMetadata).toEqual({ normalizationWarnings: [] });
+    expect(JSON.stringify(result.envelope)).not.toContain(POISON);
+  });
+
+  test('an honest envelope is untouched — the positive control for all six above', () => {
+    // Without this, every assertion above passes just as well for a reader that blanks these
+    // fields unconditionally, which is a different and useless guard.
+    const fetchedAt = '2026-08-01T12:34:56.000Z';
+    const { envelope } = seedAndRead({
+      fetchedAt,
+      freshness: { isStale: true, staleReason: 'malformedResponse' },
+      rawMetadata: { normalizationWarnings: ['No valid usage windows found'] },
+    });
+    expect(envelope.snapshot.fetchedAt).toBe(fetchedAt);
+    expect(envelope.snapshot.freshness).toEqual({ isStale: true, staleReason: 'malformedResponse' });
+    expect(envelope.snapshot.rawMetadata.normalizationWarnings).toEqual(['No valid usage windows found']);
+  });
+});
+
+/** The 26 poisoned values sdlc/032 measured leaking, one marker each. */
+const M = (k: string): string => `MARK_${k}`;
+
+function poisonedEnvelope(): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.fetchedAt = M('fetchedAt');
+  s.tier = M('tier');
+  s.authState = M('authState');
+  s.source = { usageEndpoint: M('usageEndpoint'), extra: M('sourceExtra') };
+  s.display = {
+    primaryWindow: M('primaryWindow'), primaryUtilizationPct: M('primaryPct'),
+    primaryResetsAt: M('primaryResetsAt'), extra: M('displayExtra'),
+  };
+  for (const [w, t] of [['fiveHour', 'five'], ['sevenDay', 'seven'], ['sevenDayOpus', 'opus']]) {
+    s[w!] = { utilizationPct: M(`${t}Pct`), resetsAt: M(`${t}ResetsAt`), extra: M(`${t}Extra`) };
+  }
+  s.enterprise = {
+    utilizationPct: M('entPct'), monthlyLimitCredits: M('entLimit'), usedCredits: M('entUsed'),
+    currency: M('currency'), isEnabled: M('entEnabled'), disabledReason: M('disabledReason'),
+    extra: M('entExtra'),
+  };
+  s.extraSnapshotKey = M('snapshotExtra');
+  return { ...makeTestEnvelope({}), snapshot: s, lastHttpStatus: M('httpStatus') };
+}
+
+const POISON_KEYS = [
+  'fetchedAt', 'tier', 'authState', 'usageEndpoint', 'sourceExtra',
+  'primaryWindow', 'primaryPct', 'primaryResetsAt', 'displayExtra',
+  'fivePct', 'fiveResetsAt', 'fiveExtra', 'sevenPct', 'sevenResetsAt', 'sevenExtra',
+  'opusPct', 'opusResetsAt', 'opusExtra',
+  'entPct', 'entLimit', 'entUsed', 'currency', 'entEnabled', 'disabledReason', 'entExtra',
+  'snapshotExtra',
+];
+
+describe('§12: no value off a cache file survives unvalidated (sdlc/032)', () => {
+  test('T1 — all 26 measured values, none survives', () => {
+    // 26, and the first count taken was 14. That probe poisoned fiveHour but not the other two
+    // windows, three of enterprise's six fields but not the rest, and never seeded an unknown key
+    // at the enterprise level — a level the spec's own edge-case table asserted. An enumeration
+    // presented as the counter-measure against a miscount, built from an incomplete probe.
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnvelope()), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');   // degraded, not discarded
+    const out = JSON.stringify(result.envelope);
+
+    // Collected, so a failure names WHICH values leaked rather than just that one did.
+    expect(POISON_KEYS.filter((k) => out.includes(`MARK_${k}`))).toEqual([]);
+
+    // Positive precondition: the fixture really carried all 26, so the assertion above is not
+    // passing because the markers were never there.
+    const seeded = JSON.stringify(poisonedEnvelope());
+    expect(POISON_KEYS.filter((k) => !seeded.includes(`MARK_${k}`))).toEqual([]);
+  });
+
+  test('T14 — a non-integer lastHttpStatus is nulled', () => {
+    // An ENVELOPE field: sanitizeSnapshot cannot reach it, and it reaches `--debug` verbatim while
+    // NOT reaching `--json`, which serialises the snapshot. That asymmetry is why the two
+    // end-to-end cases differ on this field.
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnvelope()), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastHttpStatus).toBeNull();
+
+    // Positive control: a real status survives.
+    writeFileSync(getCachePath(), JSON.stringify(makeTestEnvelope({ lastHttpStatus: 503 })), { mode: 0o600 });
+    expect(readCacheResult().envelope!.lastHttpStatus).toBe(503);
+  });
+});
+
+/**
+ * A second poisoned envelope whose enterprise NUMERICS ARE VALID.
+ *
+ * `poisonedEnvelope` poisons `enterprise.utilizationPct`, which makes `sanitizeEnterprise` return
+ * `null` and **masks every other enterprise rule** — so `currency`, `disabledReason` and `isEnabled`
+ * were untestable by the fixture that claimed to test them. sdlc/032's Stage 5 audit proved the
+ * consequence: dropping the `currency` check, deleting either `disabledReason` rule, or hardcoding
+ * `isEnabled: false` each passed all 870 tests. The `isEnabled` one is a live behaviour bug —
+ * `format.ts:373` gates on `!e.isEnabled`, so every enterprise account with extra usage ENABLED
+ * would read back disabled after one cache read.
+ *
+ * This is the reviewer's `currency` argument reproduced on fields the first fixture could not reach.
+ */
+function poisonedEnterpriseEnvelope(): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.tier = 'enterprise';
+  s.enterprise = {
+    utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,   // VALID — no masking
+    currency: M('currency2'),
+    isEnabled: false,                                               // VALID — see the split below
+    disabledReason: `${M('disabledReason2')} /home/someone`,
+  };
+  return { ...makeTestEnvelope({}), snapshot: s };
+}
+
+/** An enterprise envelope with valid numerics and a caller-chosen disabledReason. */
+function mk(reason: string): Record<string, unknown> {
+  const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+  s.tier = 'enterprise';
+  s.enterprise = {
+    utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+    currency: 'EUR', isEnabled: false, disabledReason: reason,
+  };
+  return { ...makeTestEnvelope({}), snapshot: s };
+}
+
+describe('§12: the enterprise rules the first fixture could not reach (sdlc/032 audit)', () => {
+  test('currency, disabledReason and isEnabled are each validated', () => {
+    writeFileSync(getCachePath(), JSON.stringify(poisonedEnterpriseEnvelope()), { mode: 0o600 });
+    const ent = readCacheResult().envelope!.snapshot.enterprise;
+
+    // Precondition: the object SURVIVED. If a numeric had been poisoned it would be null and this
+    // whole test would pass while checking nothing — which is exactly the defect being fixed.
+    expect(ent).not.toBeNull();
+    expect(ent!.utilizationPct).toBe(12);
+
+    expect(ent!.currency).toBe('USD');            // a non-ISO currency degrades in place
+    expect(ent!.disabledReason).toBeNull();       // a path-shaped reason is REDACTED, not truncated
+    expect(JSON.stringify(ent)).not.toContain('MARK_');
+  });
+
+  test('a non-boolean isEnabled nulls the whole object, it does not degrade in place', () => {
+    // My first version of the test above asserted `isEnabled` degrades to `false`. It does not —
+    // `sanitizeEnterprise` returns null, per the spec's "any failing field nulls the whole object",
+    // because a half-degraded enterprise block is what renders `$NaN`. The precondition caught the
+    // misreading of my own rule immediately, which is the argument for writing one.
+    const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+    s.tier = 'enterprise';
+    s.enterprise = {
+      utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+      currency: 'EUR', isEnabled: M('entEnabled2'), disabledReason: null,
+    };
+    writeFileSync(getCachePath(), JSON.stringify({ ...makeTestEnvelope({}), snapshot: s }), { mode: 0o600 });
+
+    const out = readCacheResult().envelope!.snapshot;
+    expect(out.enterprise).toBeNull();
+    expect(out.tier).toBe('unknown');   // and the coupling rule fires
+    expect(JSON.stringify(out)).not.toContain('MARK_');
+  });
+
+  test('isEnabled is READ, not hardcoded', () => {
+    // The audit hardcoded `isEnabled: false` and all 870 tests passed. makeRichTestSnapshot sets
+    // false, so the round-trip could not see it. Both booleans are asserted here.
+    for (const isEnabled of [true, false]) {
+      const s = JSON.parse(JSON.stringify(makeTestSnapshot())) as Record<string, unknown>;
+      s.tier = 'enterprise';
+      s.enterprise = {
+        utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 5,
+        currency: 'EUR', isEnabled, disabledReason: null,
+      };
+      writeFileSync(getCachePath(), JSON.stringify({ ...makeTestEnvelope({}), snapshot: s }), { mode: 0o600 });
+      expect(readCacheResult().envelope!.snapshot.enterprise!.isEnabled).toBe(isEnabled);
+    }
+  });
+
+  test('the disabledReason whitelist drops every shape the blacklist let through', () => {
+    // sdlc/032's security pass drove all of these through the original four-shape BLACKLIST and
+    // into the tooltip verbatim. A blacklist enumerates what you thought of; a whitelist enumerates
+    // what the field is for. The character class alone still passed a username, a Windows path and
+    // a JWT — all ordinary sentence characters — so IDENTIFIER_SHAPES rejects a dot or colon wedged
+    // between non-space characters, which is what separates an identifier from prose.
+    const dropped = [
+      ['FQDN', 'host=my-laptop.corp.example.com'],
+      ['username', 'joe.zuchora'],
+      ['windows path', 'C:Users joe'],
+      ['JWT', 'Bearer eyJhbGciOi.eyJzdWIi.QWxhZGRpbg'],
+      ['underscored token', 'token sk_ant_live_abcdef'],
+      ['ANSI escape', `esc${String.fromCharCode(27)}[31mRED`],
+      ['newline', `nl${String.fromCharCode(10)}second`],
+      ['tab', `tab${String.fromCharCode(9)}here`],
+    ] as const;
+
+    const survived: string[] = [];
+    for (const [label, reason] of dropped) {
+      writeFileSync(getCachePath(), JSON.stringify(mk(reason)), { mode: 0o600 });
+      if (readCacheResult().envelope!.snapshot.enterprise!.disabledReason !== null) survived.push(label);
+    }
+    expect(survived).toEqual([]);
+
+    // Positive control: the message the rule exists to PRESERVE, and prose punctuation with it.
+    // Without this the whole test passes for a rule that nulls the field unconditionally.
+    for (const keep of ['Extra usage disabled by your administrator', 'Note: contact your administrator.']) {
+      writeFileSync(getCachePath(), JSON.stringify(mk(keep)), { mode: 0o600 });
+      expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason).toBe(keep);
+    }
+  });
+
+  test('a legitimate disabledReason survives, and an oversized one is bounded', () => {
+    // The redact-then-bound rule's two halves, both previously uncovered.
+    writeFileSync(getCachePath(), JSON.stringify(mk('Disabled by your administrator')), { mode: 0o600 });
+    expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason)
+      .toBe('Disabled by your administrator');
+
+    writeFileSync(getCachePath(), JSON.stringify(mk('x'.repeat(5000))), { mode: 0o600 });
+    expect(readCacheResult().envelope!.snapshot.enterprise!.disabledReason).toHaveLength(200);
   });
 });

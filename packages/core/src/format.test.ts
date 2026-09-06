@@ -510,3 +510,90 @@ describe('formatRichStatusLine: enterprise', () => {
     expect(result).toContain('Enterprise');
   });
 });
+
+describe('formatStatusLine: opus window', () => {
+  const withOpus = (pct: number) =>
+    makeTestSnapshot({ sevenDayOpus: { utilizationPct: pct, resetsAt: null } });
+
+  test('renders an opus segment when the window is present', () => {
+    const result = formatStatusLine(withOpus(63), 120);
+    expect(result).toContain('opus 63%');
+  });
+
+  test('omits the opus segment entirely when the window is absent', () => {
+    // makeTestSnapshot defaults sevenDayOpus to the null window.
+    expect(formatStatusLine(makeTestSnapshot(), 120)).not.toContain('opus');
+  });
+
+  test('output for an Opus-less snapshot carries no trace of the feature', () => {
+    // The real compatibility guarantee is that all 340 pre-existing tests still pass
+    // untouched. This adds a direct check across both formatting branches: nothing about
+    // the Opus work may appear for a user who has no Opus window.
+    const snapshot = makeTestSnapshot();
+    expect(formatStatusLine(snapshot, 40)).toBe('⊙ 42%');
+
+    const full = formatStatusLine(snapshot, 120);
+    expect(full).toStartWith('⊙ 42% resets ');
+    expect(full).toContain(' · 7d 18% resets ');
+    expect(full).not.toContain('opus');
+    expect(full.split(' · ')).toHaveLength(2);
+  });
+
+  test('drops the opus segment first when the terminal is narrow', () => {
+    const snapshot = withOpus(63);
+    const wide = formatStatusLine(snapshot, 200);
+    expect(wide).toContain('opus 63%');
+    // A width that fits primary + secondary but not the opus tail.
+    const narrow = formatStatusLine(snapshot, wide.length - 6);
+    expect(narrow).not.toContain('opus');
+    expect(narrow).toContain('⊙ 42%');
+  });
+
+  test('an opus-primary snapshot shows the more constrained rolling window as secondary', () => {
+    const snapshot = makeTestSnapshot({
+      fiveHour: { utilizationPct: 10, resetsAt: null },
+      sevenDay: { utilizationPct: 30, resetsAt: null },
+      sevenDayOpus: { utilizationPct: 91, resetsAt: null },
+      display: { primaryWindow: 'sevenDayOpus', primaryUtilizationPct: 91, primaryResetsAt: null },
+    });
+    const result = formatStatusLine(snapshot, 120);
+    expect(result).toContain('⊙ 91%');
+    expect(result).toContain('7d 30%');
+    // Opus is already the headline, so it is not repeated as a trailing segment.
+    expect(result).not.toContain('opus');
+  });
+});
+
+describe('formatTooltip: opus window', () => {
+  test('includes an Opus row when the window is present', () => {
+    const result = formatTooltip(
+      makeTestSnapshot({
+        sevenDayOpus: { utilizationPct: 63, resetsAt: '2026-03-14T07:00:00.000Z' },
+      }),
+    );
+    expect(result).toContain('Opus (7d): 63%');
+    expect(result).toContain('resets');
+  });
+
+  test('omits the Opus row when the window is absent', () => {
+    expect(formatTooltip(makeTestSnapshot())).not.toContain('Opus (7d)');
+  });
+
+  test('enterprise tooltips never show an Opus row', () => {
+    expect(formatTooltip(makeTestEnterpriseSnapshot())).not.toContain('Opus (7d)');
+  });
+});
+
+describe('formatRichStatusLine: opus window', () => {
+  test('adds an opus bar when the window is present', () => {
+    const result = formatRichStatusLine(
+      makeTestSnapshot({ sevenDayOpus: { utilizationPct: 63, resetsAt: null } }),
+      null,
+    );
+    expect(result).toContain('opus:');
+  });
+
+  test('omits the opus bar when the window is absent', () => {
+    expect(formatRichStatusLine(makeTestSnapshot(), null)).not.toContain('opus:');
+  });
+});

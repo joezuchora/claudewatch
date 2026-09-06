@@ -1,7 +1,15 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
-import { readCache, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir } from './cache.js';
-import { makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { join, win32 } from 'path';
+import { homedir } from 'os';
+import { readCache, readCacheResult, writeCache, isCacheFresh, makeCacheEnvelope, getCachePath, getCacheDir, getLegacyCacheDir, setCacheBaseDir, sanitizeCooldownUntil } from './cache.js';
+import { isInCooldown, COOLDOWN_DURATION_MS } from './cooldown.js';
+import { makeTestEnvelope, makeTestSnapshot, setupTestCacheDir } from './test-helpers.js';
+import { classify } from './state.js';
+import { formatStatusLine } from './format.js';
+import { UNKNOWN_FETCHED_AT, NORMALIZATION_WARNINGS, MAX_NORMALIZATION_WARNINGS } from './closed-sets.js';
+import { makeRichTestSnapshot } from './test-helpers.js';
+import { sanitizeSnapshot } from './sanitize-snapshot.js';
 
 describe('cache', () => {
   let tempDir: string;
@@ -37,7 +45,7 @@ describe('cache', () => {
     test('creates valid envelope with defaults', () => {
       const snapshot = makeTestSnapshot();
       const envelope = makeCacheEnvelope(snapshot);
-      expect(envelope.version).toBe(1);
+      expect(envelope.version).toBe(2);
       expect(envelope.snapshot).toBe(snapshot);
       expect(envelope.cooldownUntil).toBeNull();
       expect(envelope.lastErrorClass).toBeNull();
@@ -66,11 +74,40 @@ describe('cache', () => {
       expect(isCacheFresh(envelope, 60)).toBe(false);
     });
 
-    test('returns true for snapshot at exactly TTL boundary minus 1ms', () => {
-      const justUnder = new Date(Date.now() - 59_999).toISOString();
-      const snapshot = makeTestSnapshot({ fetchedAt: justUnder });
-      const envelope = makeCacheEnvelope(snapshot);
-      expect(isCacheFresh(envelope, 60)).toBe(true);
+    /**
+     * A fixed clock, so the boundary is exact.
+     *
+     * This test used to compute `Date.now() - 59_999` and let `isCacheFresh` read the clock
+     * again at the assertion — giving itself a ONE MILLISECOND budget for an ISO round-trip and
+     * two object constructions. It went red on a slow container (sdlc/019). It also could only
+     * ever assert the side it had slack on; the boundary itself was untested.
+     */
+    const NOW = Date.parse('2026-03-07T12:00:00.000Z');
+    const agedMs = (ms: number) =>
+      makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date(NOW - ms).toISOString() }));
+
+    test('one ms under the TTL is fresh', () => {
+      expect(isCacheFresh(agedMs(59_999), 60, NOW)).toBe(true);
+    });
+
+    test('exactly AT the TTL is stale — the boundary is `<`, not `<=`', () => {
+      // The side the old test could never reach, because it had no slack there.
+      expect(isCacheFresh(agedMs(60_000), 60, NOW)).toBe(false);
+    });
+
+    test('one ms over the TTL is stale', () => {
+      expect(isCacheFresh(agedMs(60_001), 60, NOW)).toBe(false);
+    });
+
+    test('the ambient clock is still the default when no `now` is passed', () => {
+      // Margin measured in minutes, not milliseconds — this asserts the DEFAULT is wired, and
+      // is deliberately nowhere near a boundary.
+      const fresh = makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date().toISOString() }));
+      expect(isCacheFresh(fresh, 600)).toBe(true);
+      const old = makeCacheEnvelope(
+        makeTestSnapshot({ fetchedAt: new Date(Date.now() - 3_600_000).toISOString() }),
+      );
+      expect(isCacheFresh(old, 600)).toBe(false);
     });
 
     test('uses default TTL of 600s (10 minutes)', () => {
@@ -94,14 +131,32 @@ describe('cache', () => {
     });
   });
 
-  describe('writeCache and readCache round-trip', () => {
+  describe('cache version migration', () => {
+  test('a v1 envelope is discarded rather than rendered', () => {
+    // v1 snapshots predate sevenDayOpus. Reading one would produce a snapshot whose type
+    // claims the field is present while it is undefined — see sdlc/002-opus-window.
+    const stale = {
+      version: 1,
+      snapshot: makeTestSnapshot(),
+      cooldownUntil: null,
+      lastErrorClass: null,
+    };
+    writeFileSync(getCachePath(), JSON.stringify(stale), 'utf-8');
+
+    expect(readCache()).toBeNull();
+    // Deleted, so the next call is a clean miss rather than a repeated corrupt read.
+    expect(existsSync(getCachePath())).toBe(false);
+  });
+});
+
+describe('writeCache and readCache round-trip', () => {
     test('writes and reads back correctly', () => {
       const snapshot = makeTestSnapshot();
       const envelope = makeCacheEnvelope(snapshot);
       writeCache(envelope);
       const read = readCache();
       expect(read).not.toBeNull();
-      expect(read!.version).toBe(1);
+      expect(read!.version).toBe(2);
       expect(read!.snapshot.fiveHour.utilizationPct).toBe(42);
       expect(read!.snapshot.sevenDay.utilizationPct).toBe(18);
     });
@@ -204,5 +259,647 @@ describe('cache', () => {
       const result = readCache();
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('readCacheResult: distinguishing why a read failed', () => {
+  let cleanup2: () => void;
+  beforeEach(() => { ({ cleanup: cleanup2 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup2(); });
+
+  test('hit on a valid current-version envelope', () => {
+    writeCache(makeCacheEnvelope(makeTestSnapshot()));
+    const r = readCacheResult();
+    expect(r.reason).toBe('hit');
+    expect(r.envelope).not.toBeNull();
+  });
+
+  test('miss when the file is absent', () => {
+    expect(readCacheResult()).toEqual({ envelope: null, reason: 'miss' });
+  });
+
+  test('corruptJson is distinguishable from a cold miss', () => {
+    writeFileSync(getCachePath(), '{ not json at all', 'utf-8');
+    expect(readCacheResult().reason).toBe('corruptJson');
+    expect(existsSync(getCachePath())).toBe(false);
+  });
+
+  test('versionMismatch is distinguishable from corruption', () => {
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 1, snapshot: makeTestSnapshot(), cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('versionMismatch');
+  });
+
+  test('invalidShape is distinguishable from versionMismatch', () => {
+    // UPDATED by sdlc/032's security pass. `snapshot: { nope: true }` is an OBJECT, and since the
+    // whitelist rebuild it is degraded rather than rejected — envelope kept, cooldown kept, every
+    // field at its substitute. Only a snapshot that is not an object still rejects, because there
+    // `sanitizeSnapshot` would return an all-degraded snapshot indistinguishable from a cold start.
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 2, snapshot: 'not-an-object', cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('invalidShape');
+
+    // The behaviour that CHANGED, pinned so the narrowing is deliberate rather than incidental.
+    writeFileSync(getCachePath(), JSON.stringify({
+      version: 2, snapshot: { nope: true }, cooldownUntil: null, lastErrorClass: null,
+    }), 'utf-8');
+    expect(readCacheResult().reason).toBe('hit');
+  });
+
+  test('readCache still returns just the envelope, unchanged', () => {
+    writeCache(makeCacheEnvelope(makeTestSnapshot()));
+    expect(readCache()).toEqual(readCacheResult().envelope);
+  });
+});
+
+/**
+ * Write a cache file with arbitrary field values, bypassing `makeCacheEnvelope`'s types.
+ *
+ * The validation tests below all need to plant a value the type system would refuse, which is
+ * the entire point — that is what a corrupt file on disk looks like to `readCacheResult`.
+ */
+function writeEnvelopeWith(overrides: Record<string, unknown>): void {
+  const envelope = { ...makeCacheEnvelope(makeTestSnapshot()), ...overrides };
+  writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+}
+
+describe('lastErrorClass validation (sdlc/014)', () => {
+  let cleanup: () => void;
+
+  beforeEach(() => {
+    ({ cleanup } = setupTestCacheDir());
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  test('an unknown lastErrorClass is nulled, not rejected', () => {
+    // The snapshot beside it is fine. Discarding the envelope over a corrupt error-class field
+    // would cost a live fetch on every read for a field nothing renders.
+    writeEnvelopeWith({ lastErrorClass: 'someClassFromAFutureVersion' });
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope?.lastErrorClass).toBeNull();
+    expect(result.envelope?.snapshot.display.primaryUtilizationPct).toBe(
+      makeTestSnapshot().display.primaryUtilizationPct,
+    );
+  });
+
+  test('the cache file survives — this is not corruption recovery', () => {
+    writeEnvelopeWith({ lastErrorClass: 'someClassFromAFutureVersion' });
+    readCacheResult();
+    expect(existsSync(getCachePath())).toBe(true);
+  });
+
+  test('the cooldown timestamp is kept, since it does not depend on the class', () => {
+    // Nulling the class must not release a backoff. Otherwise a corrupt field turns into
+    // unthrottled retries against an endpoint that just rate-limited us.
+    const future = new Date(Date.now() + 60_000).toISOString();
+    writeEnvelopeWith({ cooldownUntil: future, lastErrorClass: 'notAClass' });
+    expect(readCacheResult().envelope?.cooldownUntil).toBe(future);
+  });
+
+  test('a non-string lastErrorClass is nulled too', () => {
+    for (const value of [42, {}, ['authInvalid'], true]) {
+      writeEnvelopeWith({ lastErrorClass: value });
+      expect(readCacheResult().envelope?.lastErrorClass).toBeNull();
+    }
+  });
+
+  test('a missing lastErrorClass field reads as null', () => {
+    const envelope = makeCacheEnvelope(makeTestSnapshot()) as unknown as Record<string, unknown>;
+    delete envelope.lastErrorClass;
+    writeFileSync(getCachePath(), JSON.stringify(envelope), 'utf-8');
+    expect(readCacheResult().envelope?.lastErrorClass).toBeNull();
+  });
+
+  test('a valid lastErrorClass is preserved untouched', () => {
+    writeEnvelopeWith({ lastErrorClass: 'timeout' });
+    expect(readCacheResult().envelope?.lastErrorClass).toBe('timeout');
+  });
+});
+
+describe('non-object JSON is corruption, not a crash (sdlc/014 security pass)', () => {
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  // Each of these parses fine and then throws TypeError on `parsed.version`, out of
+  // readCacheResult, out of main(), into the top-level catch — leaving the file in place so
+  // every subsequent invocation does it again. Exit 3, forever, until someone deletes the file
+  // by hand. SPEC.md §9 says corruption must delete and refetch, precisely so that cannot
+  // happen.
+  for (const raw of ['null', '4', '"a string"', '[]', '[{"version":2}]', 'true']) {
+    test(`a cache file containing ${raw} is deleted, not thrown on`, () => {
+      writeFileSync(getCachePath(), raw, 'utf-8');
+      const result = readCacheResult();
+      expect(result.envelope).toBeNull();
+      expect(result.reason).toBe('corruptJson');
+      expect(existsSync(getCachePath())).toBe(false);
+    });
+  }
+
+  test('the second read after corruption is a clean miss', () => {
+    // The actual property that matters: no stuck loop.
+    writeFileSync(getCachePath(), 'null', 'utf-8');
+    expect(readCacheResult().reason).toBe('corruptJson');
+    expect(readCacheResult().reason).toBe('miss');
+  });
+});
+
+describe('sanitizeCooldownUntil (sdlc/014 security pass)', () => {
+  const NOW = Date.parse('2026-08-26T12:00:00.000Z');
+
+  test('an unparseable string releases the cooldown rather than wedging it', () => {
+    expect(sanitizeCooldownUntil('not-a-date', NOW)).toBeNull();
+    expect(sanitizeCooldownUntil('', NOW)).toBeNull();
+  });
+
+  test('a non-string is nulled', () => {
+    for (const value of [42, {}, [], true, null, undefined]) {
+      expect(sanitizeCooldownUntil(value, NOW)).toBeNull();
+    }
+  });
+
+  test('a value beyond one full cooldown is clamped to the ceiling', () => {
+    expect(sanitizeCooldownUntil(new Date(8.64e15).toISOString(), NOW))
+      .toBe(new Date(NOW + COOLDOWN_DURATION_MS).toISOString());
+  });
+
+  test('a legitimate cooldown we just wrote comes back identical', () => {
+    // Identical because it was already canonical, not because it was echoed. Since sdlc/030 the
+    // return value is always constructed; for a round-trippable ISO string the two coincide.
+    const ours = new Date(NOW + COOLDOWN_DURATION_MS).toISOString();
+    expect(sanitizeCooldownUntil(ours, NOW)).toBe(ours);
+  });
+
+  test('a past cooldown survives — isInCooldown already handles it', () => {
+    const past = new Date(NOW - 1000).toISOString();
+    expect(sanitizeCooldownUntil(past, NOW)).toBe(past);
+  });
+
+  test('a parseable string carrying free text is canonicalised, not echoed', () => {
+    // sdlc/030 security pass, finding 1. `Date.parse` accepts far more than ISO-8601 and the
+    // legacy parser ignores parenthesised trailing text entirely, so this string parses finite,
+    // sits below the ceiling, and was returned VERBATIM — straight to `--debug` stdout via
+    // main.ts:140 and :168. The clamp branch always constructed its result; only the in-range
+    // passthrough echoed its input.
+    const poisoned = '2026-08-26 (/home/someone/.claude sk-ant-oat01-SECRET on someones-nuc.local)';
+    // Precondition: without this the test passes for the wrong reason if the parser ever
+    // starts REJECTING the string, which would null it rather than canonicalise it.
+    expect(Number.isFinite(Date.parse(poisoned))).toBe(true);
+
+    const out = sanitizeCooldownUntil(poisoned, NOW);
+    // Asserted as a shape, not an exact instant: the legacy parser reads a bare date-with-suffix
+    // as LOCAL time, so the exact value is TZ-dependent while the property under test is not.
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(out).not.toContain('/home/someone');
+    expect(out).not.toContain('sk-ant');
+    expect(out).not.toContain('someones-nuc.local');
+  });
+
+  test('null stays null', () => {
+    expect(sanitizeCooldownUntil(null, NOW)).toBeNull();
+  });
+});
+
+describe('a corrupt cooldownUntil cannot release the throttle (sdlc/014 security pass)', () => {
+  let cleanup: () => void;
+  beforeEach(() => { ({ cleanup } = setupTestCacheDir()); });
+  afterEach(() => { cleanup(); });
+
+  test('REGRESSION: an unparseable cooldownUntil is nulled before isInCooldown sees it', () => {
+    // Unsanitized, `new Date('garbage').getTime()` is NaN, `Date.now() < NaN` is false, and the
+    // 5-minute backoff — the only throttle on token-bearing requests (SPEC.md §9.4) — silently
+    // disappears. One corrupt byte, one authenticated request per prompt render.
+    writeEnvelopeWith({ cooldownUntil: 'garbage' });
+    const envelope = readCacheResult().envelope!;
+    expect(envelope.cooldownUntil).toBeNull();
+    expect(isInCooldown(envelope)).toBe(false);
+  });
+
+  test('a far-future cooldownUntil cannot pin the tool on stale data forever', () => {
+    writeEnvelopeWith({ cooldownUntil: new Date(8.64e15).toISOString() });
+    const envelope = readCacheResult().envelope!;
+    expect(isInCooldown(envelope)).toBe(true);
+    // Still in cooldown — but bounded, and it expires within one backoff rather than in the
+    // year 275760.
+    expect(new Date(envelope.cooldownUntil!).getTime())
+      .toBeLessThanOrEqual(Date.now() + COOLDOWN_DURATION_MS);
+  });
+
+  test('a real cooldown written by enterCooldown survives a round trip', () => {
+    const until = new Date(Date.now() + COOLDOWN_DURATION_MS).toISOString();
+    writeEnvelopeWith({ cooldownUntil: until });
+    const envelope = readCacheResult().envelope!;
+    expect(envelope.cooldownUntil).toBe(until);
+    expect(isInCooldown(envelope)).toBe(true);
+  });
+});
+
+/** Write a raw object to the cache path, bypassing writeCache's types. */
+function seed(envelope: unknown): void {
+  writeFileSync(getCachePath(), JSON.stringify(envelope), { mode: 0o600 });
+}
+
+const LIVE_COOLDOWN = (): string => new Date(Date.now() + 120_000).toISOString();
+
+// Module scope, not nested in the describe: a helper that captures nothing trips
+// unicorn(consistent-function-scoping). Loop 028 named this trap in writing, loop 029 hit it,
+// loop 031 hit it again. Writing the lesson down does not confer immunity; hoisting does.
+describe('the cache-read boundary keeps the envelope (sdlc/031)', () => {
+  let cleanup2: () => void;
+  beforeEach(() => { ({ cleanup: cleanup2 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup2(); });
+
+  test('T7 — a poisoned VALUE costs neither the envelope nor the cooldown', () => {
+    // §9.4: the cooldown is the only throttle on token-bearing requests, and it lives in the file
+    // a reject would delete. This is the property that makes degrade-don't-reject a security
+    // decision rather than a preference.
+    const cooldownUntil = LIVE_COOLDOWN();
+    seed(makeTestEnvelope({
+      cooldownUntil,
+      snapshot: makeTestSnapshot({
+        freshness: { isStale: true, staleReason: 'POISON /home/someone' as never },
+      }),
+    }));
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).not.toBeNull();
+    expect(result.envelope!.cooldownUntil).toBe(cooldownUntil);
+    expect(isInCooldown(result.envelope!)).toBe(true);
+  });
+
+  test('T12 — a NON-STRING fetchedAt no longer deletes the cache', () => {
+    // Before sdlc/031 this hit the shape gate: tryDelete, envelope gone, cooldown gone, and a
+    // token-bearing fetch on every prompt render. Measured before the change.
+    const cooldownUntil = LIVE_COOLDOWN();
+    seed(makeTestEnvelope({
+      cooldownUntil,
+      snapshot: makeTestSnapshot({ fetchedAt: 12345 as never }),
+    }));
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope!.snapshot.fetchedAt).toBe(UNKNOWN_FETCHED_AT);
+    expect(result.envelope!.cooldownUntil).toBe(cooldownUntil);
+    expect(existsSync(getCachePath())).toBe(true);
+  });
+
+  test('T12b — a missing display no longer costs the cooldown', () => {
+    // REVERSED by sdlc/032's security pass, and the reversal is the point. This used to pin
+    // "a structurally broken envelope still rejects, and still loses the cooldown", justified as
+    // "nothing coherent to substitute". After the whitelist rebuild that is false — sanitizeSnapshot
+    // constructs `display` and `freshness` from scratch. Keeping the clauses made the same class of
+    // garbage cost the §9.4 throttle or not depending on TRUTHINESS: `display: null` deleted the
+    // file and discarded a live cooldown, `display: "x"` was degraded and kept it. One byte.
+    const cooldownUntil = LIVE_COOLDOWN();
+    seed({
+      version: 2, cooldownUntil, lastErrorClass: null, lastHttpStatus: null, lastErrorMessage: null,
+      snapshot: { ...makeTestSnapshot(), display: null },
+    });
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(isInCooldown(result.envelope!)).toBe(true);
+    expect(result.envelope!.snapshot.display.primaryWindow).toBe('unknown');
+    expect(existsSync(getCachePath())).toBe(true);
+
+    // Positive control: a snapshot that is not an object at all STILL rejects.
+    seed({ version: 2, cooldownUntil, lastErrorClass: null, snapshot: 'x' });
+    expect(readCacheResult().reason).toBe('invalidShape');
+  });
+
+  test('T8 — a RICH honest envelope round-trips deep-equal', () => {
+    // Every field overridden. makeTestSnapshot's defaults are each field's DEGRADED value
+    // ('none', [], a current ISO timestamp), so a default fixture passes this criterion with an
+    // empty closed set and a predicate that accepts only 'none'. That was a Stage 2 finding.
+    const envelope = makeTestEnvelope({
+      cooldownUntil: LIVE_COOLDOWN(),
+      snapshot: makeTestSnapshot({
+        fetchedAt: '2026-08-01T12:34:56.000Z',
+        freshness: { isStale: true, staleReason: 'malformedResponse' },
+        rawMetadata: { normalizationWarnings: [...NORMALIZATION_WARNINGS] },
+      }),
+    });
+    seed(envelope);
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope).toEqual(envelope);
+    // Positive preconditions: the fixture really is rich, so the deep-equal above is load-bearing.
+    expect(result.envelope!.snapshot.rawMetadata.normalizationWarnings).toHaveLength(9);
+    expect(result.envelope!.snapshot.freshness.staleReason).toBe('malformedResponse');
+  });
+
+  test('T9 — the staleReason fallback changes no classification', () => {
+    // A5. The right-hand column is the table measured on 825ac80 and committed in plan.md BEFORE
+    // the change; `git log --oneline e783783..HEAD` shows the ordering.
+    const cases: Array<[boolean, string, string]> = [
+      [false, 'none', 'Healthy'],
+      [false, 'POISON /home/someone', 'Healthy'],
+      [true, 'none', 'Stale'],
+      [true, 'POISON /home/someone', 'Stale'],
+      [true, 'malformedResponse', 'Degraded'],
+      [true, 'fetchFailed', 'Stale'],
+    ];
+
+    const got: Array<[boolean, string, string]> = [];
+    for (const [isStale, staleReason] of cases) {
+      seed(makeTestEnvelope({
+        snapshot: makeTestSnapshot({ freshness: { isStale, staleReason: staleReason as never } }),
+      }));
+      got.push([isStale, staleReason, classify(readCacheResult().envelope!.snapshot)]);
+    }
+    expect(got).toEqual(cases);
+  });
+
+  test('T14 — a poisoned tier is degraded, because it reaches a FILE not just stdout', () => {
+    // sdlc/031 security pass. renderEvent (telemetry.ts:229) copies `tier` verbatim into a payload
+    // leaf and `emit` appends it to the metrics spool, so this is the one snapshot leaf whose leak
+    // lands on disk rather than on a terminal. Measured before the fix: a home directory and a
+    // hostname in a spooled payload.
+    seed(makeTestEnvelope({
+      snapshot: makeTestSnapshot({ tier: 'enterprise /home/someone nuc.local' as never }),
+    }));
+    const got = readCacheResult().envelope!.snapshot.tier;
+    expect(got).toBe('unknown');
+
+    // Positive control: a real member is not rewritten. UPDATED by sdlc/032 — the original control
+    // seeded `tier: 'enterprise'` on a snapshot whose `enterprise` is null, which is exactly the
+    // incoherent pair sanitizeSnapshot's coupling rule now eliminates, so it began returning
+    // 'unknown'. The rule is right and the old control encoded a state no producer can emit:
+    // normalize() sets tier:'enterprise' only inside its `enterprise !== null` branch. This is the
+    // ONE existing expectation this loop changes, against a predicted zero.
+    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ tier: 'standard' }) }));
+    expect(readCacheResult().envelope!.snapshot.tier).toBe('standard');
+
+    // And the coupling must not OVER-fire: 'enterprise' beside a real enterprise block survives.
+    seed(makeTestEnvelope({
+      snapshot: makeTestSnapshot({
+        tier: 'enterprise',
+        enterprise: {
+          utilizationPct: 12, monthlyLimitCredits: 100, usedCredits: 12,
+          currency: 'USD', isEnabled: true, disabledReason: null,
+        },
+      }),
+    }));
+    expect(readCacheResult().envelope!.snapshot.tier).toBe('enterprise');
+  });
+
+  test('T15 — a far-future fetchedAt is NOT fresh', () => {
+    // The hole the no-clamp decision left, and the rationale for that decision was false in both
+    // halves: detectClockSkew has zero production callers, and isCacheFresh returned TRUE for
+    // 2099 — main.ts:240 then returns the cached snapshot WITHOUT rewriting the file, so every
+    // render repeats it. One byte pinned the tool on stale data permanently.
+    const future = makeCacheEnvelope(makeTestSnapshot({ fetchedAt: '2099-01-01T00:00:00.000Z' }));
+    expect(isCacheFresh(future)).toBe(false);
+    // Positive controls: a normal fresh cache still is, and a small skew inside tolerance still is.
+    expect(isCacheFresh(makeCacheEnvelope(makeTestSnapshot({ fetchedAt: new Date().toISOString() })))).toBe(true);
+    const slight = new Date(Date.now() + 60_000).toISOString();
+    expect(isCacheFresh(makeCacheEnvelope(makeTestSnapshot({ fetchedAt: slight })))).toBe(true);
+  });
+
+  test('T16 — a missing rawMetadata reads as a hit, not a stuck exit-3 loop', () => {
+    // sdlc/031's security pass found the unconditional rebuild INCIDENTALLY closed a §9 bug nothing
+    // in this loop claimed: a v2 file with no `rawMetadata` passed the shape gate (which never
+    // checked it) and then main.ts:144 threw a TypeError reading `.normalizationWarnings` — into
+    // the top-level catch, exit 3, file never deleted, repeating forever. Pinned here so a refactor
+    // back to a conditional rebuild cannot silently reopen it.
+    const env = makeTestEnvelope({}) as unknown as Record<string, unknown>;
+    const snap = { ...(env.snapshot as Record<string, unknown>) };
+    delete snap.rawMetadata;
+    seed({ ...env, snapshot: snap });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(result.envelope!.snapshot.rawMetadata).toEqual({ normalizationWarnings: [] });
+  });
+
+  test('T17 — the warning array is capped', () => {
+    // Content was closed by the filter; length was not. A hand-edited file could make --debug and
+    // --json print an arbitrarily long array. normalize() emits at most five in one pass, so this
+    // ceiling cannot truncate an honest envelope.
+    const many = Array.from({ length: 500 }, () => 'Response is not an object');
+    seed(makeTestEnvelope({ snapshot: makeTestSnapshot({ rawMetadata: { normalizationWarnings: many } }) }));
+    expect(readCacheResult().envelope!.snapshot.rawMetadata.normalizationWarnings)
+      .toHaveLength(MAX_NORMALIZATION_WARNINGS);
+  });
+
+  test("T9b — the two `!== 'fetchFailed'` guards keep their answers too", () => {
+    // A5 named `classify` AND the two guards at main.ts:250 / extension.ts:175; the first version
+    // of T9 drove only `classify`, which the Stage 5 audit flagged as PARTIAL. Both files are
+    // outside this loop's fence, so the guard EXPRESSION is evaluated here against the validated
+    // snapshot rather than by calling into them — same predicate, same operand, no fence excursion.
+    const guard = (staleReason: string): boolean => {
+      seed(makeTestEnvelope({
+        snapshot: makeTestSnapshot({ freshness: { isStale: true, staleReason: staleReason as never } }),
+      }));
+      return readCacheResult().envelope!.snapshot.freshness.staleReason !== 'fetchFailed';
+    };
+    // A poisoned value answers exactly as 'none' does — which is why the fallback is safe.
+    expect(guard('POISON /home/someone')).toBe(true);
+    expect(guard('none')).toBe(true);
+    // Positive control: the guard still distinguishes the member it exists for.
+    expect(guard('fetchFailed')).toBe(false);
+  });
+});
+
+describe('the whitelist rebuild fails by DROPPING, so the round-trip is the net (sdlc/032)', () => {
+  let cleanup3: () => void;
+  beforeEach(() => { ({ cleanup: cleanup3 } = setupTestCacheDir()); });
+  afterEach(() => { cleanup3(); });
+
+  test('T5 — a rich envelope round-trips STRICTLY', () => {
+    const envelope = makeTestEnvelope({ snapshot: makeRichTestSnapshot() });
+    writeFileSync(getCachePath(), JSON.stringify(envelope), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    // toStrictEqual, not toEqual. Measured in bun 1.3.11:
+    //   expect({x:1, y:undefined}).toEqual({x:1})       -> PASSES
+    //   expect({x:1, y:undefined}).toStrictEqual({x:1}) -> fails
+    // so a rebuild that set a field to `undefined` would round-trip green under toEqual.
+    expect(result.envelope).toStrictEqual(envelope);
+  });
+
+  test('T6 — the round-trip fixture is not vacuous', () => {
+    // THE criterion. A whitelist's failure mode is a dropped field, and a round-trip only catches
+    // that if the fixture's value DIFFERS from what the rebuild would substitute. sdlc/032's Stage 2
+    // reviewer showed a rebuild that drops `currency` and hardcodes 'USD' passing both the
+    // round-trip and the `'zz' -> 'USD'` edge case — while formatting every non-USD account with
+    // the wrong symbol and the wrong minor-unit divisor.
+    //
+    // Six of makeTestSnapshot's defaults ARE their own degraded values, which is why
+    // makeRichTestSnapshot exists. This asserts leaf by leaf that it still does its job.
+    const rich = makeRichTestSnapshot();
+    const degraded = sanitizeSnapshot({});   // every field at its substitute value
+
+    const same: string[] = [];
+    const check = (label: string, a: unknown, b: unknown): void => {
+      if (JSON.stringify(a) === JSON.stringify(b)) same.push(label);
+    };
+    check('source', rich.source, degraded.source);
+    check('authState', rich.authState, degraded.authState);
+    check('tier', rich.tier, degraded.tier);
+    check('fiveHour', rich.fiveHour, degraded.fiveHour);
+    check('sevenDay', rich.sevenDay, degraded.sevenDay);
+    check('sevenDayOpus', rich.sevenDayOpus, degraded.sevenDayOpus);
+    check('enterprise', rich.enterprise, degraded.enterprise);
+    check('display', rich.display, degraded.display);
+    check('freshness', rich.freshness, degraded.freshness);
+    check('rawMetadata', rich.rawMetadata, degraded.rawMetadata);
+    check('fetchedAt', rich.fetchedAt, degraded.fetchedAt);
+    expect(same).toEqual([]);
+
+    // Positive precondition: `degraded` really is the substitute set, not another rich snapshot.
+    expect(degraded.tier).toBe('unknown');
+    expect(degraded.enterprise).toBeNull();
+    // And the two the reviewer named specifically.
+    expect(rich.enterprise!.currency).not.toBe('USD');
+    expect(rich.enterprise!.disabledReason).not.toBeNull();
+  });
+
+  test('T8 — a poisoned snapshot keeps the envelope and the cooldown', () => {
+    const cooldownUntil = new Date(Date.now() + 120_000).toISOString();
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({ cooldownUntil }),
+      snapshot: { ...makeTestSnapshot(), authState: 'POISON', tier: 'POISON' },
+    }), { mode: 0o600 });
+
+    const result = readCacheResult();
+    expect(result.reason).toBe('hit');
+    expect(isInCooldown(result.envelope!)).toBe(true);
+    // "resolves to the same instant", not byte-identical: sanitizeCooldownUntil canonicalises.
+    expect(new Date(result.envelope!.cooldownUntil!).getTime())
+      .toBe(new Date(cooldownUntil).getTime());
+  });
+
+  test('T10 — a poisoned enterprise.utilizationPct no longer throws', () => {
+    // Before sdlc/032 this reached format.ts as a string and threw `pct.toFixed is not a function`
+    // — out of main(), into the top-level catch, exit 3, with the cache file never deleted, so
+    // every render repeated it forever. A §9 stuck-failure loop that no artefact in this loop
+    // claimed until the Stage 2 review found it.
+    writeFileSync(getCachePath(), JSON.stringify({
+      ...makeTestEnvelope({}),
+      snapshot: {
+        ...makeRichTestSnapshot(),
+        enterprise: { ...makeRichTestSnapshot().enterprise, utilizationPct: 'POISON' },
+      },
+    }), { mode: 0o600 });
+
+    const snapshot = readCacheResult().envelope!.snapshot;
+    expect(snapshot.enterprise).toBeNull();
+    // The render that used to throw now runs. This is the assertion, not the absence of a throw:
+    // a test that merely does not throw passes when the code under it is never reached.
+    expect(() => formatStatusLine(snapshot, 120)).not.toThrow();
+    expect(typeof formatStatusLine(snapshot, 120)).toBe('string');
+  });
+});
+
+/**
+ * sdlc/034 — `$XDG_CACHE_HOME` resolution.
+ *
+ * `process.env.XDG_CACHE_HOME` is read LIVE by `getCacheDir()`, so the XDG axis can be varied
+ * in-process. `homedir()` is NOT — it resolves once at process start — which is why these tests
+ * assert against `homedir()` rather than mutating `HOME`, and why `scripts/spool-path.ts` takes
+ * `home` as a parameter instead.
+ *
+ * `setCacheBaseDir(null)` in the afterEach is load-bearing: without it the override from one test
+ * would mask the env resolution in the next, and every assertion here would pass for the wrong
+ * reason.
+ */
+describe('getCacheDir — XDG_CACHE_HOME (sdlc/034)', () => {
+  const saved = process.env.XDG_CACHE_HOME;
+  const legacy = join(homedir(), '.cache', 'claudewatch');
+
+  afterEach(() => {
+    setCacheBaseDir(null);
+    if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = saved;
+  });
+
+  test('unset resolves to the legacy location, byte-identical to pre-034 behaviour', () => {
+    setCacheBaseDir(null);
+    delete process.env.XDG_CACHE_HOME;
+    expect(getCacheDir()).toBe(legacy);
+    expect(getCacheDir()).toBe(getLegacyCacheDir());
+  });
+
+  test('an absolute value is honoured, with claudewatch appended', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+    // getCachePath() asserted here rather than left to derivation. A3's own rationale is that a
+    // fix to the resolver is not automatically a fix to its consumers, and sdlc/034's audit found
+    // this was the one of six paths never checked under an absolute value.
+    expect(getCachePath()).toBe(join('/xdg-abs', 'claudewatch', 'usage.json'));
+    // Positive precondition: the value really is different from the fallback, so the assertion
+    // above cannot pass by accident on a machine where they coincide.
+    expect(getCacheDir()).not.toBe(legacy);
+  });
+
+  test('an EMPTY value is ignored, per the XDG spec', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '';
+    expect(getCacheDir()).toBe(legacy);
+  });
+
+  test('a RELATIVE value is ignored, and never resolves against the cwd', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = 'relative/path';
+    expect(getCacheDir()).toBe(legacy);
+    // The failure this rule prevents: a cache that follows the user around their filesystem.
+    expect(getCacheDir()).not.toContain('relative/path');
+  });
+
+  test('a leading ~ is NOT expanded — it is relative, therefore ignored', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '~/cache';
+    expect(getCacheDir()).toBe(legacy);
+    expect(getCacheDir()).not.toContain('~');
+  });
+
+  test('a trailing slash normalises rather than doubling', () => {
+    setCacheBaseDir(null);
+    process.env.XDG_CACHE_HOME = '/xdg-abs/';
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+    expect(getCacheDir()).not.toContain('//');
+  });
+
+  test('setCacheBaseDir wins with the variable SET', () => {
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');
+  });
+
+  test('setCacheBaseDir wins with the variable UNSET', () => {
+    delete process.env.XDG_CACHE_HOME;
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');
+  });
+
+  test('setCacheBaseDir(null) restores env-sensitive resolution in the same process', () => {
+    process.env.XDG_CACHE_HOME = '/xdg-abs';
+    setCacheBaseDir('/override');
+    expect(getCacheDir()).toBe('/override');   // positive precondition
+    setCacheBaseDir(null);
+    expect(getCacheDir()).toBe(join('/xdg-abs', 'claudewatch'));
+  });
+
+  /**
+   * The one platform-dependent thing the resolver leans on, pinned on the platform CI runs.
+   *
+   * `isAbsolute` is platform-sensitive, and B2 chose one rule for all platforms rather than a
+   * Windows branch CI could never execute. `path.win32` is importable everywhere, so the
+   * classification itself is checkable here even though the branch is not.
+   */
+  test('win32 classifies C:foo as relative and C:\\foo as absolute', () => {
+    expect(win32.isAbsolute('C:foo')).toBe(false);
+    expect(win32.isAbsolute('C:\\foo')).toBe(true);
   });
 });

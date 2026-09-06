@@ -9,7 +9,17 @@
     "outDir": "dist",
     "declaration": true,
     "sourceMap": true,
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ],
+    "lib": [
+      "ES2023"
+    ]
   },
-  "exclude": ["scripts", "dist", "node_modules"]
+  "//": "Every entry here is a hole in `bun run typecheck`. sdlc/018 shipped one: `scripts` sat in this list, so the gate's own runner went unchecked for eleven loops. `typefixtures` is here because its files are SUPPOSED to fail tsc; exhaustive-guard.test.ts asserts this list stays exactly these three.",
+  "exclude": [
+    "dist",
+    "node_modules",
+    "packages/core/src/typefixtures"
+  ]
 }

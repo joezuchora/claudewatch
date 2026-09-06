@@ -9,3 +9,5 @@ export * from './thresholds.js';
 export * from './time.js';
 export * from './format.js';
 export * from './snapshot.js';
+export * from './config.js';
+export * from './telemetry.js';

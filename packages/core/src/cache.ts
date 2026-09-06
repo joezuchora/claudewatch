@@ -1,60 +1,265 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
-import type { CacheEnvelope } from './types.js';
+import type { CacheEnvelope, SurfaceableMessage } from './types.js';
+import { emitProcess, cacheEvent } from './telemetry.js';
+import { isFailureClass, COOLDOWN_DURATION_MS } from './cooldown.js';
+// Mirrors the isFailureClass import above: the module that OWNS a policy also owns its predicate.
+// No cycle THROUGH client.ts — it does not import cache.ts. It does import telemetry.ts, which
+// imports getCacheDir from here, so cache -> client -> telemetry -> cache is a cycle; but that
+// arm is the pre-existing cache <-> telemetry cycle, unchanged by this edge. Benign because
+// everything crossing it is a hoisted function declaration. A module-level `const` added to
+// client.ts and read at cache.ts load time would TDZ. (sdlc/030 security pass, finding 4.)
+import { isSurfaceableMessage } from './client.js';
+// A leaf module with no runtime imports, so this edge cannot close a cycle — unlike an import of
+// `normalize.ts`, which reaches back here through `telemetry.ts`. See closed-sets.ts's header.
+import { CLOCK_SKEW_TOLERANCE_MS } from './closed-sets.js';
+import { sanitizeSnapshot } from './sanitize-snapshot.js';
 
-const CACHE_VERSION = 1;
+// Bumped to 2 when UsageSnapshot gained sevenDayOpus (sdlc/002-opus-window). A v1 envelope
+// deserializes into a snapshot missing that field, so it is discarded and refetched rather
+// than rendered from a shape the type system believes is complete.
+const CACHE_VERSION = 2;
 
 let cacheBaseDir: string | null = null;
 
 /**
  * Override the cache directory root (e.g. for test isolation).
- * Pass null to reset to the default (~/.cache/claudewatch).
+ *
+ * Wins over `$XDG_CACHE_HOME` as well as over the legacy default. Passing null restores
+ * env-sensitive resolution in the same process — which is what every `afterEach` depends on.
  */
 export function setCacheBaseDir(dir: string | null): void {
   cacheBaseDir = dir;
 }
 
+/**
+ * Where the cache lived before sdlc/034, and still lives when `$XDG_CACHE_HOME` is not usable.
+ *
+ * Exported so that `cli-ship`'s legacy drain imports this notion of "legacy" rather than
+ * reconstructing `join(homedir(), '.cache', 'claudewatch')` by hand. sdlc/034's Stage 2 review
+ * counted EIGHT independent places that decide where this tool's files live; adding a ninth while
+ * fixing the first would have been the same defect wearing a fix.
+ */
+export function getLegacyCacheDir(): string {
+  return join(homedir(), '.cache', 'claudewatch');
+}
+
+/**
+ * Resolve the cache root, honouring `$XDG_CACHE_HOME`.
+ *
+ * SPEC.md §9.6 claimed this followed the XDG convention from loop 003 onward. It did not — the
+ * variable was never read — and loops 003 and 005 both recorded the divergence without fixing it.
+ *
+ * The rule is the XDG Base Directory specification's own, both halves: unset or empty falls back to
+ * `$HOME/.cache`, and a RELATIVE value is invalid and ignored. The relative case is not pedantry:
+ * without it a relative value makes every path here relative to the current working directory, so
+ * the cache would follow the user around their filesystem and the statusline would refetch on
+ * every `cd`.
+ *
+ * ONE condition, not two. `isAbsolute('') === false`, so an explicit empty-string test would be an
+ * equivalent mutant — no test could kill it. sdlc/034's spec fixes this shape deliberately so two
+ * implementers do not build two different resolvers, and predicts five mutation rules, not six.
+ *
+ * Applies on EVERY platform, not just Linux. A branch that only executes on Windows can only be
+ * exercised on Windows, and CI here runs Linux — loop 011 already paid for that with a Windows-only
+ * path that would have run real credentials through a benchmark loop. A user who has never set the
+ * variable gets `getLegacyCacheDir()`, character-identical to the behaviour before this loop.
+ */
 export function getCacheDir(): string {
   if (cacheBaseDir !== null) return cacheBaseDir;
-  return join(homedir(), '.cache', 'claudewatch');
+  const xdg = process.env.XDG_CACHE_HOME;
+  if (xdg !== undefined && isAbsolute(xdg)) return join(xdg, 'claudewatch');
+  return getLegacyCacheDir();
 }
 
 export function getCachePath(): string {
   return join(getCacheDir(), 'usage.json');
 }
 
-export function readCache(): CacheEnvelope | null {
+/**
+ * Why a cache read produced no envelope.
+ *
+ * readCache() returns null for four distinct situations and deletes the file first, so no
+ * caller could ever tell them apart. That made cache health unobservable — a version
+ * mismatch (the interesting case after loop 002 bumped CACHE_VERSION to 2) looked identical
+ * to a cold start. See sdlc/003-metrics-telemetry.
+ */
+export type CacheReadReason =
+  | 'hit'
+  | 'miss'
+  | 'corruptJson'
+  | 'versionMismatch'
+  | 'invalidShape';
+
+export interface CacheReadResult {
+  envelope: CacheEnvelope | null;
+  reason: CacheReadReason;
+}
+
+/**
+ * Bring a `cooldownUntil` read off disk into the range `isInCooldown` can reason about.
+ *
+ * Garbage (a non-string, or a string `Date.parse` rejects) becomes `null`: no cooldown, one
+ * fetch, and the next failure writes a real one. Failing open is right here because failing
+ * closed on an unparseable value would let a corrupt byte wedge the tool permanently.
+ *
+ * A value beyond one full cooldown from now is clamped down to that ceiling. Failing closed is
+ * right there for the mirror reason: `8.64e15` would otherwise pin the tool on stale data
+ * forever, and no honest writer of this file ever sets a longer backoff than we do.
+ *
+ * Everything that survives is CANONICALISED — the return value is always a string this function
+ * constructed, never the one it read. See the comment on the return statement for the §12 leak
+ * that made the difference matter.
+ *
+ * `now` is injectable for the reason sdlc/019 made `isCacheFresh`'s injectable: a clamp test
+ * that reads ambient time can only assert the side it has slack on.
+ */
+export function sanitizeCooldownUntil(value: unknown, now: number = Date.now()): string | null {
+  if (typeof value !== 'string') return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  const ceiling = now + COOLDOWN_DURATION_MS;
+  // CANONICALISED, never echoed. Returning `value` verbatim on the in-range path was a §12 leak
+  // found by sdlc/030's security pass: `Date.parse` accepts far more than ISO-8601, and the
+  // legacy parser ignores parenthesised trailing text entirely. `Date.parse('2026-01-01
+  // (/home/someone/.claude sk-ant-…)')` is finite and below the ceiling, so the whole string —
+  // path, hostname and all — was returned and printed by `--debug` (main.ts:140, :168). The clamp
+  // branch already returned a constructed ISO string; only the passthrough echoed its input.
+  // Every consumer reads this through `new Date(...)`, so canonicalising costs nothing.
+  return new Date(Math.min(ms, ceiling)).toISOString();
+}
+
+export function readCacheResult(): CacheReadResult {
   const path = getCachePath();
 
   let raw: string;
   try {
     raw = readFileSync(path, 'utf-8');
   } catch {
-    return null;
+    emitProcess(cacheEvent({ outcome: 'miss' }));
+    return { envelope: null, reason: 'miss' };
   }
 
+  let parsed: CacheEnvelope;
   try {
-    const parsed = JSON.parse(raw) as CacheEnvelope;
-    if (
-      parsed.version !== CACHE_VERSION ||
-      !parsed.snapshot ||
-      typeof parsed.snapshot !== 'object' ||
-      typeof parsed.snapshot.fetchedAt !== 'string' ||
-      !parsed.snapshot.display ||
-      !parsed.snapshot.freshness
-    ) {
-      // Incompatible version or structurally invalid snapshot — treat as corrupt
-      tryDelete(path);
-      return null;
-    }
-    return parsed;
+    parsed = JSON.parse(raw) as CacheEnvelope;
   } catch {
-    // Corrupt JSON — delete and treat as miss
+    // Corrupt JSON — delete and treat as a miss so we never get a stuck failure loop.
     tryDelete(path);
-    return null;
+    emitProcess(cacheEvent({ outcome: 'corruptJson' }));
+    return { envelope: null, reason: 'corruptJson' };
   }
+
+  // `JSON.parse` returns any JSON value, not necessarily an object. A cache file containing
+  // the literal `null` (or `4`, or `[]`) survives the parse and then throws TypeError on
+  // `parsed.version` below — out of readCacheResult, out of main(), into the top-level catch,
+  // and the file is never deleted. Every subsequent invocation repeats it: exit 3 forever.
+  // That is precisely the stuck failure loop SPEC.md §9 exists to prevent, and the `as`
+  // assertion above is what hid it. Found by the sdlc/014 security pass.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'corruptJson' }));
+    return { envelope: null, reason: 'corruptJson' };
+  }
+
+  if (parsed.version !== CACHE_VERSION) {
+    tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'versionMismatch' }));
+    return { envelope: null, reason: 'versionMismatch' };
+  }
+
+  // WHAT IS LEFT REJECTS, and the list shrank in sdlc/032's security pass.
+  //
+  // It used to include `!parsed.snapshot.display` and `!parsed.snapshot.freshness`, justified as
+  // "nothing coherent to substitute". After the whitelist rebuild that justification is false —
+  // `sanitizeSnapshot` IS the substitute, and it constructs both objects from scratch. Keeping the
+  // clauses made the same class of garbage cost the §9.4 throttle or not depending on TRUTHINESS:
+  // measured, `display: null` deleted the file and discarded a live `cooldownUntil`, while
+  // `display: "x"` was degraded and kept it. One byte flipped to null cleared the backoff.
+  //
+  // Only a snapshot that is not an object at all still rejects, because `sanitizeSnapshot` would
+  // otherwise be handed a primitive and return an all-degraded snapshot indistinguishable from a
+  // cold start — and a miss is the honest outcome there.
+  if (
+    !parsed.snapshot ||
+    typeof parsed.snapshot !== 'object' ||
+    Array.isArray(parsed.snapshot)
+  ) {
+    tryDelete(path);
+    emitProcess(cacheEvent({ outcome: 'invalidShape' }));
+    return { envelope: null, reason: 'invalidShape' };
+  }
+
+  // Everything below is degraded, never rejected: discarding a good snapshot would cost a live
+  // token-bearing fetch on every read, and delete the cooldown that throttles one.
+  //
+  // Since sdlc/032 the SNAPSHOT is rebuilt wholesale rather than patched field by field, so the
+  // running count that used to sit here — "two", then "three", then "seven" — is gone with it.
+  // What is left at this level is the three envelope error fields plus `lastHttpStatus`.
+  //
+  // Still open, and named rather than implied: an unknown key on the ENVELOPE survives this
+  // function. It is inert at every current surface — `output()` serialises the snapshot and
+  // `printDebug` copies named keys — which is why it is the least of the gaps, not the most.
+
+  // `lastErrorClass` is defence in depth, not a closed hole. No consumer passes it to
+  // `failurePolicy` today — it is copied into new envelopes and printed by `--debug`, nothing
+  // more — so the `throw` there is not currently reachable from a cache file. It is checked
+  // here so that the day someone does branch on it, the check already exists. Claiming more
+  // than that was a review finding against this very change (sdlc/014).
+  if (parsed.lastErrorClass !== null && !isFailureClass(parsed.lastErrorClass)) {
+    parsed = { ...parsed, lastErrorClass: null };
+  }
+
+  // `lastErrorMessage` is printed by `--debug` (main.ts:140, :168) and rendered in the VS Code
+  // tooltip. Before sdlc/030 those sites read it straight off the envelope, so a cache file written
+  // before sdlc/029 — when the network path assigned `err.message` verbatim — still surfaced free
+  // text. Validating HERE fixes every consumer at once, including the two that never call
+  // `extractLastError`. SPEC.md §12 already claimed this check ran "at the cache-read boundary";
+  // this is the commit that makes that sentence true.
+  if (parsed.lastErrorMessage !== null && !isSurfaceableMessage(parsed.lastErrorMessage)) {
+    parsed = { ...parsed, lastErrorMessage: null };
+  }
+
+  // `cooldownUntil` is the live one, and it guards a security property: the 5-minute backoff
+  // is the ONLY throttle on token-bearing requests (SPEC.md §9.4).
+  //
+  // `isInCooldown` does `Date.now() < new Date(cooldownUntil).getTime()`. An unparseable
+  // string gives NaN, every comparison against NaN is false, and the cooldown is silently
+  // released — so a corrupt byte in this field turns into a fresh authenticated request on
+  // every single prompt render. A far-future value wedges the opposite way, pinning the tool
+  // on stale data indefinitely.
+  //
+  // Nulled on garbage (fail open, one fetch, then a real cooldown is written), clamped on
+  // magnitude (fail closed, never longer than the backoff we would have set ourselves), and
+  // canonicalised so the string that comes out is one we constructed rather than one we read.
+  // ONE call replaces the four per-field blocks sdlc/030 and 031 grew here. `sanitizeSnapshot`
+  // rebuilds the snapshot from known keys, so every field is validated and no unknown key at any
+  // depth survives — measured at 26 of 26 leaking before it existed. See sanitize-snapshot.ts for
+  // why a whitelist rather than in-place validation, and for the coherence rules that stop
+  // independent degradation inventing states no producer can emit.
+  parsed = { ...parsed, snapshot: sanitizeSnapshot(parsed.snapshot) };
+
+  // `lastHttpStatus` is an ENVELOPE field, so `sanitizeSnapshot` cannot reach it — and it reaches
+  // `--debug` verbatim (main.ts:142, :170). Measured: a seeded
+  // `"lastHttpStatus": "MARK /home/someone/.claude"` printed to stdout. It does NOT reach `--json`,
+  // which serialises the snapshot rather than the envelope, and that asymmetry is why the two
+  // end-to-end tests differ on this field. Found by sdlc/032's Stage 2 review, which also caught
+  // that the first spec draft made DELETING §12's gap paragraph a pass condition while this still
+  // echoed.
+  if (parsed.lastHttpStatus !== null && !Number.isInteger(parsed.lastHttpStatus)) {
+    parsed = { ...parsed, lastHttpStatus: null };
+  }
+
+  parsed = { ...parsed, cooldownUntil: sanitizeCooldownUntil(parsed.cooldownUntil) };
+
+  return { envelope: parsed, reason: 'hit' };
+}
+
+/** Unchanged behaviour, kept so no existing call site has to change. */
+export function readCache(): CacheEnvelope | null {
+  return readCacheResult().envelope;
 }
 
 export function writeCache(envelope: CacheEnvelope): void {
@@ -72,9 +277,30 @@ export function writeCache(envelope: CacheEnvelope): void {
   renameSync(tempPath, path);
 }
 
-export function isCacheFresh(envelope: CacheEnvelope, ttlSeconds: number = 600): boolean {
+/**
+ * `now` is a defaulted parameter, not an ambient read, for the same reason `sdlc/011` made
+ * fetch timings injectable: time is a property of a CALL, not of the process.
+ *
+ * With `Date.now()` read inside, a boundary test could only assert the side it had slack on —
+ * `age < ttl` computed at assertion time includes however long the test itself took. One such
+ * test gave itself a 1 ms budget and went red on a slow container (sdlc/019). Passing `now`
+ * makes the boundary exact from both sides, which is the part that was untestable before.
+ *
+ * Every production caller passes one or two arguments and gets ambient time, unchanged.
+ */
+export function isCacheFresh(
+  envelope: CacheEnvelope,
+  ttlSeconds: number = 600,
+  now: number = Date.now(),
+): boolean {
   const fetchedAt = new Date(envelope.snapshot.fetchedAt).getTime();
-  const age = Date.now() - fetchedAt;
+  const age = now - fetchedAt;
+  // A NEGATIVE age means the file claims to be from the future. Beyond the skew tolerance that is
+  // not freshness, it is a corrupt or hand-edited timestamp — and treating it as fresh pinned the
+  // tool on stale data forever, because this branch returns the cached snapshot WITHOUT rewriting
+  // the file, so every render repeated it. Found by sdlc/031's security pass; `2099-01-01` returned
+  // true. Bounding the comparison rather than clamping the stored value keeps the skew visible.
+  if (age < -CLOCK_SKEW_TOLERANCE_MS) return false;
   return age < ttlSeconds * 1000;
 }
 
@@ -83,7 +309,7 @@ export function makeCacheEnvelope(
   cooldownUntil: string | null = null,
   lastErrorClass: CacheEnvelope['lastErrorClass'] = null,
   lastHttpStatus: number | null = null,
-  lastErrorMessage: string | null = null,
+  lastErrorMessage: SurfaceableMessage | null = null,
 ): CacheEnvelope {
   return {
     version: CACHE_VERSION,
