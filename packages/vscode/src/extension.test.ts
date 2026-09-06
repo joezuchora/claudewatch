@@ -487,6 +487,17 @@ describe('lifecycle', () => {
   });
 });
 
+/**
+ * Builds a `test.todo(...)` line as fixture TEXT for A4's control.
+ *
+ * Assembled by interpolation, and module-scoped, for two different reasons. Interpolation so the
+ * fixture's own source lines cannot be counted by A4's self-read whatever indentation or quoting
+ * they are written in — measured: as a literal, reformatting the fixture broke A4 with a confusing
+ * count. Module scope because it captures nothing, and `unicorn(consistent-function-scoping)` is in
+ * the lint budget. (sdlc/041 Stage 5 audit)
+ */
+const todoLine = (indent: string, name: string): string => `${indent}test.${'todo'}('${name}');`;
+
 describe('the telemetry listener', () => {
   /**
    * extension.ts:75-81 — the LIVE half of SPEC.md §10.6 (line 595): "Both inputs are re-evaluated
@@ -585,10 +596,21 @@ describe('the telemetry listener', () => {
 
   test('the docstring gap count matches the todos', () => {
     const text = readFileSync(import.meta.path, 'utf-8');
-    // `\s*`, not a bare `^`: a todo indented inside a describe is still a gap, and a bare anchor
-    // misses it while bun prints one more than the docstring claims. What excludes this file's
-    // prose mentions is the `\(` — measured, removing the anchor entirely still yields the right
-    // count. Three explanations of this line have been wrong; this one was run.
+    // Three parts, each doing a different job, measured over THIS FILE rather than over a fixture:
+    //
+    //   `\s*`  makes an INDENTED todo count. A bare `^` misses one written inside a describe, and
+    //          the docstring would then claim two while bun prints three — green on real drift.
+    //   `\(`   excludes the backticked `test.todo` prose in the header and the regex literals here.
+    //   `td()` below assembles the fixture's lines by interpolation, so the fixture cannot be
+    //          counted by this read whatever indentation or quoting style it is written in.
+    //
+    // Four earlier explanations of this line were wrong, each replaced by another that was also
+    // wrong: the assembly prevents the self-count (it did not), the `^` anchor does (it did not
+    // alone), the `\(` does all of it (measured false — unanchored counts 4 over this file, because
+    // it also hits the fixture). This one was measured against the file it reads.
+    //
+    // `String.match` resets a /g regex's lastIndex, so TODO is safe to apply twice; `.test()` would
+    // NOT be — see mock-topology.ts's MOCK_CALL note for the version of this that bit before.
     const TODO = /^\s*test\.todo\(/gm;
     const CLAIM = /^ \* GAPS: (\d+)$/m;
 
@@ -605,10 +627,13 @@ describe('the telemetry listener', () => {
     // the anchor and so controls nothing.
     const FIXTURE = [
       ' * There is a `test.todo` per gap',
-      "test.todo('top level');",
-      "  test.todo('indented inside a describe');",
+      todoLine('', 'top level'),
+      todoLine('  ', 'indented inside a describe'),
     ].join('\n');
-    expect((FIXTURE.match(/^\s*test\.todo\(/gm) ?? []).length).toBe(2);
+    // TODO itself, not a private copy of it. Shipped with its own duplicate literal, this control
+    // stayed green when TODO was weakened to a bare `^` — a control decoupled from the thing it
+    // controls, inside the criterion added to prevent exactly that. (Stage 5 audit)
+    expect((FIXTURE.match(TODO) ?? []).length).toBe(2);
   });
 });
 
@@ -616,4 +641,3 @@ describe('the telemetry listener', () => {
 
 test.todo('activate: the onDidChangeConfiguration handlers (interval, thresholds, telemetry)', () => {});
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
-
