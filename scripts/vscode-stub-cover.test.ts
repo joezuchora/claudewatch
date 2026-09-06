@@ -76,7 +76,7 @@ describe('the consolidation', () => {
    */
   const FLOORS: Record<string, { pass: number; expects: number }> = {
     'commands.test.ts': { pass: 5, expects: 12 },
-    'extension.test.ts': { pass: 20, expects: 41 },
+    'extension.test.ts': { pass: 24, expects: 56 },
     'manifest.test.ts': { pass: 6, expects: 18 },
     'statusbar.test.ts': { pass: 29, expects: 57 },
     'telemetry-gate.test.ts': { pass: 7, expects: 22 },

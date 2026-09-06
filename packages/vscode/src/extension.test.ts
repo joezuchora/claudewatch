@@ -33,15 +33,22 @@
  * `emitProcess`, and core's `processConfig` is whatever an earlier test file left — the security
  * pass produced 14+ render lines in the real `~/.cache/claudewatch/metrics-spool.jsonl` that way.
  *
- * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): `activate`'s
- * config-change handlers, the polling timer's scheduling, and `activate`'s
- * `onDidChangeTelemetryEnabled` listener. There is a `test.todo` per gap so `bun test` prints them
- * — THREE of them, matching the three gaps named here. An earlier revision said "a `test.todo` per
- * gap" while listing three gaps beside four todos, the fourth having been added without updating
- * the count. `commands.ts` was the fourth gap and is now covered by `commands.test.ts`
- * (sdlc/028).
+ * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): `activate`'s config-change
+ * handlers, and the polling timer's scheduling. There is a `test.todo` per gap so `bun test` prints
+ * them. `activate`'s `onDidChangeTelemetryEnabled` listener WAS a third gap and is covered as of
+ * sdlc/041 — its todo said the branch was dead because the stub omitted the key, which stopped
+ * being true when sdlc/039 added it.
+ *
+ * The count below is machine-checked ('the docstring gap count matches the todos'), because this
+ * paragraph has drifted before: an earlier revision said "a `test.todo` per gap" while listing three
+ * gaps beside four todos, the fourth added without updating the count. `commands.ts` was that fourth
+ * gap and is now covered by `commands.test.ts` (sdlc/028). Prose is prose; the assertion reads the
+ * line below and nothing else.
+ *
+ * GAPS: 2
  */
 import { describe, expect, test, mock, beforeAll, beforeEach, afterAll, afterEach } from 'bun:test';
+import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { makeTestSnapshot, setupTestCacheDir } from '@claudewatch/core/test-helpers';
@@ -167,7 +174,7 @@ mock.module('./extension-bridge.js', () => ({
   extractLastError: () => null,
 }));
 
-const { activate, deactivate } = await import('./extension.js');
+const { activate, deactivate, telemetryOverride } = await import('./extension.js');
 
 // --- helpers ---
 
@@ -480,11 +487,133 @@ describe('lifecycle', () => {
   });
 });
 
+describe('the telemetry listener', () => {
+  /**
+   * extension.ts:75-81 — the LIVE half of SPEC.md §10.6 (line 595): "Both inputs are re-evaluated
+   * live." telemetry-gate.test.ts covers the decision function; nothing covered the wiring, so a
+   * callback replaced by `() => {}` kept every test in this repo green while telemetry carried on
+   * flowing from a user who had turned it off. (sdlc/041)
+   *
+   * All four drive `activate(ctx)` directly rather than `start()`, which clears `calls` at :210.
+   */
+  const SENTINEL = { dispose: (): void => {} };
+
+  /** Overrides the leaf to capture the callback and hand back a disposable we can identify. */
+  function captureListener(): { cb: () => void } {
+    const box: { cb: () => void } = { cb: () => {} };
+    vscodeStub.env.onDidChangeTelemetryEnabled = ((cb: () => void) => {
+      box.cb = cb;
+      return SENTINEL;
+    }) as typeof vscodeStub.env.onDidChangeTelemetryEnabled;
+    return box;
+  }
+
+  const lastGate = (): unknown => calls.findLast((c) => c.name === 'setTelemetryConfig')?.arg;
+
+  test('is registered: the disposable it returns lands in context.subscriptions', async () => {
+    const box = captureListener();
+    ctx = makeCtx();
+    await activate(ctx as never);
+    await flush();
+
+    expect(typeof box.cb).toBe('function');
+    // IDENTITY, not length. `activate` pushes seven disposables, so deleting only the telemetry
+    // push leaves six and any "did it grow" assertion survives the mutation it exists to catch.
+    expect(ctx.subscriptions).toContain(SENTINEL);
+  });
+
+  test('firing it re-runs the gate over BOTH inputs, on BOTH observables', async () => {
+    const box = captureListener();
+    // Seed the setting. `extension.ts` reads it with `.get<boolean>('telemetry.enabled')` and NO
+    // default, so an unseeded stub returns `undefined` and the AND is a constant `false` — which is
+    // what the first draft of this spec measured and mistook for proof the observable worked.
+    const st = resetVscodeStub();
+    st.configValues['telemetry.enabled'] = true;
+    box.cb = (): void => {};
+    vscodeStub.env.onDidChangeTelemetryEnabled = ((cb: () => void) => {
+      box.cb = cb;
+      return SENTINEL;
+    }) as typeof vscodeStub.env.onDidChangeTelemetryEnabled;
+    vscodeStub.env.isTelemetryEnabled = true;
+    ctx = makeCtx();
+    await activate(ctx as never);
+    await flush();
+
+    // Row 1 — both on is the only combination that emits.
+    box.cb();
+    expect(lastGate()).toEqual({ enabled: true });
+    expect(telemetryOverride()).toEqual({ enabled: true });
+
+    // Row 2 — the global switch subtracts.
+    vscodeStub.env.isTelemetryEnabled = false;
+    box.cb();
+    expect(lastGate()).toEqual({ enabled: false });
+    expect(telemetryOverride()).toEqual({ enabled: false });
+
+    // Row 3 — the SETTING subtracts. Varying only the switch leaves a mutant that drops
+    // settingEnabled from the AND invisible, inverting SPEC.md:595's "narrow, never widen".
+    // Seeded explicitly false rather than left unseeded: only that says "the user turned it off".
+    vscodeStub.env.isTelemetryEnabled = true;
+    st.configValues['telemetry.enabled'] = false;
+    box.cb();
+    expect(lastGate()).toEqual({ enabled: false });
+    expect(telemetryOverride()).toEqual({ enabled: false });
+  });
+
+  test('a host without the key registers nothing and still activates', async () => {
+    // Two halves so the negative has a positive control and no magic number. `toBe(6)` would break
+    // the day anything else in `activate` pushes a disposable, and the next person would bump it
+    // to 7 rather than notice.
+    captureListener();
+    ctx = makeCtx();
+    await activate(ctx as never);
+    await flush();
+    const withKey = ctx.subscriptions.length;
+    expect(ctx.subscriptions).toContain(SENTINEL);
+
+    for (const d of ctx.subscriptions) d.dispose();
+    deactivate();
+    resetVscodeStub();
+    delete (vscodeStub.env as Partial<typeof vscodeStub.env>).onDidChangeTelemetryEnabled;
+
+    ctx = makeCtx();
+    await activate(ctx as never);   // resolving at all is the "still activates" half
+    await flush();
+    expect(ctx.subscriptions).not.toContain(SENTINEL);
+    expect(ctx.subscriptions.length).toBe(withKey - 1);
+  });
+
+  test('the docstring gap count matches the todos', () => {
+    const text = readFileSync(import.meta.path, 'utf-8');
+    // `\s*`, not a bare `^`: a todo indented inside a describe is still a gap, and a bare anchor
+    // misses it while bun prints one more than the docstring claims. What excludes this file's
+    // prose mentions is the `\(` — measured, removing the anchor entirely still yields the right
+    // count. Three explanations of this line have been wrong; this one was run.
+    const TODO = /^\s*test\.todo\(/gm;
+    const CLAIM = /^ \* GAPS: (\d+)$/m;
+
+    const claimed = Number(CLAIM.exec(text)?.[1] ?? '-1');
+    const actual = (text.match(TODO) ?? []).length;
+    expect(actual).toBeGreaterThan(0);   // an unmatched pattern must not be green-forever
+    expect(`claimed=${claimed} actual=${actual}`).toBe(`claimed=${actual} actual=${actual}`);
+
+    // Control 1: the claim regex reads a synthetic pre-change line. No historical `GAPS:` line
+    // exists — the old docstring said "THREE" in prose — so this fixture is synthetic by necessity.
+    expect(Number(CLAIM.exec(' * GAPS: 3')?.[1])).toBe(3);
+
+    // Control 2: a fixture, not a phrase pin. A prose-non-match assertion passes with OR without
+    // the anchor and so controls nothing.
+    const FIXTURE = [
+      ' * There is a `test.todo` per gap',
+      "test.todo('top level');",
+      "  test.todo('indented inside a describe');",
+    ].join('\n');
+    expect((FIXTURE.match(/^\s*test\.todo\(/gm) ?? []).length).toBe(2);
+  });
+});
+
 // --- A8: the gaps, printed on every run ---
 
 test.todo('activate: the onDidChangeConfiguration handlers (interval, thresholds, telemetry)', () => {});
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
-// extension.ts:76-80. Dead in this file because the `vscode` stub omits the key, so the
-// `typeof === 'function'` guard is false and the listener is never registered. Named here rather
-// than left to a coverage report nobody runs. (Stage 5 audit.)
-test.todo('activate: the onDidChangeTelemetryEnabled listener', () => {});
+

@@ -186,14 +186,6 @@ file back. Revision 1 enumerated the change and omitted the import.
       `lintBudget`, making A4 and A5 unsatisfiable together); revision 2 said the `^` anchor did. The
       `scripts/vscode-stub-cover.test.ts` analogy does not transfer: that dodge exists because
       `mock-topology.ts` scans an *unanchored substring*.
-      **The `^` anchor is what stops the test counting itself** — its own regex sits indented inside a
-      `const` and never matches at column 0. Revision 1 said the mechanism was assembling the pattern
-      as `'test' + '.todo('`, and that was wrong twice over: measured, un-assembling it changes
-      nothing (the test still passes), and the concatenation adds two `eslint(no-useless-concat)`
-      warnings to a file that currently has zero, which reddens `lintBudget` and makes A4 and A5
-      unsatisfiable together. **Use the anchored literal.** The
-      `scripts/vscode-stub-cover.test.ts` analogy does not transfer: that dodge exists because
-      `mock-topology.ts` scans for an *unanchored substring*.
       Two controls: the claimed-count regex must extract `3` from a **synthetic** fixture string
       ` * GAPS: 3` (there is no historical `GAPS:` line — the old docstring said "THREE" in prose),
       and the actual count is asserted `> 0` so an unmatched pattern cannot be green-forever. **The third
