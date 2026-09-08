@@ -2,15 +2,17 @@
 
 - **ID:** 042-setting-observable-unfired
 - **Stage:** 2 — Design
-- **Status:** revision 1 — first draft REJECTED. The measurements were right; the write-up omitted
-  the setup they were performed with, so the spec forbade what the probe did.
+- **Status:** ACCEPTED at Stage 2 (revision 2). The first draft was rejected on three blocking
+  findings; revision 1 was accepted with four majors folded in here. The pattern across both rounds:
+  the measurements were right and the write-ups dropped the conditions they were taken under.
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
 
 Four tests in `extension.test.ts` cover `extension.ts:115-127`'s telemetry branch: the handler is
 **registered**, an event that **affects** `claudewatch.telemetry.enabled` re-runs the gate and pushes
-the result into core, and an event that **does not** affect it leaves the gate alone. The
+the result into core, an event affecting a **different key** leaves the gate alone, and a setting read
+that **throws** fails closed. The
 `onDidChangeConfiguration` `test.todo` is reworded to name the two branches still uncovered; the
 `GAPS: 2` count does not move. No product source change.
 
@@ -65,11 +67,20 @@ disposable so registration is asserted by identity, and the capture box is initi
 `{ cb: undefined }` — initialising it with a no-op makes A1's `typeof` assertion true even when
 registration never happened, which is a decorative assertion, not a check.
 
-**Two setup steps are mandatory and were missing from the first draft:**
+**THREE setup steps are mandatory.** The first draft named none of them; revision 1 named two, and
+the third was found by asking whether two was the complete set rather than assuming it:
 
 - **Seed `vscodeStub.env.isTelemetryEnabled = true`.** The stub's default is `false` and the gate ANDs
-  both inputs, so without it every row of A2 reads `{ enabled: false }` and the second direction
-  proves nothing.
+  both inputs. Without it every row of A2 reads `{ enabled: false }` and the second direction proves
+  nothing — **and test 4 becomes silently vacuous**: it asserts `{ enabled: false }` against a gate
+  that is already `false`, so mutation (7) survives at **28 pass / 0 fail** (measured). That is the
+  only failure mode in this spec that ships green rather than loudly, which is why the seed is named
+  here for both criteria rather than inside A2's prose.
+- **Seed `configValues['telemetry.enabled']`, and call `resetVscodeStub()` BEFORE capturing.**
+  `configValues` is reachable only through the reset's return value — there is no other accessor —
+  and calling the reset *after* the capture restores the pristine leaf and throws away the callback
+  (measured: `box.cb is not a function`). Tests 2, 3 and 4 all need the seed; revision 1 buried it in
+  test 2's prose.
 - **Clear `calls` after `activate`/`flush`.** `activate` calls `recomputeTelemetryGate()` itself, so
   an uncleared log already holds one `setTelemetryConfig` entry and A3's counts are off by one.
   Either `calls = []` explicitly, or capture first and then `await start()`, which does the same.
@@ -77,8 +88,14 @@ registration never happened, which is a decorative assertion, not a check.
 1. **Registered.** The callback is captured and `ctx.subscriptions` contains the sentinel.
 2. **An affecting change re-runs the gate, in both directions.** Seed the setting `true`, activate,
    then flip it `false` and fire with an affecting event: both observables read `{ enabled: false }`.
-   Flip back to `true`, fire again: both read `{ enabled: true }`. One direction alone passes against
-   a handler wired to a constant.
+   Flip back to `true`, fire again: both read `{ enabled: true }`.
+
+   **Why two directions, stated correctly this time.** Not "one direction alone passes against a
+   constant-wired handler" — measured, that is false in both useful senses: a constant lives in the
+   shared `recomputeTelemetryGate`, not in this branch, so `sdlc/041`'s own test already catches it,
+   and the `{ enabled: true }` constant dies at direction *one*, not two. The real value of the second
+   direction is that it makes A2 read a value **different from the one `activate` already logged**,
+   so the assertion cannot be satisfied by activation's own call surviving in the log.
 3. **A different-key change does not re-run the gate.** Positive precondition **in the same test**:
    from a cleared log, an affecting event produces exactly one `setTelemetryConfig` call; then, from a
    cleared log again, an event affecting `claudewatch.warningThresholdPct` produces **zero**. Without
@@ -88,8 +105,11 @@ registration never happened, which is a decorative assertion, not a check.
    guard survives it.
 4. **A failed setting read is not consent.** `recomputeTelemetryGate` wraps the setting read in a
    `try`/`catch` that sets `settingEnabled = null` — the "never widen" half of §10.6, four lines from
-   this loop's subject. Override `workspace.getConfiguration` to throw, fire an affecting event, and
-   assert both observables read `{ enabled: false }`. Changing that catch to `= true` currently passes
+   this loop's subject. **Activate FIRST, then** override `workspace.getConfiguration` to throw, then
+   fire an affecting event, and assert both observables read `{ enabled: false }`. The order is not
+   cosmetic: `new StatusBarManager` reads config at `statusbar.ts:20`, during `activate`, before
+   `startPolling` is reached, so a throwing override installed beforehand takes activation down with
+   it (measured). Changing that catch to `= true` currently passes
    the whole package, so this is the same unguarded-guarantee shape the intent objects to, inside the
    loop that cites it.
 
@@ -153,18 +173,23 @@ cannot catch, because it reads headings and the file is never named in one.
       a mutation dropping the `affectsConfiguration` guard, and the different-key form additionally
       stops one that *widens* it to a second key, which an all-false event does not.
 - [ ] **A4 — it discriminates.** **Seven** mutations of `extension.ts`, each predicted before running:
-      (1) delete `recomputeTelemetryGate()` from the telemetry branch → **A2 and A3** (the reviewer
-      measured this; the first draft predicted A2 alone);
+      (1) delete `recomputeTelemetryGate()` from the telemetry branch → **A2, A3 and test 4** (measured
+      25 pass / 3 fail; the first draft predicted A2 alone, revision 1 predicted A2 and A3);
       (2) drop the `affectsConfiguration` guard entirely → A3;
       (3) **widen** the guard to also match `claudewatch.warningThresholdPct` → A3, and *only* under
       the different-key form — measured to survive an all-false event;
       (4) keep the registration but drop its `context.subscriptions.push` → A1;
-      (5) delete the registration statement outright → A1, A2 and A3 (distinct from (4), which the
-      first draft conflated);
-      (6) wire the handler to a constant `setTelemetryConfig({ enabled: true })` → A2, which is the
-      mutation justifying two directions rather than one;
+      (5) delete the registration statement outright → **A1, A2, A3 and test 4** (measured 24 pass /
+      4 fail; distinct from (4), which the first draft conflated);
+      (6) wire the handler to a constant `setTelemetryConfig({ enabled: false })` → A2 at its **second**
+      direction, **and** `sdlc/041`'s telemetry-listener test, because the constant lives in the shared
+      `recomputeTelemetryGate` rather than in this branch (measured 26 pass / 2 fail). Revision 1
+      specified the `{ enabled: true }` constant, which dies at direction *one* and takes three tests
+      with it — the wrong mutant for the claim it was carrying;
       (7) change the setting read's `catch` to `settingEnabled = true` → A4's own test.
-      Failing test named per mutation in `review.md`.
+      Failing test named per mutation in `review.md`. **Mutations (1)-(7) were measured by the Stage 2
+      reviewer, not by me.** Stage 4 re-runs all seven rather than inheriting them: someone else's
+      evidence in my document is better than an unmeasured prediction and worse than my own run.
       **These predictions are NOT yet measured** — they cannot be until the tests exist. `sdlc/041`
       stated a mutation-to-criterion mapping it had not run and was wrong twice; this spec labels
       them as predictions and Stage 4 records what actually happened, including any that miss.
@@ -176,9 +201,8 @@ cannot catch, because it reads headings and the file is never named in one.
 - [ ] **A6 — nothing else moved.** All seven vscode test files pass run alone; floors as derived or
       the miss investigated; `bun run verify` exits 0; `.oxlint-budget.json` unchanged.
 
-**Which of these discriminate.** A4 is the evidence base, and its predictions are **still unmeasured**
-— they cannot be run until the tests exist, except (1) and (3), which the Stage 2 reviewer measured
-and which are recorded above as measured. A3 fails against two plausible wrong implementations that
+**Which of these discriminate.** A4 is the evidence base. All seven mutations have now been measured
+by the Stage 2 reviewer against a full implementation of these four tests, and Stage 4 re-runs them. A3 fails against two plausible wrong implementations that
 A2 alone would accept. A1 and A2 are assertions that a working branch works —
 necessary, not sufficient alone.
 
