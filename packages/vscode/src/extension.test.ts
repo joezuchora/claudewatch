@@ -761,17 +761,29 @@ describe('the setting listener', () => {
     // during `activate`, before the listener is ever registered, so a throwing override installed
     // beforehand takes activation itself down with it (measured).
     const { box } = await arm();
+
+    // Captured and restored in a `finally` rather than left to the next `beforeEach`, because this
+    // is the LAST test in the file: a value mutation left on the stub is restored before anything
+    // reads it, but a THROWING leaf is a different class of residue — it would turn any future
+    // module-scope `getConfiguration` in an unrelated file into an import-time throw, and this
+    // file would stay green while that happened. (sdlc/042 Stage 5 security pass)
+    const pristineGetConfiguration = vscodeStub.workspace.getConfiguration;
     // Double assertion because the pristine leaf is a `mock()`, and a bare function does not
-    // structurally satisfy `Mock<...>`. The reset reinstalls the pristine mock afterwards.
+    // structurally satisfy `Mock<...>`.
     vscodeStub.workspace.getConfiguration = (() => {
       throw new Error('this host has no configuration');
     }) as unknown as typeof vscodeStub.workspace.getConfiguration;
 
-    // extension.ts:49-55 catches the read and sets `settingEnabled = null` — the "never widen" half
-    // of SPEC.md:595. Changing that catch to `= true` passes the whole package without this test.
-    box.cb!(configEvent(TELEMETRY));
-    expect(lastGate()).toEqual({ enabled: false });
-    expect(telemetryOverride()).toEqual({ enabled: false });
+    try {
+      // extension.ts:49-55 catches the read and sets `settingEnabled = null` — the "never widen"
+      // half of SPEC.md:595. Changing that catch to `= true` passes the whole package without this
+      // test.
+      box.cb!(configEvent(TELEMETRY));
+      expect(lastGate()).toEqual({ enabled: false });
+      expect(telemetryOverride()).toEqual({ enabled: false });
+    } finally {
+      vscodeStub.workspace.getConfiguration = pristineGetConfiguration;
+    }
   });
 });
 
