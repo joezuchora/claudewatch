@@ -34,12 +34,14 @@
  * pass produced 14+ render lines in the real `~/.cache/claudewatch/metrics-spool.jsonl` that way.
  *
  * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): two of `activate`'s three
- * config-change branches, and the polling timer's scheduling. The third — the telemetry branch of
- * `onDidChangeConfiguration` — was covered as of sdlc/042, and the todo below names the two that
- * remain rather than being deleted, so the count still holds. There is a `test.todo` per gap so `bun test` prints
- * them. `activate`'s `onDidChangeTelemetryEnabled` listener WAS a third gap and is covered as of
- * sdlc/041 — its todo said the branch was dead because the stub omitted the key, which stopped
- * being true when sdlc/039 added it.
+ * config-change branches, and the polling timer's scheduling. There is a `test.todo` per gap so
+ * `bun test` prints them.
+ *
+ * Two branches have come off that list rather than being forgotten, and the todos moved with them.
+ * `activate`'s `onDidChangeTelemetryEnabled` listener was covered by sdlc/041 — its todo said the
+ * branch was dead because the stub omitted the key, which stopped being true when sdlc/039 added
+ * it. The telemetry branch of `onDidChangeConfiguration` was covered by sdlc/042, and its todo was
+ * reworded rather than deleted, to name the two branches that remain.
  *
  * The count below is machine-checked ('the docstring gap count matches the todos'), because this
  * paragraph has drifted before: an earlier revision said "a `test.todo` per gap" while listing three
@@ -775,5 +777,8 @@ describe('the setting listener', () => {
 
 // --- A8: the gaps, printed on every run ---
 
-test.todo('activate: onDidChangeConfiguration for refreshIntervalSeconds (startPolling) and for the two thresholds (updateThresholds)', () => {});
+test.todo(
+  'activate: onDidChangeConfiguration → startPolling (refreshIntervalSeconds) and updateThresholds',
+  () => {},
+);
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
