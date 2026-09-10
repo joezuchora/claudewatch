@@ -33,8 +33,10 @@
  * `emitProcess`, and core's `processConfig` is whatever an earlier test file left — the security
  * pass produced 14+ render lines in the real `~/.cache/claudewatch/metrics-spool.jsonl` that way.
  *
- * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): `activate`'s config-change
- * handlers, and the polling timer's scheduling. There is a `test.todo` per gap so `bun test` prints
+ * NOT COVERED, deliberately (see sdlc/027-extension-tests/spec.md A8): two of `activate`'s three
+ * config-change branches, and the polling timer's scheduling. The third — the telemetry branch of
+ * `onDidChangeConfiguration` — was covered as of sdlc/042, and the todo below names the two that
+ * remain rather than being deleted, so the count still holds. There is a `test.todo` per gap so `bun test` prints
  * them. `activate`'s `onDidChangeTelemetryEnabled` listener WAS a third gap and is covered as of
  * sdlc/041 — its todo said the branch was dead because the stub omitted the key, which stopped
  * being true when sdlc/039 added it.
@@ -639,7 +641,139 @@ describe('the telemetry listener', () => {
   });
 });
 
+type ConfigEvent = { affectsConfiguration(k: string): boolean };
+
+/**
+ * An event reporting exactly ONE key as affected.
+ *
+ * Not an all-false event: that returns false for the telemetry key too, so a guard WIDENED to a
+ * second key survives it. A different-key event is the form that catches both a dropped guard and a
+ * widened one.
+ *
+ * Module-scoped for the same reason `todoLine` is: it captures nothing, and
+ * `unicorn(consistent-function-scoping)` is in the lint budget. Measured — written inside the
+ * describe below it adds a warning and `lintBudget` fails. (The two helpers beside it there do NOT,
+ * because they read `calls`.)
+ */
+const configEvent = (key: string): ConfigEvent => ({
+  affectsConfiguration: (k: string): boolean => k === key,
+});
+
+describe('the setting listener', () => {
+  /**
+   * extension.ts:115-127's telemetry branch — the OTHER half of SPEC.md §10.6 (line 595). sdlc/041
+   * covered the global switch's live re-evaluation; this covers the SETTING's, which is the
+   * direction that leaks: gutting `recomputeTelemetryGate()` out of this branch left all 428 tests
+   * in the repo green while a user who turned the setting off kept emitting until reload.
+   *
+   * THREE setup steps are mandatory, and this loop's spec shipped two drafts each missing one:
+   *
+   *   1. `resetVscodeStub()` FIRST, keeping its return. `configValues` has no other accessor, and a
+   *      reset run AFTER the capture restores the pristine leaf and throws the callback away.
+   *   2. Seed BOTH inputs true. The gate ANDs them against `=== true` and the stub's
+   *      `env.isTelemetryEnabled` defaults to `false`, so without the global seed test 4 asserts
+   *      `{ enabled: false }` against a gate that is already false and goes SILENTLY vacuous —
+   *      measured: the mutation it exists to catch then survives at 28 pass / 0 fail.
+   *   3. Clear `calls` after activating. `activate` calls `recomputeTelemetryGate()` itself
+   *      (extension.ts:72), so an uncleared log already holds one entry and test 3's counts are off
+   *      by one. `start()` would do the same clearing but rebuilds `ctx`, which is why `arm()`
+   *      inlines the sequence instead.
+   */
+  const SENTINEL = { dispose: (): void => {} };
+
+  const TELEMETRY = 'claudewatch.telemetry.enabled';
+
+  /** Overrides the leaf to capture the callback and hand back a disposable we can identify. */
+  function captureConfigListener(): { cb: ((e: ConfigEvent) => void) | undefined } {
+    // Initialised UNDEFINED, not with a no-op: a no-op box makes "the callback is defined" true even
+    // when registration never happened, which is decoration rather than a check.
+    const box: { cb: ((e: ConfigEvent) => void) | undefined } = { cb: undefined };
+    vscodeStub.workspace.onDidChangeConfiguration = ((cb: (e: ConfigEvent) => void) => {
+      box.cb = cb;
+      return SENTINEL;
+    }) as typeof vscodeStub.workspace.onDidChangeConfiguration;
+    return box;
+  }
+
+  /** The three setup steps, in the one order that works. */
+  async function arm(): Promise<{
+    box: { cb: ((e: ConfigEvent) => void) | undefined };
+    config: Record<string, unknown>;
+  }> {
+    const st = resetVscodeStub();
+    st.configValues['telemetry.enabled'] = true;
+    vscodeStub.env.isTelemetryEnabled = true;
+    const box = captureConfigListener();
+    ctx = makeCtx();
+    await activate(ctx as never);
+    await flush();
+    calls = [];
+    return { box, config: st.configValues };
+  }
+
+  const lastGate = (): unknown => calls.findLast((c) => c.name === 'setTelemetryConfig')?.arg;
+  const gateCalls = (): number => calls.filter((c) => c.name === 'setTelemetryConfig').length;
+
+  test('is registered: the disposable it returns lands in context.subscriptions', async () => {
+    const { box } = await arm();
+
+    expect(box.cb).toBeDefined();
+    // IDENTITY, not length — `activate` pushes several disposables and a "did it grow" assertion
+    // survives deleting only this push. Same reasoning as the telemetry-listener suite above.
+    expect(ctx.subscriptions).toContain(SENTINEL);
+  });
+
+  test('an affecting event re-runs the gate, in both directions', async () => {
+    const { box, config } = await arm();
+
+    // Direction 1 — the user turns the setting off mid-session.
+    config['telemetry.enabled'] = false;
+    box.cb!(configEvent(TELEMETRY));
+    expect(lastGate()).toEqual({ enabled: false });
+    expect(telemetryOverride()).toEqual({ enabled: false });
+
+    // Direction 2 — and back on. Its value is what `activate` itself already logged, so it is only
+    // meaningful because direction 1 wrote a DIFFERENT value in between: the assertion cannot be
+    // satisfied by activation's own call surviving in the log.
+    config['telemetry.enabled'] = true;
+    box.cb!(configEvent(TELEMETRY));
+    expect(lastGate()).toEqual({ enabled: true });
+    expect(telemetryOverride()).toEqual({ enabled: true });
+  });
+
+  test('an event affecting a different key does not re-run it', async () => {
+    const { box } = await arm();
+
+    // Positive control, in the same test: without it "zero calls" passes for any reason the fire
+    // did nothing at all, a broken capture included.
+    box.cb!(configEvent(TELEMETRY));
+    expect(gateCalls()).toBe(1);
+
+    calls = [];
+    box.cb!(configEvent('claudewatch.warningThresholdPct'));
+    expect(gateCalls()).toBe(0);
+  });
+
+  test('a setting read that throws is not consent', async () => {
+    // Activate FIRST, override SECOND. `new StatusBarManager` reads config at statusbar.ts:20
+    // during `activate`, before the listener is ever registered, so a throwing override installed
+    // beforehand takes activation itself down with it (measured).
+    const { box } = await arm();
+    // Double assertion because the pristine leaf is a `mock()`, and a bare function does not
+    // structurally satisfy `Mock<...>`. The reset reinstalls the pristine mock afterwards.
+    vscodeStub.workspace.getConfiguration = (() => {
+      throw new Error('this host has no configuration');
+    }) as unknown as typeof vscodeStub.workspace.getConfiguration;
+
+    // extension.ts:49-55 catches the read and sets `settingEnabled = null` — the "never widen" half
+    // of SPEC.md:595. Changing that catch to `= true` passes the whole package without this test.
+    box.cb!(configEvent(TELEMETRY));
+    expect(lastGate()).toEqual({ enabled: false });
+    expect(telemetryOverride()).toEqual({ enabled: false });
+  });
+});
+
 // --- A8: the gaps, printed on every run ---
 
-test.todo('activate: the onDidChangeConfiguration handlers (interval, thresholds, telemetry)', () => {});
+test.todo('activate: onDidChangeConfiguration for refreshIntervalSeconds (startPolling) and for the two thresholds (updateThresholds)', () => {});
 test.todo('startPolling: the interval scheduling and its 30s floor', () => {});
