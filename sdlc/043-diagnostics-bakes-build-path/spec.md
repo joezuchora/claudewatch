@@ -2,8 +2,10 @@
 
 - **ID:** 043-diagnostics-bakes-build-path
 - **Stage:** 2 — Design
-- **Status:** **revision 1**, pending re-review. The first draft was **REJECTED** on three blocking
-  findings, all three confirmed by re-running them here rather than taken on the reviewer's word.
+- **Status:** **revision 2**, pending re-review. Revision 0 was REJECTED on three blocking findings;
+  revision 1 was REJECTED again on four. Every blocking finding in both rounds was confirmed by
+  re-running it here rather than taken on the reviewer's word — and in both rounds the re-run found
+  the reviewer right.
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
@@ -60,10 +62,48 @@ So under that mutation the modal renders the real source path and **A3 fails** �
 it, and it demonstrates nothing about the gate. Revision 1 replaces it with a mutant no unit test can
 observe, and keeps the original as a separate row with a corrected prediction.
 
+### What revision 1 then got wrong
+
+Revision 1 fixed B1's mechanism and was rejected again. Two of the four findings are the **same two
+classes**, which is the point worth recording rather than the individual slips.
+
+**BL-1 and BL-2 — B3 was resolved in wording only.** Revision 1's replacement mutant was
+`const buildStamp = __filename;`, justified as "measured in the sandbox, the parameter fix keeps
+`typecheck` and `lintBudget` green". That list omits **`lint`**, which is `STEPS[1]` in
+`scripts/verify.ts` — five steps before `build`. Measured here:
+
+```
+$ bun run lint     # with `const buildStamp = __filename;`
+packages/vscode/src/commands.ts:5:7: error eslint(no-unused-vars):
+  Variable 'buildStamp' is declared but never used.
+lint exit=1
+
+$ bun run lint     # revision 1's mutation (2): parameter kept, body reverted
+packages/vscode/src/commands.ts:10:39: error eslint(no-unused-vars):
+  Parameter 'extensionPath' is declared but never used.
+lint exit=1
+```
+
+`no-unused-vars` is `correctness`, and `.oxlintrc.json:4` sets `correctness: error`. So **both**
+mutants die at `lint`, and neither one reaches the gate it was written to justify. B3 said the
+mutant was killed by a unit test; revision 1 replaced the killer instead of removing it. The fix is
+one character — `_buildStamp` — measured: `lint` 0, `lintBudget` 0, and the repo root still appears
+once in the built bundle.
+
+**BL-3 — B2 recurred in a different file**, under a heading that read *"Exhaustive — and this time
+the claim is checked rather than asserted"*. `scripts/fence-check.test.ts:696` asserts **exact set
+equality** over the root manifest's resolvable script names. A tracked `scripts/bundle-scan.ts` plus
+a `bundleScan` entry joins that set and reddens it. Same class as B2, same loop, one file over.
+
+**The lesson, stated once.** Three rounds, three instances of the same shape: a claim about what
+*would* happen, written in the register of a measurement, never run. The countermeasure that works is
+not vigilance — it is refusing to write a consequence I have not executed. Revision 2's every
+blocking fix below was run before it was written down.
+
 ## What the measurements decided
 
 Every row was run, in a `mktemp -d` copy where the candidate fix was involved, discarded afterwards.
-Rows marked † were re-measured in revision 1.
+Rows marked † were re-measured in revision 1; rows marked ‡ were measured for revision 2.
 
 | Measured | Result | Consequence |
 |---|---|---|
@@ -76,6 +116,10 @@ Rows marked † were re-measured in revision 1.
 | † Bundle size | **51,613** bytes | The size floor gets a number and a derivation, rather than the phrase "a size floor" |
 | † Is `extensionPath` optional in the API? | `readonly extensionPath: string` at `@types/vscode@1.110.0:8354` — **non-optional** | The unavailable branch is defensive against non-conforming hosts and is **unreachable through `activate`**. Said out loud rather than left for a reader to wonder about |
 | † Is there a `browser` manifest entry? | **absent** | The extension cannot load in a web host, which is why `extensionPath`'s "independent of the uri scheme" caveat cannot bite here. This is the reason the choice is safe, so it is written down |
+| ‡ Does `lint` kill an unrendered `const buildStamp = __filename;`? | **yes** — `no-unused-vars`, `correctness: error` (`.oxlintrc.json:4`), `lint exit=1` | Revision 1's isolating mutant died at `STEPS[1]`, five steps before `build`. **`_buildStamp` instead**: `lint` 0, `lintBudget` 0, repo root still present once in the bundle |
+| ‡ Does `lint` kill revision 1's mutation (2) (parameter kept, body reverted)? | **yes** — `Parameter 'extensionPath' is declared but never used`, `lint exit=1` | A5 is therefore evaluated **per-criterion**, not by running `verify` |
+| ‡ Is `Bun.YAML` available on the pinned runtime? | **yes** — `["parse","stringify"]`, Bun **1.3.11** | A8 becomes a structural assertion over the parsed workflow rather than a grep |
+| ‡ Does `fence-check.test.ts` pin the resolvable script-name set? | **yes** — `:696-705`, exact `toEqual` over seven names | A new `bundleScan` script joins that set and reddens it |
 | Does the stub expose `vscode.extensions`? | **no** | `getExtension()` rejected — it needs a new stub leaf, and it keys on `publisher.name` (`claudewatch`), which the pending `joezuchora` rename would break. `context.extensionPath` depends on neither |
 
 ## Behavior
@@ -96,7 +140,7 @@ narrows rather than asserts, and it removes the cast.
 - **The label is corrected.** `context.extensionPath` is the install **directory**, so
   `**Extension bundle path:**` becomes `**Extension path:**`. Joining `dist/extension.js` onto it was
   rejected: it duplicates the manifest's `main` somewhere that can silently disagree with it.
-- The unreachable `&& cache.snapshot` guard at `:19` stays **verbatim**, per `sdlc/028`.
+- The unreachable `&& cache.snapshot` guard at `:20` stays **verbatim**, per `sdlc/028`. (`:19` is the `readCache()` call; the off-by-one is inherited from `intent.md` and corrected here.)
 
 ### `extension.ts`
 
@@ -104,17 +148,23 @@ narrows rather than asserts, and it removes the cast.
 vscode.commands.registerCommand('claudewatch.diagnostics', () => showDiagnostics(context.extensionPath)),
 ```
 
-A closure, because `registerCommand` passes its own arguments to the callback and a bare reference
-hands `showDiagnostics` whatever VS Code invokes the command with — which, since the parameter is now
-first, means the path would be replaced by a VS Code argument. That failure mode is **total and
-user-visible**: every user would see `(unavailable)` forever. It therefore gets a test (A9), not a
-note.
+A closure, because a bare reference would hand `showDiagnostics` whatever VS Code invokes the command
+with. **The mechanism, corrected in revision 2:** invoked from the Command Palette VS Code passes *no*
+arguments, so `extensionPath` is `undefined` — not "replaced by a VS Code argument", as revision 1
+wrote. The user-visible outcome is the same and it is total: **every** user would see `(unavailable)`
+forever. So A9 stands and mutation (4) still dies; only the stated reason was wrong.
 
-### `SPEC.md` §10.5
+### `SPEC.md` §10.5 and §15.4
 
 Line 581's *"shows the extension bundle path"* becomes the extension's **install path**, **and names
 the unavailable case**. The loop exists because §10.5 described a value the command never produced;
 shipping `(unavailable)` undocumented would be the same shape at smaller scale.
+
+**§15.4 Non-Functional Checks** (line 928) gains one bullet: *"No build-host absolute path in the
+published bundle"*. That section is where this repo's artifact-level invariants live — "No token
+written to logs", "`--debug` output contains no token values" — and this is the same class. Revision 1
+amended §10.5 and was silent on §15.4; silence there would have left the new gate enforcing an
+invariant the spec never states.
 
 ## The gate
 
@@ -127,18 +177,28 @@ Structured as a pure function plus a thin runner, matching `fence-check` and `vs
   offending literals, plus a runner reading `packages/vscode/dist/extension.js`.
 - `scripts/bundle-scan.test.ts` — fixtures and controls.
 
-**`repoRoot = resolve(import.meta.dir, '..')`**, following `scripts/perf.ts:70`. Specified, because
+**`repoRoot = resolve(import.meta.dir, '..')`**, the idiom at `scripts/perf.ts:70` (which uses `join`; same normalisation, named accurately here). Specified, because
 `process.cwd()`, `import.meta.dir` and `git rev-parse --show-toplevel` all differ, and an implementer
 who passed `import.meta.dir` would get `<repo>/scripts` — under which R1 silently never fires and no
 criterion notices.
 
 Two rules, with their patterns written out rather than described:
 
-- **R1 — the repo root.** The bundle must not contain `repoRoot` as a substring. Named "repo root",
-  not "build root": the runner can only know its own location at scan time.
-- **R2 — absolute-path shapes.** No string literal matching `/^(\/[A-Za-z_.]|[A-Za-z]:[\\/])/`. Note
-  the scan reads raw file text, so a Windows path appears as `C:\\Users\\…` with doubled backslashes;
-  the pattern must match the escaped form.
+- **R1 — the repo root.** The bundle must not contain `repoRoot` as a substring, **matched at a `/`
+  boundary and only when `repoRoot.length >= 8`**. Unbounded substring matching would false-positive
+  for a checkout at `/api` or `/opt` against the bundle's own
+  `"https://api.anthropic.com/api/oauth/usage"` — measured present. Named "repo root", not "build
+  root": the runner can only know its own location at scan time.
+- **R2 — absolute-path shapes.** No string literal matching `/^(\/[A-Za-z_.]|[A-Za-z]:[\\/])/`.
+  **The extractor is part of the rule, not left to the implementer:** literals are pulled with a
+  double-quote-aware regex over the raw text, `/"(?:[^"\\]|\\.)*"/g`, with escape handling. Single-quoted
+  and template literals are out of scope because bun normalises to double quotes — measured on the
+  current bundle: **380 double-quoted, 0 single-quoted, 44 backtick spans**. A2(d) pins a fixture for
+  the escaped form so the choice is checked rather than assumed.
+  On Windows paths: `[\\/]` is a character class holding one backslash, so the pattern matches the
+  raw-text escaped form `C:\\Users\\bob` **and** the decoded `C:\Users\bob` **and** `C:/Users/bob`. The
+  pattern needs no change; revision 1's note that it "must match the escaped form" was muddled enough
+  to push an implementer toward `[A-Za-z]:\\\\`, which would then miss the decoded form.
 
 **The limitation, narrowed to what actually remains.** The draft excused `/srv/ci/…` in prose; R2 as
 strengthened catches it, and prose that excuses a fixable gap converts it into an accepted one. What
@@ -152,11 +212,20 @@ than the build root — which is why B1's release-job wiring matters rather than
 2. `.github/workflows/release.yml`'s `package-vscode` job, between *Build VS Code extension* (`:98`)
    and *Package VSIX* (`:102`). This is the one that gates the published artifact.
 
+**The runner's seam.** `bun run scripts/bundle-scan.ts [--bundle <path>] [--root <path>]`, defaulting
+to the resolved bundle and `repoRoot`. Without it, A2(a) and A2(c) could only be satisfied by moving
+or corrupting the shared `dist/`, which a test in this repo must not do — and two implementers would
+resolve that differently.
+
 **The positive precondition.** A grep-for-absent-string is green on an empty set. Before reporting
 success the runner asserts the file exists, is **at least 20,000 bytes** (derived: the measured
 bundle is 51,613, and a stub or truncated write is orders of magnitude smaller; the floor sits well
-below the real value so ordinary growth or shrinkage never trips it), and contains the marker
-`claudewatch.diagnostics`. Missing, truncated or stub is a **failure**, not a pass.
+below the real value so ordinary growth or shrinkage never trips it; note the byte count varies a
+little with checkout path length — a sandbox at `/tmp/tmp.XXXXXXXXXX` measured 51,610), and contains
+the marker `claudewatch.diagnostics`. **Plus a terminal check** — `text.trimEnd().endsWith(';')` or
+the known trailing `module.exports` line — because a 30 KB partial write containing the marker would
+otherwise pass the precondition and then scan half a file, reporting zero vacuously. Missing,
+truncated or stub is a **failure**, not a pass.
 
 **Staleness**, which the intent asked for and the draft silently dropped: inside `verify` and inside
 `package-vscode`, `build` immediately precedes the scan, so a stale `dist/` is unreachable by
@@ -166,8 +235,11 @@ file would be a partial answer wearing a complete one's clothes.
 
 ## Data and types
 
-Exhaustive — and this time the claim is checked rather than asserted. B2 was found by reading
-`env.test.ts`; every other entry below was confirmed by grep against the real files.
+Revision 1 headed this table *"Exhaustive — and this time the claim is checked"* and still missed
+`scripts/fence-check.test.ts`. So: **this list is the set of files I have confirmed the change
+touches, and the two misses so far were both test files that pin a global inventory.** The class is
+now named — *anything asserting an exact set over the repo's scripts, steps or leaves* — and the three
+known members (`env.test.ts`, `fence-check.test.ts`, `vscode-stub-cover.test.ts`) are all present.
 
 | File | Change |
 |---|---|
@@ -179,13 +251,18 @@ Exhaustive — and this time the claim is checked rather than asserted. B2 was f
 | `scripts/bundle-scan.test.ts` | **new** — fixtures, controls, and the step-declaration test |
 | `scripts/verify.ts` | one `STEPS` entry, after `build` |
 | `scripts/env.test.ts` | **added in revision 1 (B2)** — `bundleScan: noop` in the fixture's scripts |
+| `scripts/fence-check.test.ts` | **added in revision 2 (BL-3)** — `bundleScan` joins the resolvable script-name set equality at `:696-705` |
 | `package.json` | the `bundleScan` script |
 | `.github/workflows/release.yml` | **added in revision 1 (B1)** — the scan step in `package-vscode` |
-| `SPEC.md` | §10.5's description, including the unavailable case |
+| `SPEC.md` | §10.5's description including the unavailable case, **and §15.4's new bullet (revision 2)** |
 | `scripts/vscode-stub-cover.test.ts` | `FLOORS['commands.test.ts']` and `FLOORS['extension.test.ts']` |
 
 `verify:plain` (`package.json:20`) is **deliberately not** extended, consistent with `lintBudget` and
-`fenceCheck`, which it also omits. Stated so the omission is a decision rather than an oversight.
+`fenceCheck`, which it also omits. `CLAUDE.md`'s pipeline prose is **deliberately not** updated
+either: line 76 already describes `verify` as "typecheck -> lint -> test -> build" and is stale by
+four steps, and `vscodeStubCover` set the precedent of leaving it. Both stated so the omissions are
+decisions rather than oversights — and both recorded as a follow-up, because a gate list that has
+drifted by five steps is a document nobody can use.
 
 No new `packages/core` export, no stub change, no new `mock.module` call — `mock-topology.test.ts`'s
 inventory does not move.
@@ -214,54 +291,92 @@ inventory does not move.
 
 ## Acceptance criteria
 
+**How A5 is evaluated, stated once.** Per-criterion — each mutation is judged by running the named
+check directly, **not** by running `bun run verify`. Revision 1 left this unsaid, and because `lint`
+is `STEPS[1]` and `build` is `STEPS[7]`, a mutant that trips `lint` short-circuits the gate and never
+reaches the step it was written to exercise. Two of revision 1's six mutations did exactly that.
+
 - [ ] **A1 — the bundle carries no build-host path.** After `build`, `scanBundle` reports **zero**
-      findings under R1 and R2. Falsifiable by construction: A2's fixture pins the pre-fix line.
-- [ ] **A2 — the gate is not vacuous.** Six parts, because the draft's three established only that
-      the *input* was a plausible bundle and nothing about the *scan*:
-      (a) the runner fails on a missing file, on one below the floor, and on one lacking the marker,
-      each with a positive control in the same test;
+      findings under R1 and R2. Falsifiable by construction: A2(e) pins the pre-fix line.
+- [ ] **A2 — the gate is not vacuous.** Seven parts:
+      (a) the runner fails on a missing file, on one below the floor, on one lacking the marker, and
+      on one failing the terminal check — each with a positive control in the same test, driven
+      through `--bundle` against a `mkdtemp` fixture;
       (b) **against the real artifact**: `scanBundle(realText + injected, repoRoot)` reports both a
       `repoRoot`-prefixed literal and a `/Users/nobody/x.ts` literal, while `scanBundle(realText,
       repoRoot)` reports none;
       (c) the runner **exits non-zero** when `scanBundle` returns a non-empty array;
       (d) one fixture per rule branch: a `repoRoot`-prefixed path under a root R2's pattern does not
-      match (**R1-only**), plus `/home/`, `/Users/`, `/tmp/`, `/opt/`, and a doubled-backslash drive
-      prefix (**R2**);
-      (e) the pre-fix leak is pinned as a literal fixture —
-      `var vscode3, __filename = "<abs>/packages/vscode/src/commands.ts"` — so the positive control
-      is a test rather than this document's memory, `dist/` being untracked and overwritten by the fix;
-      (f) the three-part step declaration, per `vscode-stub-cover.test.ts:495-504`: `verify.ts`
-      contains the `STEPS` entry, `package.json` declares the script, `env.test.ts` stubs it.
+      match (**R1-only**), plus `/home/`, `/Users/`, `/tmp/`, `/opt/`, a doubled-backslash drive
+      prefix, and a decoded drive prefix (**R2**); plus one literal written in the escaped form, to
+      pin the extractor rather than assume it;
+      (e) the pre-fix leak pinned as a literal fixture —
+      `var vscode3, __filename = "<abs>/packages/vscode/src/commands.ts"` — so the positive control is
+      a test rather than this document's memory, `dist/` being untracked and overwritten by the fix;
+      (f) the **four**-part step declaration (revision 1 said three, and missed one): `verify.ts`
+      contains the `STEPS` entry, `package.json` declares the script, `env.test.ts` stubs it as
+      `bundleScan: noop`, and `fence-check.test.ts`'s resolvable-script set includes `bundleScan`;
+      (g) R1's boundary condition: a fixture where the repo root appears as a **prefix of a longer
+      path segment** (`/repo` vs `/repository/x`) does **not** match.
 - [ ] **A3 — the command reports what it is given.** `showDiagnostics('/some/install/dir')` puts that
       exact string in the modal, asserted on the captured message, not a mock call count.
 - [ ] **A4 — a missing path is legible.** `undefined`, `''` and `'   '` each render `(unavailable)`
       and none renders the text `undefined`. Both halves asserted.
 - [ ] **A5 — it discriminates.** Six mutations, each **predicted before running**, re-run at Stage 4
-      rather than inherited:
-      (1) **module-scope `const buildStamp = __filename;` in `commands.ts`, never rendered** → **A1
-      only**. This is the mutant that isolates the gate: measured in the sandbox, the parameter fix
-      keeps `typecheck` and `lintBudget` green, and no unit test observes an unrendered constant;
-      (2) revert `const path = __filename` → **A1 and A3** (corrected from the draft's "A1 only",
-      which was false — `__filename` resolves under `bun test`);
+      rather than inherited, and each judged by the named check directly:
+      (1) **module-scope `const _buildStamp = __filename;` in `commands.ts`, never rendered** → **A1
+      only**. The underscore is load-bearing: without it `no-unused-vars` (`correctness: error`)
+      fails `lint` and the mutant never reaches the gate. Measured for revision 2: with `_`,
+      `typecheck`, `lint` **and** `lintBudget` are all green and the repo root still appears once in
+      the built bundle. This is the only mutant that isolates the new gate;
+      (2) revert `const path = __filename` → **`lint` first** (`Parameter 'extensionPath' is declared
+      but never used`), and then **A1 and A3** when those checks are run directly. Revision 0 said
+      "A1 only"; revision 1 said "A1 and A3"; both were incomplete, and the third answer is the one
+      that was run;
       (3) drop the `(unavailable)` fallback → A4;
-      (4) registration back to a bare `showDiagnostics` reference → **A9** — predicted to **DIE**,
-      where the draft predicted SURVIVE and proposed recording it as a known gap;
+      (4) registration back to a bare `showDiagnostics` reference → **A9**, predicted to **DIE**;
       (5) delete the marker check from the runner → A2(a);
-      (6) **delete R1 entirely** → A2(d)'s R1-only fixture. Added because with only real-artifact
-      checks, R1 can be deleted with everything still green.
-      Failing test named per mutation in `review.md`.
+      (6) **delete R1 entirely** → A2(d)'s R1-only fixture.
+      Failing check named per mutation in `review.md`.
 - [ ] **A6 — the documents agree with the code.** `SPEC.md` §10.5 and the modal's label both describe
-      an install path, neither says "bundle path", and §10.5 names the unavailable case.
+      an install path, neither says "bundle path", §10.5 names the unavailable case, and §15.4 carries
+      the new no-build-host-path bullet.
 - [ ] **A7 — the gate holds.** `bun run verify` exits 0 with the new step. `.oxlint-budget.json`
       unchanged. `review.md` records the measured pass/expect counts for both changed test files, and
       the recorded floors equal them.
-- [ ] **A8 — the release path is gated.** `release.yml`'s `package-vscode` job runs `bundleScan`
-      between building the extension and `vsce package`, asserted by a test that greps the workflow.
-      Without this the loop's stated purpose is unmet, whatever `verify` reports.
+- [ ] **A8 — the release path is gated, structurally.** A test parses `.github/workflows/release.yml`
+      with `Bun.YAML.parse` (available on the pinned runtime — measured: Bun 1.3.11, `["parse",
+      "stringify"]`) and asserts, over `jobs['package-vscode'].steps`:
+      (i) a step whose `run` contains `bundleScan` exists;
+      (ii) its index is **strictly greater** than that of the step running
+      `--filter claudewatch-vscode build` and **strictly less** than that of the `vsce package` step;
+      (iii) that step has no `continue-on-error`, and its `run` contains neither `||` nor `; true`.
+      With a **negative control in the same test**: a fixture workflow with the step removed, and one
+      with it placed after `vsce package`, each fails the same predicate.
+      Revision 1 said "asserted by a test that greps the workflow", which
+      `expect(yml).toContain('bundleScan')` satisfies — and which stays green for
+      `bundleScan || true`, for `continue-on-error: true`, for the step in the wrong position, and for
+      the step in the wrong job. A criterion carrying the fix for B1 cannot itself be satisfiable
+      without the property holding.
 - [ ] **A9 — the wiring is covered.** Driven through `activate`, the diagnostics command receives
-      `context.extensionPath`: `extension.test.ts` sets it on `makeCtx()`, invokes
-      `registered.get('claudewatch.diagnostics')`, and asserts the modal contains it. Closes the
-      loop's only otherwise-uncovered product line.
+      `context.extensionPath`: `extension.test.ts` sets it on `makeCtx()`, installs a
+      `showInformationMessage` **sink on the stub** (the file has none today — named here because the
+      criterion pins the other two mechanisms), invokes `registered.get('claudewatch.diagnostics')`,
+      and asserts the modal contains the path.
+      **One thing this drags in, stated rather than discovered:** `activate`'s dynamic
+      `await import('./commands.js')` pulls the **real** `./commands-bridge.js` and so the real
+      `readCache`, which reads `$XDG_CACHE_HOME`/`~/.cache/claudewatch`. `extension.test.ts` mocks
+      `./extension-bridge.js` only. The case therefore pins `XDG_CACHE_HOME` to a `mkdtemp` dir for
+      its duration — the assertion is about the path and would not flake either way, but an unmocked
+      real-filesystem read landing in a file that had none is exactly what `CLAUDE.md`'s isolation
+      rule forbids, and under a whole-suite run which module wins depends on bun load order, the
+      hazard `scripts/mock-topology.ts` documents as its KNOWN LIMIT.
+- [ ] **A10 — the bundle is still CommonJS.** `review.md` records the measured count of
+      `require(`/`module.exports` markers in the built bundle, and it is **> 0**. The intent lists
+      this outcome and revision 1 recorded it under Backward compatibility while declining to check
+      it — leaving an intent outcome with no check at all. This uses A7's mechanism (a recorded
+      measurement) rather than adding a second assertion to the new gate, which is what
+      "Deliberately not done" refuses.
 
 ## Deliberately not done
 
