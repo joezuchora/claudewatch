@@ -2,10 +2,9 @@
 
 - **ID:** 043-diagnostics-bakes-build-path
 - **Stage:** 2 — Design
-- **Status:** **revision 3**, pending re-review. Rejected three times: three blocking findings, then
-  four, then two. Every blocking finding in all three rounds was confirmed by re-running it here, and
-  in all three rounds the re-run found the reviewer right. Nine blocking defects in one spec, none of
-  which would have been cheap to find in a published `.vsix`.
+- **Status:** **revision 4**, pending re-review. Rejected four times: three blocking findings, then four, then two, then two. Every blocking finding in all four rounds was confirmed by
+  re-running it here, and in all four rounds the re-run found the reviewer right. Eleven blocking
+  defects in one spec, none of which would have been cheap to find in a published `.vsix`.
 - **Derived from:** [`intent.md`](./intent.md)
 
 ## Summary
@@ -149,10 +148,48 @@ subsume "stub" — `// stub` parses cleanly. So the size floor and the marker st
 the three checks divide as: **parse** catches truncation, **floor + marker** catch a stub. Revision 3
 says so instead of repeating the reviewer's "subsumes truncated, stub and half a file".
 
+### What revision 3 then got wrong
+
+Two blocking findings, both narrow, neither re-litigating B-1 or B-2 (independently re-measured and
+confirmed fixed).
+
+**BL-1 — A2(b) reads the built bundle, and `bun test` runs *before* `build`.** `STEPS` is
+`… test[5], build[6], perf[7]`, and `dist/` is gitignored (`.gitignore:5`). On a clean checkout —
+which is all CI ever has — `packages/vscode/dist/extension.js` **does not exist when `bun test`
+runs**. A2(b) as a test would be red in CI, or vacuous if an implementer wrapped it in
+`if (!existsSync) return`.
+
+This repo has paid for this twice and wrote both receipts down:
+
+- `scripts/perf.test.ts:18-26` — *"`verify` runs `test` BEFORE `build`, and `dist/` is gitignored…
+  It passed locally only because a binary was already sitting there from an earlier build… **CI found
+  it on the first clean run.**"*
+- `packages/statusline/src/smoke.test.ts:52-58` — *"**STALE, not merely ABSENT.** This used to rebuild
+  only when the binary was missing… every case here asserted against a binary compiled from some
+  earlier source state."*
+
+A2(b) now carries the stronger of the two preambles, and the fix is specified below rather than left
+to an implementer who would have had to rediscover both incidents.
+
+**BL-2 — A2(a) still required "the terminal check", the mechanism revision 3 deleted.** The design
+section replaced it with a parse check and explained at length why; the criterion was never updated.
+An implementer building to A2(a) literally would have reimplemented B-2 and redded the gate on every
+correct build. A criterion naming a deleted, known-broken mechanism is the same defect class round
+three rejected.
+
+**And one defect the reviewer could not have found: two-thirds of revision 3's evidence was not in
+revision 3.** The six measurement rows its commit message describes were never written to the file.
+The edit script anchored on `| ‡ Does the stub expose…` where the line carries no `‡`, and Python's
+`str.replace` silently no-ops on a missing substring while the script printed `ok`. I checked the
+acceptance criteria back by grep and did not check the table. `sdlc/041` committed a false message
+the same way and drew the rule *"verify edits by reading the artifact back, never by trusting an edit
+tool's success message"* — which I followed for one section of the file and not another. The rows are
+in revision 4, and every edit in this revision asserts its anchor count before replacing.
+
 ## What the measurements decided
 
 Every row was run, in a `mktemp -d` copy where the candidate fix was involved, discarded afterwards.
-Rows marked † were re-measured in revision 1; rows marked ‡ were measured for revision 2; rows marked § for revision 3.
+Rows marked † were re-measured in revision 1; rows marked ‡ were measured for revision 2; § for revision 3; ¶ for revision 4.
 
 | Measured | Result | Consequence |
 |---|---|---|
@@ -169,6 +206,14 @@ Rows marked † were re-measured in revision 1; rows marked ‡ were measured fo
 | ‡ Does `lint` kill revision 1's mutation (2) (parameter kept, body reverted)? | **yes** — `Parameter 'extensionPath' is declared but never used`, `lint exit=1` | A5 is therefore evaluated **per-criterion**, not by running `verify` |
 | ‡ Is `Bun.YAML` available on the pinned runtime? | **yes** — `["parse","stringify"]`, Bun **1.3.11** | A8 becomes a structural assertion over the parsed workflow rather than a grep |
 | ‡ Does `fence-check.test.ts` pin the resolvable script-name set? | **yes** — `:696-705`, exact `toEqual` over seven names | A new `bundleScan` script joins that set and reddens it |
+| § Does revision 2's escape-aware extractor find the leak? | **no — 0 R2 hits** on the leaking bundle; 239 of 380 spans mis-paired. Line-scoped `/"[^"\n]*"/g` finds **1** | B-1. The extractor is the rule |
+| § Terminal check `trimEnd().endsWith(';')` | **false** — the bundle ends `…writeCache2(envelope);\n}`; last `module.exports` at 74% | B-2. Replaced with a parse check |
+| § `Bun.Transpiler().transformSync` on the bundle / `slice(0,30000)` / `// stub` | **parses / throws / parses** | Catches truncation, **not** a stub — floor and marker stay load-bearing |
+| § **A2(b) run against the real artifact**, corrected extractor | real+injected → the leak, the injected `repoRoot` literal, `/Users/nobody/x.ts` and `[R1]`; real alone → the leak and `[R1]` | A2(b) is **measured**, not predicted |
+| § R1 predicate on a real-length root | `/tmp/checkout-2/x.ts` → **false**; `/tmp/checkout/x.ts` → **true**; bare `/tmp/checkout` → **true** | M-1/M-2 of round three: the boundary works and a bare root is caught |
+| § Does R2 match the `/9build/checkout` root? | **no** | The R1-only fixture root, pinned literally |
+| ¶ Does `slice(0,30000)` isolate the **parse** branch? | **no** — the marker first appears at byte **47450**, so that fixture fails the *marker* check. `slice(0,48000)`: 48,018 bytes, marker present, parse **throws** | The round-four reviewer proposed `slice(0,30000)`; measured, it tests the wrong branch. A2(a)'s fixture is `slice(0,48000)` |
+| ¶ Bundle size units | `Buffer.byteLength` **51,613**; `text.length` **51,595** | Both numbers in this document were right and meant different things. The floor is stated in `Buffer.byteLength` |
 | Does the stub expose `vscode.extensions`? | **no** | `getExtension()` rejected — it needs a new stub leaf, and it keys on `publisher.name` (`claudewatch`), which the pending `joezuchora` rename would break. `context.extensionPath` depends on neither |
 
 ## Behavior
@@ -205,8 +250,12 @@ forever. So A9 stands and mutation (4) still dies; only the stated reason was wr
 
 ### `SPEC.md` §10.5 and §15.4
 
-Line 581's *"shows the extension bundle path"* becomes the extension's **install path**, **and names
-the unavailable case**. The loop exists because §10.5 described a value the command never produced;
+Line 581's *"shows the extension bundle path"* is replaced by this **exact sentence**, written here
+so A6 can assert it rather than assert whatever an implementer happened to type:
+
+> `ClaudeWatch: Diagnostics` — shows the extension's install path on this machine (or `(unavailable)`
+> if the host does not supply one) and the formatter's output for the cached snapshot, in a modal.
+> Registered as `claudewatch.diagnostics`. The loop exists because §10.5 described a value the command never produced;
 shipping `(unavailable)` undocumented would be the same shape at smaller scale.
 
 **§15.4 Non-Functional Checks** (line 928) gains one bullet: *"No build-host absolute path in the
@@ -222,8 +271,11 @@ it into a literal. So the check reads the built artifact.
 
 Structured as a pure function plus a thin runner, matching `fence-check` and `vscode-stub-cover`:
 
-- `scripts/bundle-scan.ts` — `scanBundle(text: string, repoRoot: string): string[]` returning the
-  offending literals, plus a runner reading `packages/vscode/dist/extension.js`.
+- `scripts/bundle-scan.ts` — `scanBundle(text: string, repoRoot: string): Array<{ rule: 'R1' | 'R2'; literal: string }>`,
+  plus a runner reading `packages/vscode/dist/extension.js`. **The findings carry their rule**, which
+  revision 3's bare `string[]` did not: without it A2(g) is unsatisfiable, because its R1-only fixture
+  `"/tmp/checkout-2/x.ts"` correctly fails R1 *and* correctly matches R2, so an `toEqual([])`
+  assertion would fail against a correct implementation.
 - `scripts/bundle-scan.test.ts` — fixtures and controls.
 
 **`repoRoot = resolve(import.meta.dir, '..')`**, the idiom at `scripts/perf.ts:70` (which uses `join`; same normalisation, named accurately here). Specified, because
@@ -238,6 +290,11 @@ Two rules, with their patterns written out rather than described:
   text.endsWith(root)`. The middle term is what catches a **bare root with no trailing segment**,
   which a follow-must-be-`/` reading would miss. Measured: sibling `/tmp/checkout-2/x.ts` → no match,
   `/tmp/checkout/x.ts` → match, bare `/tmp/checkout` → match.
+  **The root is normalised with `toPosix`** (`scripts/fence-check.ts:97` already exports it, its
+  docstring recording that a mutation proved it load-bearing): on a Windows checkout `repoRoot` is
+  `C:\Users\bob\claudewatch` while the bundle carries `/` or `\\`, so an un-normalised R1 could never
+  fire there — the same silent disable A2(h) exists to make loud. R2 still catches a Windows leak, so
+  this narrows rather than holes the gate, and revision 4 fixes it rather than noting it.
   The `repoRoot.length >= 8` floor stays, but when it disables R1 the runner **fails loudly** rather
   than passing — revision 2 reintroduced as a bounds check exactly the silent no-op it invokes
   `repoRoot`'s pinning to prevent. Unbounded substring matching would false-positive
@@ -260,9 +317,26 @@ Two rules, with their patterns written out rather than described:
 
 **The limitation, narrowed to what actually remains.** The draft excused `/srv/ci/…` in prose; R2 as
 strengthened catches it, and prose that excuses a fixable gap converts it into an accepted one. What
-genuinely remains: paths assembled by concatenation at runtime, encoded forms, and non-literal leaks.
+genuinely remains: paths assembled by concatenation at runtime, encoded forms, non-literal leaks, and
+— because R2 is **anchored** — an absolute path embedded *inside* a longer literal, e.g.
+`"failed to open /home/runner/work/claudewatch/x"`, which R1 catches only when it is under the scan
+root. (Revision 3's commit claimed this paragraph; the edit silently no-opped and it is landing now.)
+The anchor is kept deliberately: unanchored, the same rule returns three false positives on a correct
+bundle — `"application/json"` and two `https://` URLs.
+A path inside a literal containing an escaped quote is also missed, per the line-scoped extractor's
+stated trade.
 Also, for any `dist/` not built by the same invocation, R1 compares against the **scan** root rather
 than the build root — which is why B1's release-job wiring matters rather than being optional.
+
+**What a contributor does when R2 fires on a legitimate literal**, stated because an inescapable gate
+is an operational problem waiting to happen: R2 has **no allowlist**, deliberately — measured zero
+matching literals today. If a future route constant or `"/usr/bin/env"` trips it, the remedy is to
+narrow R2's pattern in `bundle-scan.ts`, with a comment naming the literal and why it is safe, in the
+same commit. Not a per-file suppression, and not a blanket disable.
+
+**Sourcemaps.** `packages/vscode/dist/` holds exactly one file and the build emits no sourcemap, so
+scanning `extension.js` covers the `.vsix`'s code today. Add `--sourcemap` and a single-file scan
+misses `extension.js.map`, whose `sources` array is a list of build-host paths.
 
 **Where it runs — both places, because there are two.**
 
@@ -278,8 +352,11 @@ resolve that differently.
 **The positive precondition.** A grep-for-absent-string is green on an empty set. Before reporting
 success the runner asserts the file exists, is **at least 20,000 bytes** (derived: the measured
 bundle is 51,613, and a stub or truncated write is orders of magnitude smaller; the floor sits well
-below the real value so ordinary growth or shrinkage never trips it; note the byte count varies a
-little with checkout path length — a sandbox at `/tmp/tmp.XXXXXXXXXX` measured 51,610), and contains
+below the real value so ordinary growth or shrinkage never trips it; the count is
+**`Buffer.byteLength`**, 51,613 today — `text.length` is 51,595, and both numbers appear in this
+document meaning different things, so the unit is pinned rather than left for the fixture author and
+the runner to disagree about. It also varies slightly with checkout path length: a sandbox at
+`/tmp/tmp.XXXXXXXXXX` measured 51,610), and contains
 the marker `claudewatch.diagnostics`. **Plus a parse check** — `new Bun.Transpiler({ loader: 'js' }).transformSync(text)`, which is
 parse-only and executes nothing — because a 30 KB partial write containing the marker would otherwise
 pass the precondition and then scan half a file, reporting zero vacuously. Measured: the full bundle
@@ -301,9 +378,15 @@ Revision 1 headed this table *"Exhaustive — and this time the claim is checked
 `scripts/fence-check.test.ts`. So: **this list is the set of files I have confirmed the change
 touches, and the two misses so far were both test files that pin a global inventory.** The class is
 now named — *anything asserting an exact set over the repo's scripts, steps or leaves* — and its
-**four** known members are all present: `env.test.ts`, `fence-check.test.ts`,
+**four** known test-file members are all present: `env.test.ts`, `fence-check.test.ts`,
 `vscode-stub-cover.test.ts`, and `mock-topology.test.ts`, the fourth found in round three after the
-class had already been named. Naming a class is not the same as enumerating it.
+class had already been named. Naming a class is not the same as enumerating it. Round four's reviewer
+enumerated the tree independently and found **no fifth test file**; the other exact-set assertions
+(`exhaustive-guard.test.ts:102`, `deploy/env-file.test.ts:244`) are not reachable from this change.
+**The class has one non-test member**, listed here rather than left under another heading:
+**`.oxlint-budget.json`**, an exact bidirectionally-compared inventory over the whole repo, which two
+new files can move through any `suspicious` or `perf` warning (`.oxlintrc.json:4-6` sets both to
+`warn`).
 
 **`sdlc/fence-baseline.json` is measured, not left unexamined.** `compareToBaseline`
 (`scripts/fence-check.ts:528-535`) fails on any inequality of `uncheckable` and `unresolvedSymbols`.
@@ -314,12 +397,12 @@ as `uncheckable`, 13 → 14, and `verify` goes red.
 
 | File | Change |
 |---|---|
-| `packages/vscode/src/commands.ts` | signature, `const path`, the label, the `(unavailable)` branch |
+| `packages/vscode/src/commands.ts` | signature, `const path`, the label, the `(unavailable)` branch, **and the `:8` JSDoc** (revision 4, M-4) |
 | `packages/vscode/src/extension.ts` | the registration closure — one line |
 | `packages/vscode/src/commands.test.ts` | four call sites gain an argument; new cases for A3/A4 |
 | `packages/vscode/src/extension.test.ts` | **added in revision 1** — A9 drives the command through `activate` |
 | `scripts/bundle-scan.ts` | **new** — `scanBundle` plus the runner |
-| `scripts/bundle-scan.test.ts` | **new** — fixtures, controls, and the step-declaration test |
+| `scripts/bundle-scan.test.ts` | **new** — fixtures, controls, the four-part step declaration, **and A6's doc assertions and A8's `release.yml` structural test** (revision 4, M-5). Both live here in `scripts/` deliberately: a new `*.test.ts` under `packages/vscode/src/` would redden `vscode-stub-cover.test.ts:91-93`, whose `FLOORS` key set is compared in both directions |
 | `scripts/verify.ts` | one `STEPS` entry, after `build` |
 | `scripts/env.test.ts` | **added in revision 1 (B2)** — `bundleScan: noop` in the fixture's scripts |
 | `scripts/fence-check.test.ts` | **added in revision 2 (BL-3)** — `bundleScan` joins the resolvable script-name set equality (test opens `:696`, the list runs `:699-707`) |
@@ -372,14 +455,31 @@ reaches the step it was written to exercise. Two of revision 1's six mutations d
       findings under R1 and R2. Falsifiable by construction: A2(e) pins the pre-fix line.
 - [ ] **A2 — the gate is not vacuous.** Eight parts:
       (a) the runner fails on a missing file, on one below the floor, on one lacking the marker, and
-      on one failing the terminal check — each with a positive control in the same test, driven
-      through `--bundle` against a `mkdtemp` fixture;
-      (b) **against the real artifact — and this one is measured, not predicted** (revision 2 asserted
-      it and it was false under revision 2's extractor): `scanBundle(realText + injected, repoRoot)`
-      reports the injected `repoRoot`-prefixed literal **and** `/Users/nobody/x.ts`, and after the
-      product fix `scanBundle(realText, repoRoot)` reports none. Run against the pre-fix bundle it
-      reports the real leak plus `[R1]`, which is the criterion's positive control;
-      (c) the runner **exits non-zero** when `scanBundle` returns a non-empty array;
+      on one failing **the parse check** — each with a positive control in the same test, driven
+      through `--bundle` against a `mkdtemp` fixture. The parse fixture is **`realText.slice(0, 48000)`**,
+      measured: 48,018 bytes (clears the floor), marker present, parse throws — so the parse branch is
+      the only thing that can fail it. The round-four reviewer proposed `slice(0, 30000)`; measured,
+      the marker first appears at byte **47450**, so that fixture fails the *marker* check and tests
+      the wrong branch;
+      (b) **against the real artifact**, as a test with a staleness-aware preamble — **not** merely a
+      Stage-4 measurement: `scanBundle(realText + injected, repoRoot)` reports the injected
+      `repoRoot`-prefixed literal **and** `/Users/nobody/x.ts`, while `scanBundle(realText, repoRoot)`
+      reports none. The injection half is the durable positive control; the pre-fix bundle is **not**,
+      because it stops existing the moment the fix builds, which is why A2(e) pins its line as a
+      fixture instead.
+      **The preamble is mandatory and its shape is specified**, because `bun test` is `STEPS[5]` and
+      `build` is `STEPS[6]` with `dist/` gitignored: in `beforeAll`, rebuild when
+      `packages/vscode/dist/extension.js` is **absent OR older than the newest `.ts` under
+      `packages/vscode/src` and `packages/core/src`** — `smoke.test.ts:52-58`'s shape, not
+      `perf.test.ts`'s absent-only one, which `sdlc/030`'s security pass found asserting against a
+      stale artifact — via `spawnSync('bun', ['run','--filter','claudewatch-vscode','build'], { cwd: REPO })`,
+      throwing a **named** error on non-zero. `@claudewatch/core` exports `src/index.ts`, so no core
+      build is needed first;
+      (c) the runner **exits non-zero** when `scanBundle` returns a non-empty array — with a fixture
+      that **clears the floor, the marker and the parse check** (pad with a comment block), and
+      asserting both the exit code **and** that the offending literal appears in the output. Without
+      that, a 200-byte fixture containing a leak satisfies (c) via the size floor while the
+      exit-on-findings path never runs;
       (d) one fixture per rule branch. The **R1-only** fixture root is pinned literally as
       **`/9build/checkout`** — measured not to match R2, because every natural root (`/home/…`,
       `/tmp/…`, `/Users/…`, `/opt/…`) matches R2 too, so a fixture built from one is not R1-only and
@@ -398,7 +498,9 @@ reaches the step it was written to exercise. Two of revision 1's six mutations d
       the expected array is updated, or the failure arrives with a misleading diff;
       (g) R1's boundary condition, with a root **above** the length floor so the rule is actually
       running: root `/tmp/checkout`, bundle text containing `/tmp/checkout-2/x.ts` asserted **not** to
-      match, and `/tmp/checkout/x.ts` asserted to match **in the same test**. Revision 2's fixture used
+      match **under R1** — `expect(findings.filter(f => f.rule === 'R1')).toEqual([])`, not
+      `toEqual([])`, since that literal legitimately matches R2 — and `/tmp/checkout/x.ts` asserted to
+      produce an R1 finding **in the same test**. Revision 2's fixture used
       `/repo` — five characters, below the `>= 8` floor — so it passed because R1 was switched off,
       and could not have failed;
       (h) the runner **fails loudly** when the length floor disables R1, rather than reporting success.
@@ -426,8 +528,13 @@ reaches the step it was written to exercise. Two of revision 1's six mutations d
       acquired a mechanical check.
       Failing check named per mutation in `review.md`.
 - [ ] **A6 — the documents agree with the code, mechanically.** A test asserts: `SPEC.md` contains
-      §10.5's new sentence and §15.4's new bullet, and does **not** contain `extension bundle path`;
-      `packages/vscode/src/commands.ts` does not contain `Extension bundle path`. Revisions 0-2 stated
+      §10.5's exact new sentence and §15.4's new bullet, and does **not** contain
+      `extension bundle path`; `packages/vscode/src/commands.ts` does not contain it either.
+      **Both assertions are case-INSENSITIVE**, because `grep -rn -i` over tracked non-`sdlc/` files
+      returns three hits, not two: `SPEC.md:581`, `commands.ts:32` (the modal label), and
+      **`commands.ts:8`** — the JSDoc `* Print diagnostics: extension bundle path and formatter
+      output.`, lowercase. A capital-`E` reading ships that stale docstring in the loop whose premise
+      is a document describing a value the code does not produce. Revisions 0-2 stated
       A6 as prose to be read — which is the shape `scripts/lint-budget.ts`'s own docstring rejects
       ("a criterion the gate cannot run is a note, not a check"), and it was the *one* criterion
       without a check in the loop that exists **because** §10.5 described a value the command never
@@ -444,11 +551,12 @@ reaches the step it was written to exercise. Two of revision 1's six mutations d
       (iii) that step has no `continue-on-error` and **no `if` key**, its `run` contains neither `||`
       nor `; true`, and `jobs['package-vscode']` itself has no `continue-on-error` — either of the
       last two neuters the gate while passing (i) and (ii).
-      **Four** negative controls, because revision 2 supplied two and both exercised (i) and (ii)
-      only, leaving (iii) deletable with the test still green — the same unfalsifiable-assertion
-      defect that got A8 rejected, one clause down: fixtures with the step **removed**, **after
-      `vsce package`**, carrying **`continue-on-error: true`**, and carrying **`|| true`**, each
-      failing the predicate.
+      **Seven** negative controls, one per clause. Revision 2 supplied two (both exercising (i) and
+      (ii)); revision 3 added two more and simultaneously added three new clauses, leaving those three
+      deletable with the test still green — the same unfalsifiable-assertion defect, two rounds
+      running. The fixtures: step **removed**, step **after `vsce package`**, step-level
+      **`continue-on-error: true`**, **`|| true`**, **`; true`**, **`if: false`** on the step, and
+      **`continue-on-error: true` on the job**. Each must fail the predicate.
       Implementation notes, measured: `Bun.YAML.parse` yields `jobs['package-vscode'].steps` as an
       array where `run` is a string on the six `run` steps and **`undefined` on the three `uses`
       steps**, so the predicate must be `typeof s.run === 'string' && s.run.includes(...)` or it
@@ -479,10 +587,14 @@ reaches the step it was written to exercise. Two of revision 1's six mutations d
       `setCacheBaseDir` would win over it. The env pin is nonetheless correct here, because reaching
       `setCacheBaseDir` from `extension.test.ts` would create a new direct core consumer outside the
       bridge arrangement.
-- [ ] **A10 — the bundle is still CommonJS.** `review.md` records the measured marker count **and**
-      the check asserts `module.exports` specifically. "`require(` or `module.exports`, > 0" is
-      weaker than the property: an ESM bundle can emit `require(` via `createRequire`, whereas bun's
-      ESM output never emits `module.exports`. The intent lists
+- [ ] **A10 — the bundle is still CommonJS**, as a **recorded measurement**, not an automated check —
+      `CLAUDE.md` treats this as the one manual step, and a test reading `dist/` would walk into
+      BL-1's ordering trap. `review.md` records the output of
+      `grep -c 'module.exports' packages/vscode/dist/extension.js` and it is **>= 1**. Asserting
+      `module.exports` specifically rather than the 14-marker total: an ESM bundle can emit `require(`
+      via `createRequire`, but bun's ESM output never emits `module.exports`. Measured today:
+      `module.exports` × 1, `require(` × 13 = the 14 the spec cites. Revision 3 said "the check",
+      contradicting "Deliberately not done" one section later. The intent lists
       this outcome and revision 1 recorded it under Backward compatibility while declining to check
       it — leaving an intent outcome with no check at all. This uses A7's mechanism (a recorded
       measurement) rather than adding a second assertion to the new gate, which is what
