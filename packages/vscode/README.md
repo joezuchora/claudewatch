@@ -21,6 +21,52 @@ Both tiers use color-coded thresholds: default (< 70%), warning/yellow (70-89%),
 
 Hover over the status bar item for a detailed tooltip. Click it to open the Anthropic usage dashboard.
 
+
+## Telemetry
+
+**Off by default. There is no default destination, and nothing is collected unless you turn
+it on and point it somewhere you host.**
+
+VS Code's global telemetry setting always wins. If `telemetry.telemetryLevel` is `off`,
+ClaudeWatch collects nothing regardless of its own setting — the extension's setting can only
+ever narrow, never widen. Turning the global setting off takes effect immediately, without a
+reload.
+
+### What is collected, when you enable it
+
+Health signals about the extension itself:
+
+| Field | Example values |
+|---|---|
+| Surface | `statusline`, `vscode` |
+| Runtime state | `Healthy`, `Stale`, `Degraded`, `AuthInvalid`, … |
+| Account tier | `standard`, `enterprise`, `unknown` |
+| Utilization bucket | a decile — `0`–`10`, never the exact percentage |
+| Fetch outcome | `2xx`, `4xx`, `5xx`, `network`, `timeout`, and an attempt count |
+| Cache outcome | `hit`, `miss`, `corruptJson`, `versionMismatch`, … |
+| Durations | milliseconds |
+
+### What cannot be collected
+
+Not "is not" — **cannot be**. Every payload field is a number, a boolean, or a value from a
+fixed list, so there is no field capable of carrying free text:
+
+- No access or refresh token
+- No file path, hostname, username, or machine identifier
+- No project or workspace name
+- No account identifier, and **no enterprise credit amounts** — your billing position is not
+  a health signal, so only the tier and a decile are recorded
+- No exact utilization percentage
+
+### Where it goes
+
+Nowhere, by itself. The extension appends metrics to a local file. A separate agent **you**
+run ships them to a metrics service **you** host — see
+[`deploy/`](https://github.com/joezuchora/claudewatch/tree/main/deploy). ClaudeWatch never
+opens a network connection to anything but Anthropic's documented usage endpoint.
+
+Full detail: [SECURITY.md](https://github.com/joezuchora/claudewatch/blob/main/SECURITY.md).
+
 ## Requirements
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in

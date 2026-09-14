@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-
+import { readCache, formatTooltip } from './commands-bridge.js';
+import type { CacheEnvelope } from './commands-bridge.js';
 
 const DASHBOARD_URL = 'https://claude.ai/settings/usage';
 
@@ -7,15 +8,17 @@ const DASHBOARD_URL = 'https://claude.ai/settings/usage';
  * Print diagnostics: extension bundle path and formatter output.
  */
 export async function showDiagnostics(): Promise<void> {
-  const vscode = await import('vscode');
-  const core = await import('@claudewatch/core');
   const path = __filename;
-  let cache: any = null;
+  // `CacheEnvelope | null` is readCache's actual return type. The `&& cache.snapshot` guard below
+  // is unreachable under it — CacheEnvelope.snapshot is non-nullable — and is RETAINED verbatim
+  // anyway: deleting it would change what showDiagnostics displays, which sdlc/028's intent scopes
+  // out. The no-cache case reaches that branch via `cache === null` only.
+  let cache: CacheEnvelope | null = null;
   let formatted = '';
   try {
-    cache = core.readCache();
+    cache = readCache();
     if (cache && cache.snapshot) {
-      formatted = core.formatTooltip(cache.snapshot);
+      formatted = formatTooltip(cache.snapshot);
     } else {
       formatted = 'No cache or snapshot found.';
     }

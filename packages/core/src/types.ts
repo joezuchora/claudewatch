@@ -17,7 +17,14 @@ export interface EnterpriseUsage {
 }
 
 export interface UsageSnapshot {
-  fetchedAt: string; // ISO timestamp, always UTC
+  // ISO timestamp, always UTC — with ONE documented exception. `readCacheResult` substitutes
+  // `UNKNOWN_FETCHED_AT` ('unknown') for a value off disk it cannot parse, rather than deleting the
+  // envelope and the cooldown with it (sdlc/031). So a snapshot that came from the CACHE may carry
+  // a non-ISO sentinel here; one that came from `normalize()` never does. Every reader handles it:
+  // `formatLocalTime` renders the literal 'unknown', `isCacheFresh` returns false, `detectClockSkew`
+  // returns false (though it has no production caller today), and `printDebug`'s age arithmetic serialises to null. SPEC.md §11.4 and §14
+  // record the same exception against `--json`.
+  fetchedAt: string;
   source: {
     usageEndpoint: 'success' | 'failed' | 'unavailable';
   };
@@ -25,9 +32,10 @@ export interface UsageSnapshot {
   tier: AccountTier;
   fiveHour: UsageWindow;
   sevenDay: UsageWindow;
+  sevenDayOpus: UsageWindow;
   enterprise: EnterpriseUsage | null;
   display: {
-    primaryWindow: 'fiveHour' | 'sevenDay' | 'enterprise' | 'unknown';
+    primaryWindow: 'fiveHour' | 'sevenDay' | 'sevenDayOpus' | 'enterprise' | 'unknown';
     primaryUtilizationPct: number | null;
     primaryResetsAt: string | null;
   };
@@ -61,6 +69,8 @@ export type FailureClass =
   | 'notConfigured'
   | 'authInvalid'
   | 'serviceUnavailable'
+  /** The 5s hard timeout specifically, as distinct from an unreachable endpoint (sdlc/010). */
+  | 'timeout'
   | 'malformedResponse'
   | 'unexpectedFailure';
 
@@ -74,7 +84,7 @@ export interface CacheEnvelope {
   cooldownUntil: string | null; // ISO timestamp or null
   lastErrorClass: FailureClass | null;
   lastHttpStatus: number | null; // HTTP status code of last failed fetch
-  lastErrorMessage: string | null; // Human-readable error message
+  lastErrorMessage: SurfaceableMessage | null; // A closed-set message; see SurfaceableMessage
 }
 
 // === API Response Types (SPEC.md §3.2) ===
@@ -127,11 +137,61 @@ export interface FetchSuccess {
   data: unknown;
 }
 
+/**
+ * Every message a fetch failure may carry, as a closed set.
+ *
+ * SPEC.md §12 requires redaction from all surfaced errors. Before sdlc/029 that clause held by
+ * accident: the HTTP messages happened to be constants, and the one uncontrolled string —
+ * `err.message` on the network path — happened to be generic on this runtime. `client.ts:180`
+ * already called that string "exactly the free text the telemetry allowlist exists to keep out",
+ * and four lines later it was assigned here, persisted to the cache as `lastErrorMessage`, and
+ * rendered in the VS Code tooltip. The guard existed on one path and not the other.
+ *
+ * Narrowing this field makes a free-text producer a COMPILE error rather than something a test has
+ * to remember to catch. `typefixtures/free-text-message.expect-error.ts` freezes the negative
+ * control. `isSurfaceableMessage` re-checks the same set at the cache-read boundary
+ * (`readCacheResult`), where a type cannot help because the value comes off disk.
+ *
+ * CORRECTED by sdlc/030: this said "at the cache-read boundary" while the predicate actually ran in
+ * `extractLastError`, a CONSUMER. Two other consumers — the statusline's two `--debug` sites — never
+ * called it, so a pre-029 cache file still printed free text. The check now runs where the value
+ * enters the program, and this sentence is true.
+ */
+export type SurfaceableMessage =
+  | 'Authentication failed (401)'
+  | 'Rate limited (429)'
+  | 'Network error'
+  | 'Request timed out'
+  | 'Malformed response'
+  | 'TLS verification failed'
+  | `Server error (${number})`
+  | `Unexpected status ${number}`;
+
+/**
+ * The three members a THROWN fetch can produce, as opposed to an HTTP response.
+ *
+ * A subset, declared with `Extract` rather than as its own union, so it cannot drift from
+ * `SurfaceableMessage` and cannot widen it. `packages/metrics` consumes this and nothing else:
+ * `'Authentication failed (401)'`, `'Rate limited (429)'` and `` `Server error (${number})` `` are
+ * HTTP outcomes the shipper reports as `{ kind: 'http', status }`, and admitting them here would be
+ * two representations of one fact.
+ *
+ * `SurfaceableMessage` itself is NOT to be widened for a shipping-only message. It is load-bearing
+ * for SPEC.md §12's cache-read boundary and frozen by three separate mechanisms — the
+ * `free-text-message` type fixture, `isSurfaceableMessage`, and `exhaustive-guard.test.ts`'s count
+ * assertion. If the shipper ever needs a message of its own, `packages/metrics` declares its own
+ * union at that point. (sdlc/036 m-1)
+ */
+export type TransportMessage = Extract<
+  SurfaceableMessage,
+  'Network error' | 'TLS verification failed' | 'Request timed out'
+>;
+
 export interface FetchFailure {
   ok: false;
   status: number | null; // null for network errors
   failureClass: FailureClass;
-  message: string;
+  message: SurfaceableMessage;
 }
 
 export type FetchResult = FetchSuccess | FetchFailure;

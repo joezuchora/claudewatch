@@ -89,6 +89,8 @@ The binary reads the file-backed cache, returns formatted output to stdout, and 
 
 ### 2.4 Session Data
 
+Session JSON is read from stdin under a bounded deadline (250 ms, overridable via `CLAUDEWATCH_STDIN_TIMEOUT_MS`). Descriptor type is **not** used to decide whether reading is safe: libuv creates child stdio pipes as UNIX domain sockets, so the session channel and a descriptor that will never be written are indistinguishable by type. A stdin that delivers nothing within the deadline degrades to plain output, which is an already-supported state. Amended 2026-08-26 (`sdlc/005-statusline-tty-stdin`).
+
 Session-scoped metadata (model name, token counts, cost, context usage) is deferred to v2. v1 surfaces only usage-window data from the Anthropic usage endpoint. This decision simplifies the domain model and ensures both surfaces (VS Code and terminal) have identical data available.
 
 ---
@@ -142,7 +144,7 @@ Session-scoped metadata (model name, token counts, cost, context usage) is defer
 | `five_hour.resets_at` | Yes (if window present) | ISO 8601 timestamp with timezone |
 | `seven_day.utilization` | Yes (at least one window) | Number, percentage 0-100 |
 | `seven_day.resets_at` | Yes (if window present) | ISO 8601 timestamp with timezone |
-| `seven_day_opus` | No | Optional separate Opus window; may be null |
+| `seven_day_opus` | No | Separate Opus weekly window; may be absent or null. Tracked as `sevenDayOpus` and eligible to be the primary window (§5.3). |
 | `seven_day_oauth_apps` | No | Ignore in v1 |
 | `iguana_necktie` | No | Unknown Anthropic internal field — intentionally ignored |
 
@@ -266,8 +268,12 @@ interface UsageSnapshot {
     utilizationPct: number | null;
     resetsAt: string | null;            // ISO timestamp, always UTC
   };
+  sevenDayOpus: {                       // always present; null values mean "no Opus window"
+    utilizationPct: number | null;
+    resetsAt: string | null;            // ISO timestamp, always UTC
+  };
   display: {
-    primaryWindow: 'fiveHour' | 'sevenDay' | 'unknown';
+    primaryWindow: 'fiveHour' | 'sevenDay' | 'sevenDayOpus' | 'unknown';
     primaryUtilizationPct: number | null;
     primaryResetsAt: string | null;
   };
@@ -290,9 +296,13 @@ interface UsageSnapshot {
 
 ### 5.3 Primary Display Rule
 
-The primary displayed utilization value is always the more constrained of the five-hour and seven-day usage windows, defined as the higher utilization percentage among valid window values.
+The primary displayed utilization value is always the most constrained rolling window, defined as the highest utilization percentage among valid window values across `fiveHour`, `sevenDay`, and `sevenDayOpus`.
 
-If only one valid window is available, that window becomes primary. If neither window is available, the surface enters Degraded, NotConfigured, AuthInvalid, or HardFailure based on failure classification.
+Ties resolve in the order `fiveHour` > `sevenDay` > `sevenDayOpus`.
+
+If only one valid window is available, that window becomes primary. If no window is available, the surface enters Degraded, NotConfigured, AuthInvalid, or HardFailure based on failure classification.
+
+> **Amended 2026-08-26 (`sdlc/002-opus-window`).** Previously this rule ranged over `fiveHour` and `sevenDay` only, because `seven_day_opus` was parsed and discarded. Including it is a deliberate user-visible change: a user whose Opus window is their most constrained now sees that figure as the headline, where before they were shown a lower and misleading number. Accounts with no Opus window are unaffected. The tie order preserves the previous `fiveHour >= sevenDay` precedence exactly.
 
 ---
 
@@ -332,7 +342,8 @@ If only one valid window is available, that window becomes primary. If neither w
 |---|---|
 | Not configured | Credentials file missing or unreadable |
 | Auth invalid | 401 or equivalent authentication failure; expired token |
-| Service unavailable | Network timeout, DNS failure, API unreachable, 5xx, 429 |
+| Timeout | The 5-second hard timeout aborted the request (amended 2026-08-26, `sdlc/010`) |
+| Service unavailable | DNS failure, API unreachable, 5xx, 429 |
 | Malformed response | Response shape no longer matches minimum required contract |
 | Unexpected runtime failure | Unhandled logic or environment issue |
 
@@ -353,7 +364,7 @@ If only one valid window is available, that window becomes primary. If neither w
 
 ### 8.1 Repository Structure
 
-All code lives in a single public GitHub repository named `claudewatch`. The repository is organized as a bun workspace monorepo with three packages:
+All code lives in a single public GitHub repository named `claudewatch`. The repository is organized as a bun workspace monorepo with four packages (`metrics` added 2026-08-26, `sdlc/003-metrics-telemetry`):
 
 ```
 claudewatch/
@@ -454,7 +465,7 @@ Default refresh interval is 60 seconds. Minimum configurable interval for the ex
 
 ### 9.4 Endpoint Failure Cooldown
 
-If the endpoint returns 429, 5xx, or a network failure (timeout, DNS, connection refused), ClaudeWatch enters a **cooldown period of 5 minutes (300 seconds)** during which no new network requests are attempted. Cached data continues to be served as stale. The cooldown timestamp is stored in the cache file so it is shared between the VS Code extension and the statusline binary.
+If the endpoint returns 429, 5xx, a network failure (timeout, DNS, connection refused), or a 200 whose body is not parseable JSON (`malformedResponse`, amended 2026-08-28 by `sdlc/029`), ClaudeWatch enters a **cooldown period of 5 minutes (300 seconds)** during which no new network requests are attempted. Cached data continues to be served as stale. The cooldown timestamp is stored in the cache file so it is shared between the VS Code extension and the statusline binary.
 
 This prevents accidental rate-limit amplification when the prompt hook fires frequently during an outage.
 
@@ -477,13 +488,27 @@ The VS Code extension runs fetches asynchronously on its polling interval and ne
 ~/.cache/claudewatch/usage.json
 ```
 
-On Linux this follows `$XDG_CACHE_HOME` convention (defaults to `~/.cache`). On Windows `~` resolves to `%USERPROFILE%`. The `~/.cache/claudewatch/` directory is created on first write if it does not exist.
+The root is resolved from `$XDG_CACHE_HOME`, on **every** platform, not only Linux:
+
+- set to an **absolute** path → `$XDG_CACHE_HOME/claudewatch`
+- unset, **empty**, or a **relative** path → `~/.cache/claudewatch`
+
+Both fallback conditions are the XDG Base Directory specification's own. A relative value is
+ignored rather than honoured because resolving it would make every path here relative to the
+current working directory. A leading `~` is not expanded, and is therefore relative and ignored.
+
+The rule is not platform-conditional: a branch that only runs on Windows can only be exercised on
+Windows, and CI runs Linux. On Windows `~` resolves to `%USERPROFILE%` as before. Setting the
+variable **does not migrate** an existing directory — the tool reads and writes the resolved
+location and refetches once — with one exception: `cli-ship` also drains a spool left at the legacy
+location, because unshipped metrics events exist nowhere else. The directory is created on first
+write if it does not exist. (sdlc/034)
 
 **Cache file format:**
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "snapshot": { /* UsageSnapshot */ },
   "cooldownUntil": null,
   "lastErrorClass": null,
@@ -553,6 +578,10 @@ Optional fields must be omitted cleanly if unavailable. They must not render as 
 
 - `ClaudeWatch: Refresh Now` — manual refresh, bypasses TTL (still respects cooldown)
 - `ClaudeWatch: Open Usage Dashboard` — opens claude.ai usage page in browser
+- `ClaudeWatch: Diagnostics` — shows the extension bundle path and the formatter's output for the
+  cached snapshot, in a modal. Registered as `claudewatch.diagnostics`. Added to this section by
+  `sdlc/028`: the command has shipped since before the SDLC loop began and was documented in
+  neither §8.4 nor here, which went unnoticed until it acquired tests.
 
 ### 10.6 Settings
 
@@ -561,6 +590,11 @@ Optional fields must be omitted cleanly if unavailable. They must not render as 
 | `claudewatch.refreshIntervalSeconds` | number | 60 |
 | `claudewatch.warningThresholdPct` | number | 70 |
 | `claudewatch.criticalThresholdPct` | number | 90 |
+| `claudewatch.telemetry.enabled` | boolean | false |
+
+**VS Code's global telemetry setting takes precedence.** When `telemetry.telemetryLevel` is `off`, the extension emits nothing regardless of `claudewatch.telemetry.enabled`, per VS Code's telemetry guidance for extension authors. The extension setting can only narrow, never widen. Both inputs are re-evaluated live (`sdlc/006-marketplace-telemetry`).
+
+`claudewatch.telemetry.enabled` opts in to local metric spooling (§17). It is off by default, has no destination, and the statusline binary reads the same setting from `CLAUDEWATCH_TELEMETRY` or `~/.config/claudewatch/config.json` — VS Code settings do not reach it.
 
 ### 10.7 Error and Degraded States
 
@@ -608,7 +642,7 @@ Priority of truncation: remove secondary reset time first, then primary reset ti
 | Flag | Behavior |
 |---|---|
 | `--version` | Print version string and exit |
-| `--json` | Output the full UsageSnapshot as JSON instead of formatted text |
+| `--json` | Output the full UsageSnapshot as JSON instead of formatted text. A snapshot read from the CACHE may carry degraded values for any field — `fetchedAt: "unknown"`, a closed-set fallback, `enterprise: null`, a truncated `disabledReason` — see §12. |
 | `--refresh` | Force a fresh API call, bypassing cache TTL (still respects cooldown) |
 | `--debug` | Print diagnostic info: cache age, state classification, cooldown status, credential path, normalization warnings. No secrets. |
 
@@ -641,15 +675,63 @@ After installation, restart Claude Code. No shell profile editing required.
 
 ### 11.7 Performance Targets
 
-| Scenario | Target |
-|---|---|
-| Cache hit (binary start → stdout) | < 50ms |
-| Cache miss (binary start → fetch → stdout) | < 1000ms |
-| HTTP timeout (hard kill) | 5 seconds |
+| Scenario | Target | Status |
+|---|---|---|
+| Cache hit, **p50** | **< 50 ms** | measured; **reported** by `bun run verify`, enforced by `bun run perf` — see the note |
+| Cache hit, **p95** | **< 100 ms** | measured, checked by `bun run perf` |
+| Cache miss (binary start → fetch → stdout) | < 1000ms | **unmeasured** |
+| HTTP timeout (hard kill) | 5 seconds | **unmeasured** — `DEFAULT_TIMEOUT_MS` is asserted in `client.test.ts`, but no test measures the hard kill end to end |
+
+**Measurement method** (amended 2026-08-26, `sdlc/013-perf-budget`). A target without a
+percentile and a method is not a claim that can be checked: p50, p95 and max on the same binary
+in one run read 41.5, 51.1 and 213.5 ms. Both cache-hit rows therefore mean:
+
+> the compiled binary, **parent-observed spawn → exit**, `HOME` isolated to a temp sandbox
+> holding a fixture credential and a fresh v2 cache envelope, `CLAUDEWATCH_TELEMETRY=0` pinned
+> in the child environment, stdin closed, ≥ 200 samples after 5 discarded warm-ups, nearest-rank
+> percentile, on a developer machine or CI container.
+
+`bun run perf` is that measurement, and its verdict is enforcing. `bun run verify` runs the same
+measurement at n=40 in **report-only** mode: it prints the distribution on every run but does not
+fail the gate.
+
+**Why reported and not enforced** (amended 2026-08-26, `sdlc/015-perf-gate-incident`). The gate
+enforced this for about ninety minutes and then went red on a clean tree: the development
+machine's startup floor moved from ~41 ms to ~57 ms between two sessions, with no code change
+and a load average of 0.5 on 4 CPUs. Observed p50 across sessions spans 41.1–60.6 ms, a 1.5×
+spread — wider than the 1.22× margin this budget was set with.
+
+The targets above are a claim about **the product on a representative machine**. A gate is a
+check for **regression on whatever machine is running**. Those are different instruments, and
+enforcing the first as the second makes the gate red for reasons no change caused, which teaches
+everyone to ignore it. The measurement stays visible on every run; the verdict is deliberate.
+
+Three notes on what changed and why:
+
+- **The interval is redefined** from "binary start → stdout" to parent-observed spawn → exit.
+  The latter includes fork/exec and teardown, is what the caller actually waits for, and is the
+  only interval an external script can observe.
+- **p95 < 100 ms is a regression tripwire, not a perception target.** p95 moves ~10 ms between
+  sessions on the same machine class (48 ms in `sdlc/005`, 51–58 ms in `sdlc/013`), so a
+  threshold within ~2× of any reading is a coin flip. It will not fire before p50 does; it makes
+  the tail's absence-of-a-claim into a claim. A tighter tail check wants a regression rule
+  against a committed baseline, not a fixed number.
+- **The rich path is not slower.** Measured at p50 41.7 / p95 55.0 ms against the plain path's
+  41.4 / 55.3 — indistinguishable, despite three lines, progress bars and ANSI. That is the
+  direct evidence that this cost is dominated by process startup, not by anything the project
+  compiles.
+
+The cache-miss and HTTP-timeout rows carry no percentile because neither has been measured.
+Inventing one would repeat the defect this amendment fixes.
 
 ---
 
 ## 12. Security and Trust Boundaries
+
+**Telemetry trust boundary** (added 2026-08-26, `sdlc/003-metrics-telemetry`): the product writes telemetry to a local spool file and never transmits it. Shipping is performed by a separate agent the user runs, to a service the user hosts. The product therefore has no telemetry destination to be misconfigured, redirected, or intercepted. Spool file mode `0600`, directory `0700`; modes are advisory on Windows, as for the cache.
+
+**Deployment secrets** (added 2026-08-29, `sdlc/038-env-file-secret-window`): the metrics environment file the install scripts write — `~/.config/claudewatch/metrics.env`, which under a LAN bind holds a bearer token — is **created with its final mode** `0600`, never created readable and restricted afterwards, and its immediate directory is `0700`. It is written to a temporary file in the destination directory and renamed, as every other private file this project writes is. The path is rejected if it is a symlink rather than followed. An installer that finds the file already present repairs a mode that grants group or other access; it never reads, rotates, or prints the token. This clause exists because the mode was previously applied one command too late, which no invariant in this section forbade.
+
 
 ClaudeWatch is a local companion utility, not a credential manager.
 
@@ -658,7 +740,81 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - It does not include telemetry in v1
 - It does not transmit any data except authenticated GET requests to the Anthropic usage endpoint
 - TLS verification must never be disabled
-- It must redact sensitive values from all surfaced errors
+- It must redact sensitive values from all surfaced errors — enforced since `sdlc/029` by
+  narrowing `FetchFailure.message` to the closed `SurfaceableMessage` union (a compile error
+  for a free-text producer, frozen by `typefixtures/free-text-message.expect-error.ts`) and by
+  `isSurfaceableMessage` at the cache-read boundary (`readCacheResult`, since `sdlc/030` — until
+  then the predicate ran in `extractLastError`, a consumer, and the statusline's two `--debug` sites
+  bypassed it). Checked by
+  `packages/core/src/security.test.ts` → "§12: every surfaceable error message is a literal
+  this repo wrote". Before that, the clause held only by accident and nothing tested it.
+- Every value `readCacheResult` returns from a cache file is either validated against a closed set
+  or reconstructed by us — never echoed. `lastErrorClass` and `lastErrorMessage` are nulled when
+  they fail their predicate; `cooldownUntil` is nulled on garbage, clamped on magnitude, and since
+  `sdlc/030` **canonicalised** through `new Date(...).toISOString()`. The canonicalisation is not
+  cosmetic: `Date.parse` accepts far more than ISO-8601 and its legacy parser ignores parenthesised
+  trailing text, so `2026-01-01 (/home/someone/.claude sk-ant-…)` parsed finite and was returned
+  verbatim to `--debug` stdout. Checked by `packages/core/src/cache.test.ts` → "a parseable string
+  carrying free text is canonicalised, not echoed".
+- Since `sdlc/031` that guarantee also covers `snapshot.fetchedAt` (canonicalised when it parses,
+  else replaced with `UNKNOWN_FETCHED_AT`), `snapshot.freshness.staleReason` (falls back to `'none'`,
+  which changes no classification — measured), `snapshot.freshness.isStale` (non-boolean becomes
+  `false`), and `snapshot.rawMetadata.normalizationWarnings` (filtered to a closed set of nine, so a
+  real warning beside a poisoned one survives). Checked by `packages/core/src/security.test.ts` →
+  "§12: no value off a cache file reaches a surface unvalidated", by
+  `packages/core/src/closed-sets.test.ts`, and end to end against the compiled binary by
+  `packages/statusline/src/smoke.test.ts` on **both** `--debug` and `--json`.
+- **Since `sdlc/032` the SNAPSHOT is rebuilt from known keys, not patched field by field.**
+  `sanitizeSnapshot` constructs a fresh `UsageSnapshot` naming every field, so every value is a
+  member of a closed set, a number this repo checked, a timestamp this repo constructed, or a
+  bounded string — and **no unknown key at any depth survives**. Measured before it existed: 26 of
+  26 poisoned values reached a surface, 24 of them inside the snapshot. Checked by
+  `packages/core/src/sanitize-snapshot.test.ts`, `security.test.ts` → "§12: no value off a cache
+  file survives unvalidated", and end to end against the compiled binary by
+  `packages/statusline/src/smoke.test.ts`. **`--json` is the whole-snapshot leg; `--debug` is not.**
+  `printDebug` emits a fixed key list — from the snapshot only `fetchedAt`, `classify()`,
+  `normalizationWarnings` and `freshness` — so most snapshot fields cannot reach it. `sdlc/032`
+  first claimed two equivalent legs here; its Stage 5 audit proved the `--debug` leg green under a
+  mutation that turned 22 other tests red.
+  A whitelist fails by DROPPING a field rather than leaking one, so the guard that matters is the
+  strict round-trip in `cache.test.ts` plus its companion asserting the fixture is not vacuous —
+  `makeTestSnapshot`'s defaults are, for six leaves, identical to their own degraded values.
+- **Degradation is coupled, not per-field.** Degrading each field independently would manufacture
+  states no producer can emit: `normalize()` sets `tier: 'enterprise'` only inside its
+  `enterprise !== null` branch, so a poisoned enterprise number would otherwise leave
+  `tier: 'enterprise'` beside `enterprise: null` and render a plausible line with nothing
+  indicating corruption. A nulled `enterprise` forces `tier` and `display` to `'unknown'`; a nulled
+  primary window forces `display.primaryWindow` to `'unknown'`.
+- **`enterprise.disabledReason` is redact-then-bound, and it is the weakest rule in the boundary.**
+  Its text is chosen by the API, so it is the one snapshot field that is neither enumerable nor
+  canonicalisable. Strings matching path or host shapes are rejected; the rest is truncated to 200
+  characters. **This does not stop a short poisoned string that avoids those shapes.** Stated rather
+  than implied, because the alternative — nulling it on every cache read — would delete a real
+  user-facing explanation from every render except the one immediately after a fetch.
+- **What remains open at this boundary**, named rather than implied: an unknown key on the
+  **envelope** survives `readCacheResult`. It is inert at every current surface — `output()`
+  serialises the snapshot and `printDebug` copies named keys — which makes it the least of the gaps,
+  not the greatest. `lastHttpStatus` is an envelope field and IS validated (`Number.isInteger`),
+  because it reached `--debug` verbatim.
+- **A `fetchedAt` in the future beyond `CLOCK_SKEW_TOLERANCE_MS` is not fresh.** `isCacheFresh`
+  compares an age, and a negative age means the file claims to come from the future. Treating that
+  as fresh pinned the tool on stale data permanently: `main.ts:240` returns the cached snapshot
+  without rewriting the file, so every render repeated it, escapable only with `--refresh`. The
+  stored value is bounded at the comparison rather than clamped, so the skew stays visible. Note
+  `detectClockSkew` (`time.ts:79`) has no production caller today; `sdlc/031` cited it as a reason
+  not to act before measuring that.
+- **`readCacheResult` still rejects — and still discards the cooldown with the file — when
+  `snapshot`, `snapshot.display` or `snapshot.freshness` is missing or not an object.** There is
+  nothing coherent to substitute for those, so they are not degraded. The §9.4 exposure on that path
+  is real and open; closing it needs `cooldownUntil` stored separably from the snapshot. Pinned by
+  `packages/core/src/cache.test.ts` → "a structurally broken envelope still rejects, and still loses
+  the cooldown".
+- **Telemetry payload leaves are enforced by the compiler since `sdlc/032`, not by prose.**
+  `MetricEvent.payload` is `Record<string, PayloadLeaf>` where `PayloadLeaf` admits numbers,
+  booleans, `null` and the closed enums telemetry carries — **no bare `string`**. Narrowing
+  `renderEvent`'s two parameters alone did not achieve this: a new `string` field could still be
+  added, measured at 0 typecheck errors, because `string` was structurally legal in the payload.
+  Frozen by `typefixtures/payload-string.expect-error.ts`.
 - It must not include tokens in issue templates, screenshots, or debug output
 - It must not shell out with token values in process arguments
 - Cache files must never contain the access token
@@ -699,10 +855,22 @@ ClaudeWatch is a local companion utility, not a credential manager.
 - Given a narrow terminal width (< 60 columns), the status line collapses to the compact format
 - Given multiple refresh triggers at once, only one network fetch occurs
 - Given stale data, the user can distinguish it from fresh data in the tooltip or status context
-- Given a corrupt or unparseable cache file, the file is deleted and a fresh fetch is performed
+- Given a STRUCTURALLY corrupt cache file — unparseable JSON, a version mismatch, or a missing
+  `snapshot`, `display` or `freshness` — the file is deleted and a fresh fetch is performed. Given a
+  file that is structurally sound but carries bad VALUES, the envelope is kept and the values are
+  degraded: deleting it would discard `cooldownUntil`, which is §9.4's only throttle on
+  token-bearing requests. The distinction has been load-bearing since `sdlc/030` and this bullet
+  did not draw it until `sdlc/032`.
 - Given `resets_at` in the past, the display shows "resets soon" rather than a negative duration
-- The compiled binary meets performance targets: < 50ms cache hit, < 1000ms cache miss
-- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema
+- The compiled binary meets the performance targets in §11.7, measured by that section's stated method
+- `claudewatch --json` outputs valid JSON matching the UsageSnapshot schema. Since `sdlc/032` a
+  snapshot read from the CACHE may carry a degraded value for **any** field, not only `fetchedAt`:
+  a closed-set fallback (`'unavailable'`, `'unknown'`), `null` for an unparseable timestamp or a
+  non-numeric percentage, `enterprise: null`, `currency: 'USD'`, or a truncated `disabledReason`.
+  The shape is unchanged; the values may be substitutions this repo constructed. `sdlc/031`
+  documented the `fetchedAt` sentinel alone and that is no longer the whole exception. Substituting a sentinel is
+  preferred over deleting the envelope, which would discard the §9.4 cooldown, and over the epoch,
+  which would render a confident "Fresh as of 12:00 AM" for a snapshot of unknowable age.
 - `claudewatch --debug` outputs diagnostic info without any secrets
 
 ---
@@ -763,7 +931,7 @@ Use recorded or mocked responses for:
 - No token written to cache file
 - No unhandled exceptions in extension host
 - No user-facing stack traces in status line output
-- Binary startup + cache-hit response under 50ms
+- Cache-hit response within §11.7's budget, measured by that section's stated method (`bun run perf`)
 - `--debug` output contains no token values
 
 ---
@@ -788,7 +956,40 @@ Use recorded or mocked responses for:
 
 ## 17. Observability and Debugging
 
-Logging is minimal and local-only. No telemetry in v1.
+Logging is minimal and local-only. **Telemetry is off by default and has no default destination** (amended 2026-08-26, `sdlc/003-metrics-telemetry`).
+
+When a user explicitly enables it, ClaudeWatch appends metric events to a local spool file. It does **not** transmit them: the product opens no network connection other than the documented usage endpoint. A separate agent, run by the user, ships the spool to a service the user hosts.
+
+**Allowed telemetry payload values:** numbers, booleans, and members of closed enumerations only. There are no free-text payload fields, because the leak vector is a value rather than a key — `client.ts` places `fetch` error messages into failures, and those carry hostnames and home-directory paths.
+
+**Forbidden in telemetry:** access or refresh tokens, filesystem paths, hostnames, usernames, project names, account identifiers, and enterprise credit amounts (an account's billing position is not a health signal — `tier` and a decile bucket carry the signal without it).
+
+**Amendment (2026-08-26, sdlc/020) — `source: 'sdlc'` process metrics.** Events written by
+`scripts/verify.ts`, a development script that never runs in a shipped artifact and observes only
+this repository, may additionally carry **repo-relative** file paths, test identifiers (a test's
+name and its enclosing describe chain), a `type` constrained to an identifier of at most 64
+characters (anything else is recorded as `other`), and the closed enumeration `junitOutfile`.
+They are written by the developer's own gate, about the repository's own source, and contain
+nothing about a user or their account.
+
+Every one of those free-text fields is scrubbed of path-shaped substrings before it is recorded,
+so the prohibitions below hold even when a test is *named* after a path.
+
+**`source: 'sdlc'` recording is opt-in (2026-08-26, sdlc/021).** `scripts/verify.ts` writes
+nothing unless `CLAUDEWATCH_VERIFY_METRICS` is set to a true value (`1`, `true`, `yes`, `on`);
+unset means off, and an unrecognised value means off with one line to stderr. The systemd unit
+that drives the continuous loop sets it explicitly, so unattended collection is unaffected while
+a clone on someone else's machine records nothing by default.
+
+Unchanged for **every** event regardless of source: no token, no absolute path, no home
+directory, no hostname, no username, no account identifier. `verify.ts` and the product append to
+the same spool, so an absolute path in either would leave the machine by the same route.
+
+Unchanged for **product telemetry** (`source: 'product'` — the only other `MetricSource`; the
+emitting surface is carried in the payload as `surface: 'statusline' | 'vscode'`): numbers,
+booleans, and members of closed enumerations only. A free-text payload field there remains a blocking review
+finding. This amendment does not widen `MetricEvent.payload` in `packages/core`, which stays the
+structural boundary for the events that concern a user.
 
 **Allowed debug information** (surfaced via `--debug` flag): state classification, timestamp of last successful refresh, cache age, cooldown status, credential file path (not contents), normalization warnings, cache file path, terminal width detected.
 
@@ -881,11 +1082,11 @@ Create these source files:
 |---|---|
 | `src/types.ts` | `UsageSnapshot`, all enums, interfaces, `RuntimeState`, `FailureClass`, `CacheEnvelope` |
 | `src/credentials.ts` | Resolve credential file path per platform, parse JSON, extract `accessToken`, check `expiresAt` |
-| `src/client.ts` | `fetchUsage(token: string): Promise<FetchResult>` — single GET with auth headers, 5s timeout, 1 retry for 5xx/network errors |
+| `src/client.ts` | `fetchUsage(token: string, options?: FetchOptions): Promise<FetchResult>` — single GET with auth headers, 5s timeout, 1 retry for 5xx/network errors. `options` carries test-only timing overrides; production callers pass one argument, and an override may only make timing **tighter** — the documented 5s and single retry are enforced ceilings, not defaults (see `sdlc/011-injectable-timing/`). |
 | `src/normalize.ts` | `normalize(raw: unknown, fetchedAt?: string): UsageSnapshot` — validate required fields, compute primary window |
 | `src/state.ts` | `classify(snapshot: UsageSnapshot): RuntimeState` — state machine |
 | `src/thresholds.ts` | `evaluate(pct: number, warn: number, crit: number): 'normal' \| 'warning' \| 'critical'` |
-| `src/cache.ts` | Read/write `~/.cache/claudewatch/usage.json` with TTL check, atomic rename, corruption recovery |
+| `src/cache.ts` | Read/write `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) with TTL check, atomic rename, corruption recovery |
 | `src/cooldown.ts` | Track and check cooldown state after endpoint failures (5-minute window) |
 | `src/time.ts` | UTC parsing, local display conversion, relative formatting, negative duration guard |
 | `src/format.ts` | Format percentage, reset time (relative + absolute), freshness text, compact vs default |
@@ -1003,7 +1204,7 @@ Before building UI, prove the critical path end-to-end. This can be done in a si
 1. **Credential resolution:** Read and parse `~/.claude/.credentials.json`, extract `accessToken`
 2. **API call:** Hit the usage endpoint with the token, get a 200 response
 3. **Normalization:** Parse the response into a `UsageSnapshot`
-4. **Cache write:** Write the snapshot to `~/.cache/claudewatch/usage.json` atomically
+4. **Cache write:** Write the snapshot to `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) atomically
 5. **Cache read + format:** Read the cache, format output, print to stdout
 
 If all five steps work, you have a working statusline binary. The VS Code extension is then a rendering layer on top of the same pipe.
@@ -1026,7 +1227,7 @@ If all five steps work, you have a working statusline binary. The VS Code extens
 ### 19.1 High Priority (Before v1 Ship)
 
 - Validate API endpoint still returns expected schema on current Claude Code version
-- Finalize extension ID and publisher naming
+- Finalize extension ID and publisher naming — **proposed** in `sdlc/006-marketplace-telemetry`: publisher `joezuchora`, ID `joezuchora.claudewatch` (requires renaming `name` from `claudewatch-vscode`). Deferred deliberately: the rename changes extension identity and would orphan installed copies rather than upgrade them, so it is the maintainer's decision.
 - Validate Cursor behavior explicitly
 - ~~Add minimum polling interval enforcement~~ ✅ Implemented (extension.ts enforces 30s minimum)
 - Test 429 rate-limiting behavior and confirm cooldown + stale-while-error handles it gracefully
@@ -1046,7 +1247,7 @@ If all five steps work, you have a working statusline binary. The VS Code extens
 - VS Code Marketplace publishing
 - Onboarding walkthrough
 - Multi-account awareness
-- `seven_day_opus` as a separate tracked window
+- ~~`seven_day_opus` as a separate tracked window~~ ✅ Implemented (`sdlc/002-opus-window`; amends §5.3)
 
 ---
 
@@ -1060,7 +1261,7 @@ To avoid drift, the following are fixed for v1:
 - Session-aware rich statusline is implemented via stdin JSON piped from Claude Code
 - Session analytics (historical trends, burn-rate) are deferred to v2
 - Missing optional fields are omitted, not guessed
-- No telemetry is shipped
+- No telemetry is enabled by default and no default destination exists; the product never opens a socket except to the documented usage endpoint (amended `sdlc/003-metrics-telemetry`)
 - No token is ever persisted outside the existing Claude Code credential file
 - Marketplace publishing is not required for v1 success
 - v1 targets Windows + Linux only; macOS is v2
@@ -1068,7 +1269,7 @@ To avoid drift, the following are fixed for v1:
 - Compiled binary for terminal; no runtime dependencies
 - Claude Code built-in status line for terminal integration
 - Atomic file writes for cache consistency
-- Cache at `~/.cache/claudewatch/usage.json` with version header
+- Cache at `~/.cache/claudewatch/usage.json` (or `$XDG_CACHE_HOME/claudewatch/`) with version header
 - All internal timestamps UTC; display times converted to local
 - HTTP timeout 5 seconds; TLS verification always enabled
 - Cache corruption triggers delete + fresh fetch, never a stuck failure loop

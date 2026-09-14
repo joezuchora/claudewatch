@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { UsageSnapshot, RuntimeState, LastErrorInfo } from '@claudewatch/core';
-import { formatTooltip } from '@claudewatch/core';
+import { formatTooltip } from './core-bridge.js';
 
 /** Error/degraded tooltip details per SPEC §10.7 */
 const ERROR_DETAILS: Record<string, { message: string; remediation: string }> = {

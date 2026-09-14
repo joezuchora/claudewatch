@@ -1,0 +1,419 @@
+/**
+ * Tests for the mock-topology guard.
+ *
+ * Two halves, deliberately. The SYNTHETIC half feeds in-memory file sets to `analyze` and is
+ * where every rule is proven both red and green — it is the primary artifact. The REAL-TREE half
+ * runs the analyzer over this repository and is the regression anchor; it is expected green from
+ * the first run and so proves nothing on its own.
+ *
+ * The split also means no criterion requires writing a fixture into the repo. A previous
+ * reviewer's probe file was swept up by `git add -A` and turned CI red.
+ */
+import { describe, expect, test } from 'bun:test';
+import {
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
+  symlinkSync, writeFileSync,
+} from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { analyze, findImporters, findMocks, lineImportsValue, type SourceFile } from './mock-topology.js';
+
+const f = (path: string, text: string): SourceFile => ({ path, text });
+
+describe('R1 — a mocked module may have at most one non-test importer', () => {
+  test('A2: two importers in the mocking test\'s directory is a violation', () => {
+    const v = analyze([
+      f('pkg/src/a.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('pkg/src/dep.ts', `export const x = 1;`),
+      f('pkg/src/one.ts', `import { x } from './dep.js';`),
+      f('pkg/src/two.ts', `import { x } from './dep.js';`),
+    ]);
+    expect(v).toHaveLength(1);
+    expect(v[0]!.rule).toBe('R1');
+    expect(v[0]!.files).toEqual(['pkg/src/one.ts', 'pkg/src/two.ts']);
+  });
+
+  test('A2b control: one importer is fine', () => {
+    expect(analyze([
+      f('pkg/src/a.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('pkg/src/dep.ts', `export const x = 1;`),
+      f('pkg/src/one.ts', `import { x } from './dep.js';`),
+    ])).toEqual([]);
+  });
+
+  test('A9: mocking a module that ALREADY has two importers is a violation', () => {
+    // The literal sdlc/025 recurrence, and the direction the intent demanded that revision 1 of
+    // the spec had no criterion for.
+    const v = analyze([
+      f('pkg/src/bridge.ts', `export const x = 1;`),
+      f('pkg/src/alpha.ts', `import { x } from './bridge.js';`),
+      f('pkg/src/beta.ts', `import { x } from './bridge.js';`),
+      f('pkg/src/new.test.ts', `mock.module('./bridge.js', () => ({}));`),
+    ]);
+    expect(v).toHaveLength(1);
+    expect(v[0]!.files).toEqual(['pkg/src/alpha.ts', 'pkg/src/beta.ts']);
+  });
+
+  test('A8: same specifier, different directories, different files — green', () => {
+    // Measured case 1: no leak, so no violation.
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('a/src/dep.ts', `export const x = 1;`),
+      f('a/src/use.ts', `import { x } from './dep.js';`),
+      f('b/src/dep.ts', `export const x = 2;`),
+      f('b/src/use.ts', `import { x } from './dep.js';`),
+    ])).toEqual([]);
+  });
+
+  test('A7: one file reached by two different specifier strings — green', () => {
+    // Measured case 3, and the case the Stage 2 reviewer measured differently. Three load orders
+    // on bun 1.3.11 showed no leak. If their result reproduces, this is a false negative and the
+    // guard has a hole here.
+    //
+    // BOTH importers sit in the mocking test's directory, differing ONLY in the specifier string.
+    // The first version put them in different directories, so directory scoping alone explained
+    // the green and the disputed property was never load-bearing — unfalsifiable by any bug.
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('a/src/dep.ts', `export const x = 1;`),
+      f('a/src/use.ts', `import { x } from './dep.js';`),
+      f('a/src/other.ts', `import { x } from '../src/dep.js';`),
+    ])).toEqual([]);
+  });
+
+  test('A7b control: the SAME two importers writing the SAME string is a violation', () => {
+    // Differs from A7 by one specifier string, so A7's green isolates "different string" rather
+    // than "the analyzer ignored the second file".
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('./dep.js', () => ({}));`),
+      f('a/src/dep.ts', `export const x = 1;`),
+      f('a/src/use.ts', `import { x } from './dep.js';`),
+      f('a/src/other.ts', `import { x } from './dep.js';`),
+    ])).toHaveLength(1);
+  });
+});
+
+describe('R1 — bare specifiers are counted tree-wide', () => {
+  test('A3: a bare mock with importers in two packages is a violation', () => {
+    const v = analyze([
+      f('a/src/x.test.ts', `mock.module('@claudewatch/core', () => ({}));`),
+      f('a/src/one.ts', `import { x } from '@claudewatch/core';`),
+      f('b/src/two.ts', `import { x } from '@claudewatch/core';`),
+    ]);
+    expect(v).toHaveLength(1);
+    expect(v[0]!.specifier).toBe('@claudewatch/core');
+    expect(v[0]!.files).toEqual(['a/src/one.ts', 'b/src/two.ts']);
+  });
+
+  test('A3b control: a bare mock with exactly ONE importer tree-wide is fine', () => {
+    // Proves A3's red came from the COUNT, not from "bare and not allowlisted". Without this,
+    // an implementation that flagged every bare specifier would pass A3 and never exercise the
+    // counting path at all.
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('@claudewatch/core', () => ({}));`),
+      f('a/src/one.ts', `import { x } from '@claudewatch/core';`),
+    ])).toEqual([]);
+  });
+
+  test('the ambient allowlist exempts vscode even with many importers', () => {
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('vscode', () => ({}));`),
+      f('a/src/one.ts', `import * as vscode from 'vscode';`),
+      f('a/src/two.ts', `import * as vscode from 'vscode';`),
+      f('a/src/three.ts', `import * as vscode from 'vscode';`),
+    ])).toEqual([]);
+  });
+});
+
+describe('importer forms', () => {
+  const base = (extra: SourceFile[]) => analyze([
+    f('pkg/src/a.test.ts', `mock.module('./dep.js', () => ({}));`),
+    f('pkg/src/dep.ts', `export const x = 1;`),
+    f('pkg/src/one.ts', `import { x } from './dep.js';`),
+    ...extra,
+  ]);
+
+  test('A4: type-only references do not count, in all three forms', () => {
+    expect(base([f('pkg/src/t1.ts', `import type { X } from './dep.js';`)])).toEqual([]);
+    expect(base([f('pkg/src/t2.ts', `export type { X } from './dep.js';`)])).toEqual([]);
+    expect(base([f('pkg/src/t3.ts', `import { type A, type B } from './dep.js';`)])).toEqual([]);
+  });
+
+  test('A4b control: the SAME lines without the type keyword do count', () => {
+    // Differs by one token from A4, so green-vs-red isolates `type` rather than "the file was
+    // ignored" — a green-expected criterion alone is satisfied by a broken or absent analyzer.
+    expect(base([f('pkg/src/t1.ts', `import { X } from './dep.js';`)])).toHaveLength(1);
+    expect(base([f('pkg/src/t2.ts', `export { X } from './dep.js';`)])).toHaveLength(1);
+    expect(base([f('pkg/src/t3.ts', `import { A, B } from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('A4b: a mixed inline binding IS a value import', () => {
+    expect(base([f('pkg/src/m.ts', `import { a, type B } from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('a WRAPPED type-only import does not count', () => {
+    // The sdlc/026 audit's second blocking finding. lineImportsValue works per line, and the line
+    // carrying the specifier in a wrapped import is `} from './dep.js';` — no brace group, no
+    // leading `import type`, so both guards missed it and a pure type import was counted.
+    expect(base([f('pkg/src/w.ts', `import type {\n  A,\n  B,\n} from './dep.js';`)])).toEqual([]);
+  });
+
+  test('control: the same wrapped import WITHOUT type does count', () => {
+    expect(base([f('pkg/src/w.ts', `import {\n  A,\n  B,\n} from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('a commented-out import does not count', () => {
+    // This module\'s own docstring came within one word of tripping this.
+    expect(base([f('pkg/src/c.ts', `// legacy: import { x } from './dep.js';`)])).toEqual([]);
+    expect(base([f('pkg/src/c2.ts', `/* see import { x } from './dep.js'; */`)])).toEqual([]);
+  });
+
+  test('a default binding alongside all-type braces IS a value import', () => {
+    // The branch the audit gutted to `return false` with all 23 tests still green. `Def` is
+    // imported at runtime regardless of the braces being type-only.
+    expect(base([f('pkg/src/d1.ts', `import Def, { type A } from './dep.js';`)])).toHaveLength(1);
+    expect(base([f('pkg/src/d2.ts', `import * as ns from './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('control: all-type braces with NO default binding is not a value import', () => {
+    expect(base([f('pkg/src/d3.ts', `import { type A } from './dep.js';`)])).toEqual([]);
+  });
+
+  test('A5: dynamic import counts, relative and bare', () => {
+    expect(base([f('pkg/src/d.ts', `const m = await import('./dep.js');`)])).toHaveLength(1);
+    const bare = analyze([
+      f('a/src/x.test.ts', `mock.module('@claudewatch/core', () => ({}));`),
+      f('a/src/one.ts', `import { x } from '@claudewatch/core';`),
+      f('a/src/two.ts', `const c = await import('@claudewatch/core');`),
+    ]);
+    expect(bare).toHaveLength(1);
+  });
+
+  test('A6: side-effect-only import counts', () => {
+    expect(base([f('pkg/src/s.ts', `import './dep.js';`)])).toHaveLength(1);
+  });
+
+  test('A6b: re-export counts — sdlc/001 established a static re-export does not isolate a mock', () => {
+    expect(base([f('pkg/src/r.ts', `export * from './dep.js';`)])).toHaveLength(1);
+  });
+});
+
+describe('R2 — no two test files may mock the same specifier string', () => {
+  test('A10: two mockers of the same non-allowlisted string is a violation', () => {
+    const v = analyze([
+      f('a/src/x.test.ts', `mock.module('./deps.js', () => ({}));`),
+      f('b/src/y.test.ts', `mock.module('./deps.js', () => ({}));`),
+    ]);
+    expect(v.some((x) => x.rule === 'R2')).toBe(true);
+  });
+
+  test('A10 control: one mocker is fine, and the allowlist exempts duplicates', () => {
+    expect(analyze([f('a/src/x.test.ts', `mock.module('./deps.js', () => ({}));`)])).toEqual([]);
+    expect(analyze([
+      f('a/src/x.test.ts', `mock.module('vscode', () => ({}));`),
+      f('b/src/y.test.ts', `mock.module('vscode', () => ({}));`),
+    ])).toEqual([]);
+  });
+});
+
+describe('discovery', () => {
+  test('tolerates whitespace, newlines and double quotes', () => {
+    const m = findMocks([f('a/x.test.ts', `mock.module(\n  "./dep.js",\n  () => ({}),\n);`)]);
+    expect(m).toEqual([{ testPath: 'a/x.test.ts', specifier: './dep.js' }]);
+  });
+
+  test('a full mock.module CALL inside a comment is not a mock', () => {
+    // The sdlc/027 case: a comment written to explain the mechanism contained a complete
+    // `mock.module('vscode')` — paren and quote — and was discovered as a second mocker.
+    expect(findMocks([f('a/x.test.ts',
+      "// `mock.module('vscode')` is process-wide\nmock.module('./real.js', () => ({}));")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+  });
+
+  test('a string containing // or /* does not hide a real mock', () => {
+    // False negatives found by the sdlc/027 security pass. The `a//b` shape measured [] before the
+    // stripper was anchored to line-leading comments; a guard that MISSES a mock is worse than one
+    // that reports a phantom.
+    expect(findMocks([f('a/x.test.ts', "const p = 'a//b'; mock.module('./real.js', () => ({}));")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+    expect(findMocks([f('a/y.test.ts',
+      "const g = '**/*.test.ts';\nmock.module('./real.js', () => ({}));\nconst h = '*/';")]))
+      .toEqual([{ testPath: 'a/y.test.ts', specifier: './real.js' }]);
+  });
+
+  test('a TRAILING mock.module comment is not a mock', () => {
+    // The false positive the line-leading anchoring bought: the same defect the test above
+    // exists to prevent, relocated from column 0 to after code. Measured discovering
+    // './phantom.js' as a real mock before stripLineComment became quote-aware. Found by the
+    // sdlc/027 plan-to-diff audit — which noted the previous fix had NO test at this position.
+    expect(findMocks([f('a/x.test.ts',
+      "mock.module('./real.js', () => ({}));\nfoo(); // mock.module('./phantom.js', () => ({}))")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+  });
+
+  test('an escaped quote does not leave the stripper stuck inside a string', () => {
+    // stripLineComment's `\\` branch. Without it the escaped quote closes the literal, the rest of
+    // the line is read as code, and a trailing comment stops being stripped.
+    expect(findMocks([f('a/x.test.ts',
+      "const s = 'it\\'s'; // mock.module('./phantom.js', () => ({}))\nmock.module('./real.js', () => ({}));")]))
+      .toEqual([{ testPath: 'a/x.test.ts', specifier: './real.js' }]);
+  });
+
+  test('prose mentioning mock.module in a comment is not a mock', () => {
+    // `a/x.test.ts`, not `a/x.ts`. As `a/x.ts` this passed because findMocks bails on
+    // isTestFile before the regex is consulted — green for a reason unrelated to its name.
+    // Found by the sdlc/026 plan-to-diff audit, which confirmed it by deleting the isTestFile
+    // guard entirely and watching all 23 tests stay green.
+    expect(findMocks([f('a/x.test.ts', `// bun applies mock.module process-wide`)])).toEqual([]);
+  });
+
+  test('lineImportsValue is exported and directly testable', () => {
+    expect(lineImportsValue(`import { a } from './d.js';`, './d.js')).toBe(true);
+    expect(lineImportsValue(`import type { A } from './d.js';`, './d.js')).toBe(false);
+    expect(lineImportsValue(`import { a } from './other.js';`, './d.js')).toBe(false);
+  });
+
+  test('findImporters ignores test files', () => {
+    expect(findImporters([
+      f('p/a.test.ts', `import { x } from './d.js';`),
+      f('p/b.ts', `import { x } from './d.js';`),
+    ], './d.js', 'p')).toEqual(['p/b.ts']);
+  });
+});
+
+// --- the real tree ---
+
+const ROOT = join(import.meta.dir, '..');
+const SELF = 'scripts/mock-topology.test.ts';
+
+/**
+ * `lstatSync`, not `statSync`, and symlinks are skipped outright.
+ *
+ * The sdlc/026 security pass found both halves of this, and I reproduced both in a temp tree:
+ * `statSync` follows symlinks, so a directory symlink like `src/sub/loop -> ../../src` recurses
+ * without bound, and a symlink named `*.ts` pointing at `~/.claude/.credentials.json` would be
+ * read verbatim into this process on every `bun run verify`. The repo has zero tracked symlinks
+ * (`git ls-files -s` shows no 120000 entries), so skipping them costs nothing and closes both.
+ *
+ * Per-entry failures are skipped rather than thrown: a broken symlink otherwise aborts the run
+ * with an ENOENT carrying an absolute path into CI logs.
+ */
+export function collect(dir: string, out: SourceFile[] = [], root = ROOT): SourceFile[] {
+  for (const e of readdirSync(dir)) {
+    if (e === 'node_modules' || e === 'dist' || e === 'typefixtures') continue;
+    const p = join(dir, e);
+    try {
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) collect(p, out, root);
+      else if (e.endsWith('.ts')) out.push({ path: p.replace(root + '/', ''), text: readFileSync(p, 'utf-8') });
+    } catch { continue; }
+  }
+  return out;
+}
+
+function realTree(): SourceFile[] {
+  const files: SourceFile[] = [];
+  for (const e of readdirSync(join(ROOT, 'packages'))) {
+    const src = join(ROOT, 'packages', e, 'src');
+    // existsSync + lstatSync rather than try/catch. The catch-all that used to be here swallowed
+    // a ReferenceError when `statSync` stopped being imported, so the walk silently collected
+    // ZERO packages and the real-tree assertions failed with an empty set instead of an error
+    // naming the cause. A catch that hides a programming error is worse than no catch.
+    if (existsSync(src) && lstatSync(src).isDirectory()) collect(src, files);
+  }
+  collect(join(ROOT, 'scripts'), files);
+  // This file quotes mock.module(...) in its own synthetic cases; it is not a mocker of anything.
+  return files.filter((x) => x.path !== SELF);
+}
+
+describe('the directory walk', () => {
+  test('skips symlinks, so it cannot be walked out of its own tree', () => {
+    // Written in mktemp -d, never in the repo. Reproduces exactly what the security pass found:
+    // as written with statSync, this returned the secret's contents and recursed to depth 60.
+    const tmp = mkdtempSync(join(tmpdir(), 'cw-symlink-'));
+    try {
+      mkdirSync(join(tmp, 'src', 'sub'), { recursive: true });
+      writeFileSync(join(tmp, 'src', 'real.ts'), 'export const x = 1;');
+      writeFileSync(join(tmp, 'secret.json'), 'SECRET-MUST-NOT-BE-READ');
+      symlinkSync(join(tmp, 'secret.json'), join(tmp, 'src', 'leak.ts'));
+      symlinkSync('../../src', join(tmp, 'src', 'sub', 'loop'));
+
+      const got = collect(join(tmp, 'src'), [], tmp);
+
+      // Positive precondition: the real file IS collected, so a green result below is not just
+      // "the walk found nothing".
+      expect(got.map((g) => g.path)).toEqual(['src/real.ts']);
+      expect(got.map((g) => g.text).join()).not.toContain('SECRET');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('recurses into subdirectories, and honours the skip list', () => {
+    // A13's "scan scope is recursive" was unexercised: the audit made `collect` non-recursive and
+    // all 23 tests stayed green, because the only subdirectory under a scanned root is
+    // typefixtures, which the walk deliberately skips. The recursion exists for the growth the
+    // spec anticipated (packages/metrics/src, scripts/) — the case that would be unprotected
+    // exactly when it arrives.
+    const tmp = mkdtempSync(join(tmpdir(), 'cw-recurse-'));
+    try {
+      mkdirSync(join(tmp, 'src', 'deep', 'deeper'), { recursive: true });
+      mkdirSync(join(tmp, 'src', 'typefixtures'));
+      writeFileSync(join(tmp, 'src', 'top.ts'), 'export const a = 1;');
+      writeFileSync(join(tmp, 'src', 'deep', 'mid.ts'), 'export const b = 2;');
+      writeFileSync(join(tmp, 'src', 'deep', 'deeper', 'low.ts'), 'export const c = 3;');
+      writeFileSync(join(tmp, 'src', 'typefixtures', 'skip.ts'), 'export const d = 4;');
+
+      expect(collect(join(tmp, 'src'), [], tmp).map((g) => g.path).toSorted()).toEqual([
+        'src/deep/deeper/low.ts', 'src/deep/mid.ts', 'src/top.ts',
+      ]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the real tree', () => {
+  test('has no mock-topology violations', () => {
+    expect(analyze(realTree())).toEqual([]);
+  });
+
+  test('A1(a): the discovered (test file, specifier) PAIRS are exactly these', () => {
+    // Pairs, not specifiers: asserting the specifier set alone stayed green when a mock MOVED to
+    // a different test file, or when a third mocker was added.
+    expect(findMocks(realTree()).map((m) => [m.testPath, m.specifier]).toSorted()).toEqual([
+      ['packages/statusline/src/main.test.ts', './core-deps.js'],
+      ['packages/vscode/src/commands.test.ts',  './commands-bridge.js'],
+      ['packages/vscode/src/commands.test.ts',  'vscode'],
+      ['packages/vscode/src/extension.test.ts', './extension-bridge.js'],
+      ['packages/vscode/src/extension.test.ts', 'vscode'],
+      ['packages/vscode/src/statusbar.test.ts', './statusbar-bridge.js'],
+      ['packages/vscode/src/statusbar.test.ts', 'vscode'],
+      ['packages/vscode/src/tooltip.test.ts', 'vscode'],
+    ]);
+  });
+
+  test('A1(b): the importer SETS are exactly these', () => {
+    // The assertion revision 1 of the spec omitted. Without it, breaking the importer regex makes
+    // every count 0, zero satisfies at-most-one, and the guard is permanently green with the
+    // property false.
+    const files = realTree();
+    expect(findImporters(files, './core-deps.js', 'packages/statusline/src'))
+      .toEqual(['packages/statusline/src/main.ts']);
+    expect(findImporters(files, './statusbar-bridge.js', 'packages/vscode/src'))
+      .toEqual(['packages/vscode/src/statusbar.ts']);
+    // Down to ONE importer as of sdlc/027, which gave extension.ts its own bridge so that
+    // extension.test.ts could mock without stubbing tooltip.ts's formatTooltip. Pinned so a
+    // future second importer is a visible change rather than a silent one.
+    // sdlc/028: without this line, "commands-bridge.ts has exactly one importer" is asserted by
+    // nothing — A1(a) records that the mock EXISTS, not that the module it mocks is unshared.
+    // That is the hole loop 026 wrote A1(b) to close, and it reopens for every new bridge.
+    expect(findImporters(files, './commands-bridge.js', 'packages/vscode/src'))
+      .toEqual(['packages/vscode/src/commands.ts']);
+    expect(findImporters(files, './core-bridge.js', 'packages/vscode/src'))
+      .toEqual(['packages/vscode/src/tooltip.ts']);
+    expect(findImporters(files, './extension-bridge.js', 'packages/vscode/src'))
+      .toEqual(['packages/vscode/src/extension.ts']);
+  });
+});

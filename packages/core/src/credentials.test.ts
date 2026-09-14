@@ -1,9 +1,8 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { join } from 'path';
 import { homedir } from 'os';
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, lstatSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { randomBytes } from 'crypto';
-import { tmpdir } from 'os';
 import type { CredentialResult } from './types.js';
 
 /**
@@ -27,7 +26,6 @@ const CRED_PATH = join(CLAUDE_DIR, '.credentials.json');
 const BACKUP_PATH = CRED_PATH + '.test-backup-' + randomBytes(4).toString('hex');
 
 let originalExists: boolean;
-let originalContent: string | null;
 
 describe('getCredentialPath', () => {
   test('returns expected path under home directory', async () => {
@@ -52,18 +50,8 @@ describe('resolveCredentials', () => {
     // Back up existing credential file
     originalExists = existsSync(CRED_PATH);
     if (originalExists) {
-      // Check if it's a regular file before trying to read
-      try {
-        const stat = lstatSync(CRED_PATH);
-        if (stat.isFile()) {
-          originalContent = readFileSync(CRED_PATH, 'utf-8');
-        } else {
-          originalContent = null;
-        }
-      } catch {
-        originalContent = null;
-      }
-      // Rename to backup
+      // Rename to backup. The rename is the backup — reading the file's contents into
+      // memory served no purpose and put a live OAuth token in a variable nobody consumed.
       try {
         const { renameSync } = await import('fs');
         renameSync(CRED_PATH, BACKUP_PATH);
@@ -71,8 +59,6 @@ describe('resolveCredentials', () => {
         // If rename fails, just note that we couldn't back up
         originalExists = false;
       }
-    } else {
-      originalContent = null;
     }
   });
 

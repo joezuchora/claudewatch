@@ -1,0 +1,108 @@
+name: AI Review
+
+# Stage 5 (Deploy) of the AI-native SDLC, run in CI.
+#
+# Both review jobs need an ANTHROPIC_API_KEY repository secret. Until it is set — and on
+# pull requests from forks, where secrets are not exposed — the jobs are SKIPPED rather than
+# failed, so an unconfigured repo does not go red for an unrelated reason.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  # The `secrets` context is not available in a job-level `if`, so probe for the key in a
+  # cheap job and gate the real ones on its output.
+  check-key:
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.probe.outputs.present }}
+    steps:
+      - id: probe
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ANTHROPIC_API_KEY is not set — AI review jobs skipped."
+          fi
+
+  review-passes:
+    name: REVIEW.md passes
+    needs: check-key
+    if: needs.check-key.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review this pull request against the repository's review policy.
+
+            Read `REVIEW.md` at the repo root. It defines three passes: bugs and logical
+            errors, security and vulnerabilities, and compliance. Run all three against the
+            diff for this PR (`git diff origin/${{ github.base_ref }}...HEAD`).
+
+            Read `SPEC.md` for the domain contract — it is the source of truth, and
+            `REVIEW.md` cites it by section. Also read `CLAUDE.md` and any directory-scoped
+            `CLAUDE.md` files covering the changed paths.
+
+            If the PR carries an `sdlc/<NNN>-<slug>/` artifact directory, read its
+            `spec.md` and review the diff against what it promised, not only against
+            general good practice.
+
+            Report findings grouped by pass, each with a severity of blocking, major, minor,
+            or nit, the file and line, and a concrete fix. Post them as a single review
+            comment.
+
+            Be accurate over comprehensive. If a pass has no findings, say so plainly —
+            do not invent concerns to fill it out. Do not comment on style the linter
+            already enforces.
+
+  plan-to-diff:
+    name: Plan-to-diff audit
+    needs: check-key
+    if: needs.check-key.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Audit this pull request against its own plan.
+
+            Find the change's artifact directory under `sdlc/` (the PR should touch exactly
+            one). If there is none, post a single short comment noting that the PR has no
+            `plan.md` to audit against, and stop — that is a process observation, not a
+            failure, and some changes legitimately predate the loop.
+
+            Otherwise read `sdlc/<NNN>-<slug>/plan.md` and compare its **scope fence**
+            against the actual diff (`git diff origin/${{ github.base_ref }}...HEAD`).
+
+            Report exactly two directions, kept separate:
+              A. Files in the diff but not in the fence — with your read on whether each was
+                 necessary for the plan or unrelated scope creep.
+              B. Plan items with no corresponding change in the diff.
+
+            Then check the plan's test-mapping table: every acceptance criterion should have
+            a test that actually exercises it, not merely one named after it.
+
+            End with a verdict: CLEAN, EXCURSIONS RECORDED, or FENCE VIOLATED. Post as a
+            single comment.

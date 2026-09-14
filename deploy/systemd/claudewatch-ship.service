@@ -1,0 +1,22 @@
+[Unit]
+Description=Ship ClaudeWatch telemetry spool to the metrics service
+After=claudewatch-metrics.service
+
+[Service]
+# Explicit, not inherited. systemd defaults to null, but stdin state is exactly what
+# hung the statusline in sdlc/004 and relying on a default for it is how the next one happens.
+StandardInput=null
+Type=oneshot
+WorkingDirectory=%h/claudewatch
+ExecStart=/usr/local/bin/bun run %h/claudewatch/packages/metrics/src/cli-ship.ts
+EnvironmentFile=-%h/.config/claudewatch/metrics.env
+Environment=CLAUDEWATCH_METRICS_ENDPOINT=http://127.0.0.1:8787
+
+# A failed ship is not an error worth alerting on — the agent retains the spool and retries.
+SuccessExitStatus=0 1
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/claudewatch

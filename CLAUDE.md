@@ -1,18 +1,37 @@
 # ClaudeWatch
 
-A personal open-source companion tool for Claude Code that shows usage window data in VS Code and terminal.
+A personal open-source companion tool for Claude Code that shows usage window data in VS Code
+and terminal.
 
 ## Spec
 
 The complete specification is in SPEC.md. Read it before making architectural decisions.
+It is the source of truth for the domain; when this file and SPEC.md disagree, SPEC.md wins.
+
+## Development loop
+
+This repo follows an AI-native SDLC. Work moves through six stages, each ending by committing
+an artifact that the next stage reads:
+
+```
+intent.md → spec.md → plan.md → diff + tests → review.md → incident.md
+```
+
+Artifacts live in `sdlc/<NNN>-<slug>/`. Run the stage skills in order: `/sdlc-intent`,
+`/sdlc-spec`, `/sdlc-plan`, `/sdlc-implement`, `/sdlc-review`, and `/sdlc-incident` when
+something ships broken. See CONTRIBUTING.md for the full walkthrough and REVIEW.md for the
+review policy every change is held to.
+
+Small, obvious fixes (a typo, a broken link) may skip the loop. Anything that changes
+behavior does not.
 
 ## Stack
 
-- Language: TypeScript (strict mode)
-- Runtime: Bun (workspaces, build, test, compile)
-- Monorepo: bun workspaces with packages/core, packages/vscode, packages/statusline
-- Statusline ships as a compiled binary via `bun build --compile`
-- VS Code extension targets CommonJS via `bun build --external vscode`
+- TypeScript (strict), ES modules, no `any`
+- Bun for everything: workspaces, build, test, `--compile`
+- Monorepo: `packages/core`, `packages/statusline`, `packages/vscode`
+
+Package-specific rules live in each package's own `CLAUDE.md`.
 
 ## Key Commands
 
@@ -24,45 +43,63 @@ The complete specification is in SPEC.md. Read it before making architectural de
 
 ## Code Style
 
-- ES modules (import/export), not CommonJS
-- Strict TypeScript, no `any`
-- All timestamps internal as UTC ISO strings
-- No access tokens in logs, cache files, or debug output
+- All timestamps internal as UTC ISO strings; convert to local only at display
+- No access tokens in logs, cache files, debug output, or process arguments
 - Atomic file writes (write to temp, rename) for cache
+- Missing optional fields are omitted, not guessed
 
 ## Architecture Rules
 
-- All business logic in packages/core. Surfaces are thin rendering layers.
-- packages/statusline and packages/vscode must not contain domain logic.
+- All business logic in `packages/core`. Surfaces are thin rendering layers.
+- `packages/statusline` and `packages/vscode` must not contain domain logic.
+- Reuse before adding — check `packages/core/src/` and `test-helpers.ts` first.
 - When in doubt about a design decision, check SPEC.md.
-
-## Build & Bundling
-
-- This project uses TypeScript with CommonJS module format for VS Code extensions. Always bundle as CJS (not ESM) when targeting VS Code extension host.
 
 ## Testing
 
-- `bun test` for unit tests
 - Test files live next to source files as `*.test.ts`
 - Mock HTTP responses for contract tests — never hit the real API in tests
-- Always run tests after making changes. Use `bun test` to verify. Ensure test isolation — avoid mock contamination across test files.
-
-## VS Code Extension
-
-- This is a monorepo with a CLI component and a VS Code extension. When packaging the VS Code extension, verify the .vsix includes all required assets (README, etc.) before considering the task done.
+- Keep tests isolated; mock state must not leak across test files
+- Every behavior ships with its check, in the same commit
 
 ## Pre-Commit Verification Pipeline
 
-Before committing any changes, run the full pipeline and fix any issues:
+Before committing, run the gate and fix anything it reports:
 
-1. `bun run typecheck` — fix all type errors
-2. `bun run lint` — fix all lint issues
-3. `bun test` — ensure all tests pass
-4. `bun run build` — verify the build succeeds
-5. If this is a VS Code extension change, verify the output is CommonJS-compatible by checking the bundle for `require`/`module.exports` patterns
-6. Only after all steps pass, create the commit. If any step fails, fix the issue and re-run the full pipeline.
-7. Show a summary of what was fixed.
+```bash
+bun run verify
+```
+
+That runs `typecheck` -> `lint` -> `test` -> `build`, stopping at the first failure. Each step
+is also available on its own (`bun run typecheck`, `bun run lint`, `bun run test`,
+`bun run build`) when you want to iterate on one.
+
+CI runs this exact command, so a green `verify` locally means a green CI.
+
+Since loop 033 it also enforces two things that used to be prose in a review document:
+
+- **`lintBudget`** — the `oxlint` warning set is recorded in `.oxlint-budget.json` and compared
+  in both directions. A new warning fails; so does a removed one, until you update the record in
+  the same commit. There is no `--write` flag: the failure output is the corrected file.
+- **`fenceCheck`** — every loop's `spec.md` requirement headings are compared against its
+  `plan.md` scope fence, so a spec that asks for a file the plan forbids is a failure rather
+  than a silence. Known contradictions live in `sdlc/fence-baseline.json`.
+
+One thing it still does not check for you:
+
+1. **VS Code bundle format.** For extension changes, confirm the built bundle is still
+   CommonJS by grepping it for `require` / `module.exports`. An ESM bundle builds fine and
+   then fails at activation.
+
+And one it checks only half of. `fenceCheck` covers spec-to-plan; the **plan-to-diff** direction
+is still the Stage 5 audit, because only a human or an agent reading the diff can tell whether a
+file inside the fence was changed for the reason the plan gave.
+
+Only commit once `verify` exits 0. If it fails, fix and re-run the whole thing — a partial
+pass is a fail.
 
 ## Git Workflow
 
-- When working with git, always confirm the current branch before committing. Do not assume work should go on a feature branch — ask if unsure.
+- Always confirm the current branch before committing.
+- Feature branches are named for their change: `sdlc/<NNN>-<slug>`.
+- Never commit directly to `main`.

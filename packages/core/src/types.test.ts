@@ -2,13 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import type {
   UsageSnapshot,
   CacheEnvelope,
-  RawUsageResponse,
-  CredentialFile,
   RuntimeState,
   FailureClass,
   ThresholdLevel,
-  AuthState,
-  FetchResult,
 } from './types.js';
 
 describe('types', () => {
@@ -20,6 +16,7 @@ describe('types', () => {
       tier: 'standard',
       fiveHour: { utilizationPct: 42, resetsAt: '2026-03-07T17:00:00.000Z' },
       sevenDay: { utilizationPct: 18, resetsAt: '2026-03-14T07:00:00.000Z' },
+      sevenDayOpus: { utilizationPct: null, resetsAt: null },
       enterprise: null,
       display: {
         primaryWindow: 'fiveHour',
@@ -43,6 +40,7 @@ describe('types', () => {
         tier: 'standard',
         fiveHour: { utilizationPct: 10, resetsAt: null },
         sevenDay: { utilizationPct: 20, resetsAt: null },
+      sevenDayOpus: { utilizationPct: null, resetsAt: null },
         enterprise: null,
         display: { primaryWindow: 'sevenDay', primaryUtilizationPct: 20, primaryResetsAt: null },
         freshness: { isStale: false, staleReason: 'none' },

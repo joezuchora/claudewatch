@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { resolveExtensionTelemetry } from './telemetry-gate.js';
+import { setTelemetryConfig } from './extension-bridge.js';
 import {
   resolveCredentials,
   fetchUsage,
@@ -11,11 +13,12 @@ import {
   enterCooldown,
   clearCooldown,
   shouldCooldown,
+  failurePolicy,
   markStale,
   makeErrorSnapshot,
   extractLastError,
-} from '@claudewatch/core';
-import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from '@claudewatch/core';
+} from './extension-bridge.js';
+import type { UsageSnapshot, CacheEnvelope, LastErrorInfo } from './extension-bridge.js';
 import { StatusBarManager } from './statusbar.js';
 import { openDashboard } from './commands.js';
 
@@ -23,16 +26,71 @@ let statusBar: StatusBarManager | undefined;
 let pollingTimer: ReturnType<typeof setInterval> | undefined;
 let refreshInFlight = false;
 
+/**
+ * Whether telemetry may be emitted right now.
+ *
+ * The AND of VS Code's global switch and our own setting, per VS Code's telemetry guidance:
+ * if isTelemetryEnabled reports false, telemetry must not be sent even when our setting is
+ * on. Re-evaluated on both change events rather than read once at activation — reading once
+ * would keep collecting from a user who turned telemetry off mid-session until they reloaded.
+ */
+let telemetryAllowed = false;
+
+function recomputeTelemetryGate(): void {
+  let globalEnabled: unknown;
+  let settingEnabled: unknown;
+
+  // Either read can throw on a host that does not implement it. A failed read is not consent.
+  try {
+    globalEnabled = (vscode.env as { isTelemetryEnabled?: unknown }).isTelemetryEnabled;
+  } catch {
+    globalEnabled = null;
+  }
+  try {
+    settingEnabled = vscode.workspace
+      .getConfiguration('claudewatch')
+      .get<boolean>('telemetry.enabled');
+  } catch {
+    settingEnabled = null;
+  }
+
+  telemetryAllowed = resolveExtensionTelemetry(globalEnabled, settingEnabled);
+
+  // Push the decision into core immediately. Core's call sites (client, cache, normalize)
+  // cannot see vscode.env, so this is the only path by which the global switch reaches them.
+  // Without it, sdlc/006's compliance guarantee would hold for `render` and silently fail for
+  // the other three kinds.
+  setTelemetryConfig({ enabled: telemetryAllowed });
+}
+
+/** The override handed to core's resolveTelemetryConfig, which treats it as highest priority. */
+export function telemetryOverride(): { enabled: boolean } {
+  return { enabled: telemetryAllowed };
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  recomputeTelemetryGate();
+
+  // VS Code's global telemetry switch can change at any time; honour it immediately.
+  if (typeof (vscode.env as { onDidChangeTelemetryEnabled?: unknown }).onDidChangeTelemetryEnabled === 'function') {
+    context.subscriptions.push(
+      (vscode.env as unknown as {
+        onDidChangeTelemetryEnabled: (cb: () => void) => vscode.Disposable;
+      }).onDidChangeTelemetryEnabled(() => recomputeTelemetryGate()),
+    );
+  }
+
   statusBar = new StatusBarManager();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 
 
   // Register commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('claudewatch.refresh', () => {
-      doRefresh(true);
-    }),
+    // Returns the promise rather than discarding it. `registerCommand` accepts a Thenable, so
+    // this is what the host already tolerates — and discarding it meant nothing could ever await
+    // a refresh, which made every test of the fetch branches timing-dependent. The one production
+    // change in sdlc/027, named in its spec so it could not be slipped in.
+    vscode.commands.registerCommand('claudewatch.refresh', () => doRefresh(true)),
   );
   context.subscriptions.push(
     vscode.commands.registerCommand('claudewatch.openDashboard', openDashboard),
@@ -63,6 +121,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         e.affectsConfiguration('claudewatch.criticalThresholdPct')
       ) {
         statusBar?.updateThresholds();
+      }
+      if (e.affectsConfiguration('claudewatch.telemetry.enabled')) {
+        recomputeTelemetryGate();
       }
     }),
   );
@@ -155,9 +216,16 @@ async function doRefresh(manual: boolean): Promise<void> {
       return;
     }
 
-    // Fetch failed
-    if (result.failureClass === 'authInvalid') {
-      const snapshot = makeErrorSnapshot('invalid');
+    // Fetch failed.
+    //
+    // A class with a definite presentation ('invalid' or 'missing') describes a condition
+    // stale data would misrepresent — the user's credentials, not the endpoint — so it
+    // replaces the status bar rather than falling through to stale-while-error below.
+    // Reading the policy instead of `=== 'authInvalid'` is what makes a new FailureClass
+    // choose that side explicitly. (sdlc/014)
+    const policy = failurePolicy(result.failureClass);
+    if (policy.presentation !== 'unknown') {
+      const snapshot = makeErrorSnapshot(policy.presentation);
       writeCacheFromSnapshot(snapshot, cached);
       statusBar?.update(snapshot, false);
       return;
@@ -183,7 +251,7 @@ async function doRefresh(manual: boolean): Promise<void> {
       writeCache(envelope);
       statusBar?.update(snapshot, false, fetchError);
     }
-  } catch (err) {
+  } catch {
     // Unexpected runtime error — don't crash the extension
     const cached = readCache();
     statusBar?.update(cached?.snapshot ?? null, false);

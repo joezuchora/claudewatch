@@ -23,6 +23,13 @@ function mockFetch(impl: (...args: unknown[]) => Promise<Response>): void {
   globalThis.fetch = mock(impl) as unknown as typeof fetch;
 }
 
+/**
+ * sdlc/011: every failing-then-retrying case below used to pay the production 2s sleep, which
+ * was most of this file's runtime. Only the waiting changes — each test still asserts the same
+ * failure class, the same status, and the same attempt count it always did.
+ */
+const FAST = { retryDelayMs: 0 } as const;
+
 describe('contract: successful response with both windows', () => {
   const raw = {
     five_hour: { utilization: 42, resets_at: '2026-03-07T17:00:00+00:00' },
@@ -83,7 +90,7 @@ describe('contract: successful response with only one window', () => {
 });
 
 describe('contract: response with seven_day_opus present', () => {
-  test('ignores seven_day_opus, normalizes core windows', () => {
+  test('tracks seven_day_opus alongside the core windows', () => {
     const raw = {
       five_hour: { utilization: 6, resets_at: '2026-03-07T17:00:00Z' },
       seven_day: { utilization: 35, resets_at: '2026-03-14T07:00:00Z' },
@@ -93,6 +100,22 @@ describe('contract: response with seven_day_opus present', () => {
     expect(classify(snapshot)).toBe('Healthy');
     expect(snapshot.fiveHour.utilizationPct).toBe(6);
     expect(snapshot.sevenDay.utilizationPct).toBe(35);
+    expect(snapshot.sevenDayOpus.utilizationPct).toBe(0);
+    // 35 is still the most constrained, so primary is unchanged.
+    expect(snapshot.display.primaryWindow).toBe('sevenDay');
+  });
+
+  test('an exhausted Opus window becomes primary end-to-end', () => {
+    const raw = {
+      five_hour: { utilization: 20, resets_at: '2026-03-07T17:00:00Z' },
+      seven_day: { utilization: 22, resets_at: '2026-03-14T07:00:00Z' },
+      seven_day_opus: { utilization: 95, resets_at: '2026-03-14T07:00:00Z' },
+    };
+    const snapshot = normalize(raw, FETCHED_AT);
+    // This is the whole point of the change: before, this user was shown 22%.
+    expect(snapshot.display.primaryWindow).toBe('sevenDayOpus');
+    expect(snapshot.display.primaryUtilizationPct).toBe(95);
+    expect(classify(snapshot)).toBe('Healthy');
   });
 });
 
@@ -160,7 +183,7 @@ describe('contract: 429 response', () => {
 describe('contract: 5xx response', () => {
   test('500 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Internal Server Error', { status: 500 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -169,7 +192,7 @@ describe('contract: 5xx response', () => {
 
   test('502 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Bad Gateway', { status: 502 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -178,7 +201,7 @@ describe('contract: 5xx response', () => {
 
   test('503 returns serviceUnavailable', async () => {
     mockFetch(async () => new Response('Service Unavailable', { status: 503 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
@@ -191,23 +214,28 @@ describe('contract: 5xx response', () => {
       callCount++;
       return new Response('Server Error', { status: 500 });
     });
-    await fetchUsage('test-token');
+    await fetchUsage('test-token', FAST);
     // 1 initial + 1 retry = 2
     expect(callCount).toBe(2);
   });
 });
 
 describe('contract: malformed JSON response', () => {
-  test('non-JSON response body causes network error on json()', async () => {
+  test('non-JSON response body is a MALFORMED RESPONSE, not a network error', async () => {
+    // Renamed and re-asserted by sdlc/029. This test previously asserted `serviceUnavailable` and
+    // was named "causes network error on json()" — so the seventh failure path was not undiscovered,
+    // it was ENSHRINED: a contract test documented the misclassification as correct behaviour.
+    // SPEC.md §7.2 has always defined "Malformed response"; nothing constructed it until now.
     mockFetch(async () => new Response('not json at all', {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     }));
-    const result = await fetchUsage('test-token');
-    // response.json() will throw on invalid JSON
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failureClass).toBe('serviceUnavailable');
+      expect(result.failureClass).toBe('malformedResponse');
+      expect(result.message).toBe('Malformed response');
+      expect(result.status).toBe(200);          // a 200 that is still a failure
     }
   });
 
@@ -268,16 +296,28 @@ describe('contract: valid JSON with missing required fields', () => {
 });
 
 describe('contract: network timeout', () => {
-  test('aborted fetch returns serviceUnavailable', async () => {
-    mockFetch(async () => {
-      // Simulate abort
-      throw new DOMException('The operation was aborted', 'AbortError');
-    });
-    const result = await fetchUsage('test-token');
+  test('a real timeout returns failureClass TIMEOUT, not serviceUnavailable', async () => {
+    // Drives the REAL timeout: a fetch that never settles, so client.ts's own timer fires and sets
+    // `timedOut`. The previous version threw a synthetic AbortError from the mock, which leaves
+    // `timedOut` FALSE — so a test named "network timeout" never entered the timeout branch and
+    // would now assert 'Network error'. sdlc/029's plan named this trap in advance; running it
+    // confirmed it. This is the SPEC.md §15.2 "Network timeout (>5s)" scenario, finally testing it.
+    mockFetch((_url: unknown, init: unknown) => new Promise<Response>((_resolve, reject) => {
+      // The mock must HONOUR the abort signal, as real fetch does. A promise that merely never
+      // settles hangs until bun's own 5s per-test cap — measured, on the first version of this
+      // edit. Honouring it is also what makes this different from the synthetic AbortError it
+      // replaces: client.ts's real timer fires FIRST and sets `timedOut`, then the abort arrives.
+      const signal = (init as { signal?: AbortSignal } | undefined)?.signal;
+      signal?.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted', 'AbortError')));
+    }));
+    // timeoutMs must be small: a never-settling fetch is retried once, so the default 5000ms would
+    // cost 2 x 5s and blow bun's own 5s per-test cap. Measured — the first version of this edit did.
+    const result = await fetchUsage('test-token', { retryDelayMs: 0, timeoutMs: 25 });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.failureClass).toBe('serviceUnavailable');
-      expect(result.message).toContain('aborted');
+      expect(result.failureClass).toBe('timeout');
+      expect(result.message).toBe('Request timed out');
     }
   });
 });
@@ -287,11 +327,13 @@ describe('contract: DNS resolution failure', () => {
     mockFetch(async () => {
       throw new TypeError('fetch failed: DNS resolution failed');
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('serviceUnavailable');
-      expect(result.message).toContain('DNS');
+      // No longer asserts on the platform's DNS wording: the message is now a constant this repo
+      // produces. The DNS-ness of the failure is the mock's business, not the message's. (sdlc/029)
+      expect(result.message).toBe('Network error');
     }
   });
 });
@@ -299,7 +341,7 @@ describe('contract: DNS resolution failure', () => {
 describe('contract: unexpected HTTP status codes', () => {
   test('403 returns unexpectedFailure', async () => {
     mockFetch(async () => new Response('Forbidden', { status: 403 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('unexpectedFailure');
@@ -309,7 +351,7 @@ describe('contract: unexpected HTTP status codes', () => {
 
   test('404 returns unexpectedFailure', async () => {
     mockFetch(async () => new Response('Not Found', { status: 404 }));
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failureClass).toBe('unexpectedFailure');
@@ -464,7 +506,7 @@ describe('contract: retry behavior', () => {
         seven_day: { utilization: 18, resets_at: '2026-03-14T07:00:00Z' },
       }), { status: 200 });
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
   });
@@ -481,7 +523,7 @@ describe('contract: retry behavior', () => {
         seven_day: { utilization: 5, resets_at: '2026-03-14T07:00:00Z' },
       }), { status: 200 });
     });
-    const result = await fetchUsage('test-token');
+    const result = await fetchUsage('test-token', FAST);
     expect(result.ok).toBe(true);
     expect(callCount).toBe(2);
   });

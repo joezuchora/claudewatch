@@ -1,0 +1,12 @@
+[Unit]
+Description=Ship ClaudeWatch telemetry every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Spread the load rather than firing exactly on the boundary.
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

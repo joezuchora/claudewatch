@@ -13,8 +13,13 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "dependencies": {
     "@claudewatch/core": "workspace:*"
@@ -49,6 +54,15 @@
         "claudewatch.criticalThresholdPct": {
           "type": "number",
           "default": 90
+        },
+        "claudewatch.telemetry.enabled": {
+          "type": "boolean",
+          "default": false,
+          "tags": [
+            "telemetry",
+            "usesOnlineServices"
+          ],
+          "markdownDescription": "Send ClaudeWatch health metrics to a metrics service **you** host. Off by default, and always subject to VS Code's global `#telemetry.telemetryLevel#` setting \u2014 if that is off, nothing is collected regardless of this setting. Payloads contain no token, path, hostname, username, or account identifier. [What is collected](https://github.com/joezuchora/claudewatch/blob/main/SECURITY.md)."
         }
       }
     }
@@ -59,5 +73,21 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0"
+  },
+  "keywords": [
+    "claude",
+    "claude code",
+    "usage",
+    "quota",
+    "status bar",
+    "anthropic"
+  ],
+  "homepage": "https://github.com/joezuchora/claudewatch#readme",
+  "bugs": {
+    "url": "https://github.com/joezuchora/claudewatch/issues"
+  },
+  "galleryBanner": {
+    "color": "#1a1a19",
+    "theme": "dark"
   }
 }
